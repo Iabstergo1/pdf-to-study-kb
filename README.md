@@ -233,8 +233,7 @@ pdf-to-study-kb/
 - **扩大验证范围**：用更多不同类型的 PDF 测试流水线，特别是公式密集型和结构复杂的内容。
 - **增强切片鲁棒性**：改进 PDF 切片算法，处理跨页段落、表格、公式块的边界问题。
 - **门禁调优**：根据高难度小节的审校结果调整 review skill 的评分标准，确保能真正拦截质量问题。
-- **断点续跑**：基于 run-state 实现自动 resume，中断后从上一个未完成的小节继续。
-- **并行执行**：支持多个小节同时生成，缩短全书处理时间。
+- **断点续跑**：`run-book --resume` 应读取最近一次 run-state，只为 `not_started` 以及未超过重试次数的 `failed` 小节重新入队，并跳过 `published` / `needs_human_review` 小节。
+- **批次化并行与重试**：Python 不直接启动 Claude Code 并行执行，而是生成 batch 任务清单；多个 Claude Code 会话可按 batch 分工处理，失败小节通过 run-state attempt 计数和 `--max-revision-retry` 控制是否重新入队。
 - **成本预估**：在 `make-tasks` 阶段根据小节数量和长度估算 API 调用成本。
 - **增量更新**：支持修改单个小节后只重新生成该节，而非全书重跑。
-
