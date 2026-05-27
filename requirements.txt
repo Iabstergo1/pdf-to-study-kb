@@ -1,0 +1,7 @@
+# PDF to Study KB 依赖
+# 核心依赖
+pymupdf>=1.23.0  # PDF 解析
+pyyaml>=6.0      # YAML 处理
+
+# 测试依赖
+pytest>=7.0      # 测试框架

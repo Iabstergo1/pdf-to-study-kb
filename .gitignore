@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Local book workspaces and generated assets
+books/*
+!books/.gitkeep
+
+# Temporary files
+tmp/
+*.tmp
+*.log
+
+# OS/editor
+.DS_Store
+Thumbs.db
