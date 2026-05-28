@@ -5,6 +5,9 @@
 - init-book: 初始化书籍目录结构和最小配置
 - inventory: 分析 PDF 结构，生成报告和可选 manifest
 - extract: 按 manifest 批量生成 source-slice.md
+- plan-sections: 生成 section 拆分和标题边界候选
+- review-sections: 交互式审核 section 边界候选
+- apply-section-plan: 应用已审核 section 规划
 - status: 显示项目状态
 - validate: 校验讲义文件
 - coverage: 显示覆盖报告
@@ -42,6 +45,58 @@ def load_manifest(book_root: Path) -> dict:
 
     with open(manifest_path, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f)
+
+
+def expand_page_locator(pages: list) -> list[int]:
+    """Normalize manifest page locator.
+
+    Project docs use ``pages: [start, end]`` for an inclusive page range.
+    Longer lists are treated as explicit page numbers.
+    """
+    if not pages:
+        return []
+    pages = [int(p) for p in pages]
+    if len(pages) == 2 and pages[0] <= pages[1]:
+        return list(range(pages[0], pages[1] + 1))
+    return pages
+
+
+def load_boundary_hints(book_root: Path) -> dict:
+    """Load optional section title-boundary hints for source slicing."""
+    hints_path = book_root / "config" / "source-boundary-hints.yaml"
+    if not hints_path.exists():
+        return {}
+    with open(hints_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+    sections = data.get('sections') or {}
+    if not isinstance(sections, dict):
+        return {}
+    return sections
+
+
+def apply_boundary_hint(raw_text: str, hint: dict) -> str:
+    """Slice raw text using start/end regex from a boundary hint."""
+    import re
+
+    start_regex = hint.get('start_regex')
+    end_regex = hint.get('end_regex')
+    if not start_regex or not end_regex:
+        raise ValueError('boundary hint 缺少 start_regex 或 end_regex')
+
+    start_match = re.search(start_regex, raw_text, flags=re.MULTILINE)
+    if not start_match:
+        raise ValueError(f'未找到起点边界: {start_regex}')
+
+    end_match = re.search(end_regex, raw_text[start_match.start():], flags=re.MULTILINE)
+    if not end_match:
+        raise ValueError(f'未找到终点边界: {end_regex}')
+
+    start_pos = start_match.start()
+    end_pos = start_pos + end_match.start()
+    if end_pos <= start_pos:
+        raise ValueError('终点边界早于或等于起点边界')
+
+    return raw_text[start_pos:end_pos].strip()
 
 
 def parse_chapter_groups(book_root: Path) -> dict:
@@ -422,6 +477,7 @@ def cmd_extract(args):
 
     staging_dir = book_root / "pipeline-workspace" / "staging"
     reports_dir = book_root / "pipeline-workspace" / "reports"
+    boundary_hints = load_boundary_hints(book_root)
     failures = []
     created = 0
     skipped = 0
@@ -429,7 +485,7 @@ def cmd_extract(args):
     for section in sections:
         section_id = section['id']
         title = section.get('title', '无标题')
-        pages = section.get('source_locator', {}).get('pages', [])
+        pages = expand_page_locator(section.get('source_locator', {}).get('pages', []))
 
         # 检查 source-slice 是否已存在
         slice_dir = staging_dir / section_id
@@ -453,8 +509,20 @@ def cmd_extract(args):
         # 提取文本
         try:
             doc = fitz.open(str(pdf_path))
+            # 使用标题边界裁剪时，扩展页码范围以包含下一节标题所在页
+            extract_pages = list(pages)
+            hint = boundary_hints.get(section_id)
+            if hint and hint.get('boundary_mode') == 'title-range' and pages:
+                last_page = pages[-1]
+                if last_page < len(doc) and last_page not in extract_pages:
+                    pass  # pages already includes it
+                # 确保至少多取1页来捕获 end_regex 对应的标题
+                extended = last_page + 1
+                if extended <= len(doc) and extended not in extract_pages:
+                    extract_pages.append(extended)
+
             raw_text = ""
-            for page_num in pages:
+            for page_num in extract_pages:
                 if 1 <= page_num <= len(doc):
                     raw_text += doc[page_num - 1].get_text() + "\n"
                 else:
@@ -479,10 +547,30 @@ def cmd_extract(args):
             print(f"[FAIL] {section_id}: PDF 读取失败 - {e}")
             continue
 
+        hint = boundary_hints.get(section_id)
+        extraction_mode = "page-range"
+        boundary_hint_status = None
+        if hint and hint.get('boundary_mode') == 'title-range':
+            try:
+                raw_text = apply_boundary_hint(raw_text, hint)
+            except ValueError as e:
+                failures.append({
+                    'section_id': section_id,
+                    'title': title,
+                    'reason': f'标题边界裁剪失败: {e}',
+                })
+                print(f"[FAIL] {section_id}: 标题边界裁剪失败 - {e}")
+                continue
+            extraction_mode = "title-range"
+            boundary_hint_status = hint.get('status', 'unknown')
+
         # 判断置信度
         pages_str = ",".join(str(p) for p in pages)
-        is_continuous = len(pages) > 1 and (pages[-1] - pages[0] + 1 == len(pages))
-        if is_continuous:
+        is_continuous = bool(pages) and pages == list(range(pages[0], pages[-1] + 1))
+        if extraction_mode == "title-range":
+            confidence = "high"
+            needs_review = False
+        elif is_continuous:
             confidence = "medium"  # 纯页码切片，未做标题匹配
             needs_review = False
         else:
@@ -499,9 +587,18 @@ def cmd_extract(args):
             f'title: "{title}"',
             f'source_file: "{source_filename}"',
             f'pages: "{pages[0]}-{pages[-1]}"',
-            "extraction_mode: page-range",
+            f"expanded_pages: [{', '.join(str(p) for p in pages)}]",
+            f"extraction_mode: {extraction_mode}",
             f"extraction_confidence: {confidence}",
             f"needs_boundary_review: {'true' if needs_review else 'false'}",
+        ]
+        if hint and extraction_mode == "title-range":
+            content_parts.extend([
+                f"boundary_hint_status: {boundary_hint_status}",
+                f"start_regex: {json.dumps(hint.get('start_regex', ''), ensure_ascii=False)}",
+                f"end_regex: {json.dumps(hint.get('end_regex', ''), ensure_ascii=False)}",
+            ])
+        content_parts.extend([
             "---",
             "",
             f"# {section_id} 原文片段",
@@ -509,13 +606,13 @@ def cmd_extract(args):
             f"- 来源：{source_filename}",
             f"- 页码范围：{pages[0]}-{pages[-1]}",
             f"- 小节标题：{title}",
-            f"- 提取模式：page-range",
+            f"- 提取模式：{extraction_mode}",
             f"- 置信度：{confidence}",
             "",
             "## 原文内容",
             "",
             raw_text.strip(),
-        ]
+        ])
 
         with open(slice_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(content_parts) + '\n')
@@ -699,10 +796,10 @@ def _update_manifest_block(lines: list, section_id: str) -> tuple:
     """更新 manifest 中单个小节块的 status 和 publish_status 为 published。
 
     返回 (new_lines, status_replace_count, publish_status_replace_count)。
-    小节块以 '  - id: {section_id}' 开始，到下一个 '  - id:' 或文件末尾结束。
+    小节块以 '- id: {section_id}' 开始，到下一个 '- id:' 或文件末尾结束。
     """
     import re
-    id_pattern = re.compile(rf'^\s+- id:\s+{re.escape(section_id)}\s*$')
+    id_pattern = re.compile(rf'^\s*-\s+id:\s+{re.escape(section_id)}\s*$')
     status_pattern = re.compile(r'^(\s+)status:\s+\S+')
     publish_pattern = re.compile(r'^(\s+)publish_status:\s+\S+')
 
@@ -722,7 +819,7 @@ def _update_manifest_block(lines: list, section_id: str) -> tuple:
 
         # 已进入目标小节块
         # 遇到下一个同级 '- id:' 则结束块
-        if re.match(r'^\s+- id:\s+', stripped) and not id_pattern.match(stripped):
+        if re.match(r'^\s*-\s+id:\s+', stripped) and not id_pattern.match(stripped):
             in_block = False
             new_lines.append(line)
             continue
@@ -750,7 +847,7 @@ def _update_manifest_status_only(lines: list, section_id: str, target_status: st
     返回 (new_lines, status_replace_count)。
     """
     import re
-    id_pattern = re.compile(rf'^\s+- id:\s+{re.escape(section_id)}\s*$')
+    id_pattern = re.compile(rf'^\s*-\s+id:\s+{re.escape(section_id)}\s*$')
     status_pattern = re.compile(r'^(\s+)status:\s+\S+')
 
     new_lines = []
@@ -766,7 +863,7 @@ def _update_manifest_status_only(lines: list, section_id: str, target_status: st
             new_lines.append(line)
             continue
 
-        if re.match(r'^\s+- id:\s+', stripped) and not id_pattern.match(stripped):
+        if re.match(r'^\s*-\s+id:\s+', stripped) and not id_pattern.match(stripped):
             in_block = False
             new_lines.append(line)
             continue
@@ -1102,6 +1199,64 @@ def cmd_run_book(args):
     _cmd_run_book(args)
 
 
+def cmd_plan_sections(args):
+    """生成 section manifest 和标题边界候选方案"""
+    from section_planner import plan_sections
+
+    book_root = find_book_root(args.book)
+    planner = getattr(args, 'planner', 'deterministic')
+    provider = None
+    planner_model = None
+    if planner == 'hybrid-llm':
+        from llm_provider import create_provider, load_provider_config
+        provider_config = load_provider_config()
+        provider = create_provider(provider_config)
+        planner_model = provider_config.planner_model
+
+    result = plan_sections(
+        book_root,
+        force=getattr(args, 'force', False),
+        auto_accept_high=not getattr(args, 'no_auto_accept_high', False),
+        planner=planner,
+        provider=provider,
+        planner_model=planner_model,
+    )
+    counts = result["counts"]
+    print(f"[OK] 已生成候选 manifest: {result['manifest_candidate']}")
+    print(f"[OK] 已生成候选边界: {result['hints_candidate']}")
+    print(f"[OK] 已生成规划报告: {result['report']}")
+    print(f"planner: {planner}")
+    print(f"置信度统计: high={counts['high']}, medium={counts['medium']}, low={counts['low']}")
+
+
+def cmd_review_sections(args):
+    """交互式审核 section 边界候选"""
+    from section_planner import review_sections
+
+    book_root = find_book_root(args.book)
+    result = review_sections(
+        book_root,
+        list_only=getattr(args, 'list', False),
+        section_id=getattr(args, 'section', None),
+    )
+    print(f"[OK] 已更新 {result['updated']} 条候选: {result['path']}")
+
+
+def cmd_apply_section_plan(args):
+    """应用已审核的 section 规划候选"""
+    from section_planner import apply_section_plan
+
+    book_root = find_book_root(args.book)
+    result = apply_section_plan(
+        book_root,
+        allow_pending=getattr(args, 'allow_pending', False),
+        force=getattr(args, 'force', False),
+    )
+    print(f"[OK] 已应用 manifest: {result['manifest']}")
+    print(f"[OK] 已应用边界提示: {result['hints']}")
+    print(f"已接受边界: {result['accepted_count']}，未审核: {result['pending_count']}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="PDF to Study KB 流水线 CLI")
     subparsers = parser.add_subparsers(dest='command', help='可用命令')
@@ -1165,9 +1320,9 @@ def main():
     run_book_parser.add_argument('--book', required=True, help='书籍 ID')
     run_book_parser.add_argument('--pdf', help='PDF 文件路径（首次运行时使用）')
     run_book_parser.add_argument('--title', help='书籍标题（首次运行时使用）')
-    run_book_parser.add_argument('--executor', choices=['claude-code-queue'],
+    run_book_parser.add_argument('--executor', choices=['claude-code-queue', 'langgraph-worker'],
                                  default='claude-code-queue',
-                                 help='生成 Claude Code 任务队列')
+                                 help='执行器：claude-code-queue=生成任务队列，langgraph-worker=直接执行 LLM 图')
     run_book_parser.add_argument('--publish', choices=['accepted-only', 'manual'],
                                  default='accepted-only', help='发布策略')
     run_book_parser.add_argument('--section', help='只处理指定小节')
@@ -1175,6 +1330,29 @@ def main():
     run_book_parser.add_argument('--dry-run', action='store_true', help='只显示计划，不执行')
     run_book_parser.add_argument('--batch-size', type=int, default=5, help='每批小节数')
     run_book_parser.add_argument('--max-revision-retry', type=int, default=2, help='revise 重试次数')
+
+    # plan-sections 命令
+    plan_sections_parser = subparsers.add_parser('plan-sections', help='生成 section 拆分和边界候选')
+    plan_sections_parser.add_argument('--book', required=True, help='书籍 ID')
+    plan_sections_parser.add_argument('--force', action='store_true', help='覆盖已有候选文件')
+    plan_sections_parser.add_argument('--planner', choices=['deterministic', 'hybrid-llm'],
+                                      default='deterministic',
+                                      help='section 规划器：deterministic=标题规则，hybrid-llm=规则候选+LLM语义修正')
+    plan_sections_parser.add_argument('--no-auto-accept-high', action='store_true',
+                                      help='不自动接受 high 置信度候选')
+
+    # review-sections 命令
+    review_sections_parser = subparsers.add_parser('review-sections', help='审核 section 边界候选')
+    review_sections_parser.add_argument('--book', required=True, help='书籍 ID')
+    review_sections_parser.add_argument('--section', help='只审核指定小节')
+    review_sections_parser.add_argument('--list', action='store_true', help='只列出候选，不进入交互')
+
+    # apply-section-plan 命令
+    apply_plan_parser = subparsers.add_parser('apply-section-plan', help='应用已审核的 section 规划候选')
+    apply_plan_parser.add_argument('--book', required=True, help='书籍 ID')
+    apply_plan_parser.add_argument('--allow-pending', action='store_true',
+                                   help='允许仍有未审核中低置信度候选时应用')
+    apply_plan_parser.add_argument('--force', action='store_true', help='覆盖已有 source-boundary-hints.yaml')
 
     args = parser.parse_args()
 
@@ -1194,6 +1372,9 @@ def main():
         'extract': cmd_extract,
         'mark-reviewed': cmd_mark_reviewed,
         'run-book': cmd_run_book,
+        'plan-sections': cmd_plan_sections,
+        'review-sections': cmd_review_sections,
+        'apply-section-plan': cmd_apply_section_plan,
     }
 
     commands[args.command](args)

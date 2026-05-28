@@ -625,6 +625,7 @@ def test_extract():
             assert fm['extraction_mode'] == 'page-range'
             assert fm['extraction_confidence'] in ('low', 'medium', 'high')
             assert 'needs_boundary_review' in fm
+            assert fm['expanded_pages'] == [15, 16]
 
             body = content.split('## 原文内容\n\n')[1]
             assert len(body.strip()) > 100, "原文内容过短"
@@ -632,6 +633,106 @@ def test_extract():
             print("  [PASS] extract 生成 source-slice 格式正确")
         finally:
             _restore_monkeypatch(pipeline, orig_find, orig_load)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_expand_page_locator_range_semantics():
+    """unit: source_locator.pages 两个数字表示闭区间页码范围"""
+    from pipeline import expand_page_locator
+
+    assert expand_page_locator([15, 17]) == [15, 16, 17]
+    assert expand_page_locator([15, 15]) == [15]
+    assert expand_page_locator([15]) == [15]
+    assert expand_page_locator([15, 17, 20]) == [15, 17, 20]
+    print("  [PASS] source_locator.pages 页码范围语义正确")
+
+
+def test_apply_boundary_hint_title_range():
+    """unit: boundary hint 按标题起止裁剪，不包含相邻小节"""
+    from pipeline import apply_boundary_hint
+
+    raw = (
+        "上一节尾巴\n"
+        "1.1\n"
+        "目标小节标题\n"
+        "目标正文第一段\n"
+        "目标正文第二段\n"
+        "1.2\n"
+        "下一节标题\n"
+        "下一节正文\n"
+    )
+    hint = {
+        'start_regex': r'1\.1\s*目标小节标题',
+        'end_regex': r'1\.2\s*下一节标题',
+    }
+    result = apply_boundary_hint(raw, hint)
+
+    assert result.startswith("1.1")
+    assert "目标正文第二段" in result
+    assert "上一节尾巴" not in result
+    assert "下一节标题" not in result
+    print("  [PASS] boundary hint 标题裁剪正确")
+
+
+def test_plan_sections_generates_candidates():
+    """tmp fixture: plan-sections 生成 manifest/hints 候选和报告"""
+    from section_planner import plan_sections
+    import fitz
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        book_root = _make_tmp_book(tmp, sections=[
+            {'id': 'SEC-A', 'title': 'Alpha Section', 'pages': [1, 1], 'status': 'registered'},
+            {'id': 'SEC-B', 'title': 'Beta Section', 'pages': [1, 1], 'status': 'registered'},
+        ], skip_pdf=True)
+        pdf_path = book_root / "input" / "test.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Alpha Section\nalpha body\nBeta Section\nbeta body")
+        doc.save(str(pdf_path))
+        doc.close()
+
+        result = plan_sections(book_root, force=False)
+
+        hints = yaml.safe_load(result['hints_candidate'].read_text(encoding='utf-8'))
+        assert (book_root / "config" / "section-manifest.candidates.yaml").exists()
+        assert (book_root / "pipeline-workspace" / "reports" / "section-planning-report.md").exists()
+        assert hints['sections']['SEC-A']['confidence'] == 'high'
+        assert hints['sections']['SEC-A']['review_status'] == 'accepted'
+        assert hints['sections']['SEC-A']['start_found'] is True
+        assert hints['sections']['SEC-A']['end_found'] is True
+        print("  [PASS] plan-sections 生成候选文件和 high 置信度边界")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_apply_section_plan_writes_boundary_hints():
+    """tmp fixture: apply-section-plan 写入正式 source-boundary-hints.yaml"""
+    from section_planner import plan_sections, apply_section_plan
+    import fitz
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        book_root = _make_tmp_book(tmp, sections=[
+            {'id': 'SEC-A', 'title': 'Alpha Section', 'pages': [1, 1], 'status': 'registered'},
+            {'id': 'SEC-B', 'title': 'Beta Section', 'pages': [1, 1], 'status': 'registered'},
+        ], skip_pdf=True)
+        pdf_path = book_root / "input" / "test.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Alpha Section\nalpha body\nBeta Section\nbeta body")
+        doc.save(str(pdf_path))
+        doc.close()
+
+        plan_sections(book_root, force=False)
+        result = apply_section_plan(book_root, allow_pending=True, force=False)
+
+        hints = yaml.safe_load(result['hints'].read_text(encoding='utf-8'))
+        assert result['accepted_count'] >= 1
+        assert hints['sections']['SEC-A']['boundary_mode'] == 'title-range'
+        assert 'start_found' not in hints['sections']['SEC-A']
+        print("  [PASS] apply-section-plan 写入正式边界提示")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1195,7 +1296,9 @@ def test_run_book_dry_run_no_write():
             assert "[DRY-RUN]" in output
             assert "总小节：2" in output
             assert "已 published：1" in output
-            assert "待处理：1" in output
+            assert "可入队：0" in output
+            assert "阻塞：1" in output
+            assert "source-slice.md 不存在" in output
             assert not (book_root / "pipeline-workspace" / "runs").exists()
             assert not (book_root / "study-kb" / "Home.md").exists()
             print("  [PASS] run-book --dry-run 零写入")
@@ -1224,7 +1327,9 @@ def test_run_book_claude_code_queue_generates_tasks_and_obsidian():
         slice_dir = book_root / "pipeline-workspace" / "staging" / "SEC-B"
         slice_dir.mkdir(parents=True, exist_ok=True)
         (slice_dir / "source-slice.md").write_text(
-            "---\nsection_id: SEC-B\npages: \"3-4\"\n---\n\n## 原文内容\n测试内容\n",
+            "---\nsection_id: SEC-B\npages: \"3-4\"\nneeds_boundary_review: true\n---\n\n## 原文内容\n"
+            "这是一段足够长的测试原文，用于模拟 PDF 切片结果，确保无人值守队列不会因为内容过短而阻塞。"
+            "这里继续补充若干句正文，模拟真实 PDF 页面中的段落内容，方便测试自动化门禁只拦截异常切片。\n",
             encoding='utf-8')
 
         orig_find, orig_load = _monkeypatch_book(pipeline, book_root)
@@ -1245,11 +1350,97 @@ def test_run_book_claude_code_queue_generates_tasks_and_obsidian():
             assert "SEC-B" in output
             assert (book_root / "pipeline-workspace" / "tasks" / "SEC-B_author.json").exists()
             assert (book_root / "pipeline-workspace" / "tasks" / "SEC-B_review.json").exists()
-            assert (book_root / "pipeline-workspace" / "runs").exists()
+            runs = sorted((book_root / "pipeline-workspace" / "runs").iterdir())
+            assert runs, "未创建 run-state 目录"
+            run_dir = runs[-1]
+            assert (run_dir / "claude-code-queue.json").exists()
+            assert (run_dir / "automation-readiness.md").exists()
+            batch_file = run_dir / "batches" / "batch-001.json"
+            assert batch_file.exists(), "未生成 batch-001.json"
+            batch = json.loads(batch_file.read_text(encoding='utf-8'))
+            assert batch['sections'][0]['section_id'] == 'SEC-B'
+            assert batch['sections'][0]['author_task'].endswith('SEC-B_author.json')
             assert (book_root / "study-kb" / "Home.md").exists()
             assert (book_root / "study-kb" / "Learning-Maps" / "MOC-全书学习地图.md").exists()
             assert (book_root / "study-kb" / "Source-QA" / "小节覆盖报告.md").exists()
             print("  [PASS] run-book Claude Code 队列生成任务包、run-state 与 Obsidian 输出")
+        finally:
+            _restore_monkeypatch(pipeline, orig_find, orig_load)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_run_book_resume_generates_retry_batches_and_blockers():
+    """tmp fixture: --resume 使用 run-state，重试 failed，阻塞缺 source-slice 的小节"""
+    import pipeline
+    from run_book import cmd_run_book
+    from run_state import RunStateManager
+    from io import StringIO
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        book_root = _make_tmp_book(tmp, sections=[
+            {'id': 'SEC-A', 'title': '已发布', 'pages': [1, 2], 'status': 'published',
+             'publish_status': 'published', 'part': '第一部分：测试'},
+            {'id': 'SEC-B', 'title': '正常入队', 'pages': [3, 4], 'status': 'registered',
+             'part': '第一部分：测试'},
+            {'id': 'SEC-C', 'title': '失败重试', 'pages': [5, 6], 'status': 'registered',
+             'part': '第一部分：测试'},
+            {'id': 'SEC-D', 'title': '缺少切片', 'pages': [7, 8], 'status': 'registered',
+             'part': '第一部分：测试'},
+            {'id': 'SEC-E', 'title': '已审校待发布', 'pages': [9, 10], 'status': 'reviewed',
+             'part': '第一部分：测试'},
+        ])
+        for sid in ['SEC-B', 'SEC-C']:
+            slice_dir = book_root / "pipeline-workspace" / "staging" / sid
+            slice_dir.mkdir(parents=True, exist_ok=True)
+            (slice_dir / "source-slice.md").write_text(
+                f"---\nsection_id: {sid}\n---\n\n## 原文内容\n"
+                "这是一段足够长的测试原文，用于模拟 PDF 切片结果，确保 resume 队列可以稳定入队。"
+                "这里继续补充若干句正文，模拟真实 PDF 页面中的段落内容，方便测试自动化门禁只拦截异常切片。\n",
+                encoding='utf-8')
+
+        manifest = yaml.safe_load(
+            (book_root / "config" / "section-manifest.yaml").read_text(encoding='utf-8')
+        )
+        manager = RunStateManager(book_root)
+        run_state = manager.create_run(
+            book_id="test-book",
+            config={'executor': 'claude-code-queue', 'batch_size': 1, 'max_revision_retry': 2},
+            sections=manifest['sections'],
+        )
+        manager.update_section(run_state, 'SEC-C', 'author', 'failed', error='temporary')
+
+        orig_find, orig_load = _monkeypatch_book(pipeline, book_root)
+        try:
+            old_stdout = sys.stdout
+            sys.stdout = captured = StringIO()
+            try:
+                args = argparse.Namespace(
+                    book='test-book', pdf=None, title=None, executor='claude-code-queue',
+                    publish='accepted-only', section=None, resume=True,
+                    dry_run=False, batch_size=1, max_revision_retry=2)
+                cmd_run_book(args)
+            finally:
+                sys.stdout = old_stdout
+            output = captured.getvalue()
+
+            assert "[RESUME]" in output
+            assert "可入队 2 个小节" in output
+            assert "阻塞 1 个小节" in output
+            assert (book_root / "pipeline-workspace" / "tasks" / "SEC-B_author.json").exists()
+            assert (book_root / "pipeline-workspace" / "tasks" / "SEC-C_author.json").exists()
+            assert not (book_root / "pipeline-workspace" / "tasks" / "SEC-D_author.json").exists()
+
+            batch_1 = json.loads((run_state.run_dir / "batches" / "batch-001.json").read_text(encoding='utf-8'))
+            batch_2 = json.loads((run_state.run_dir / "batches" / "batch-002.json").read_text(encoding='utf-8'))
+            assert batch_1['sections'][0]['section_id'] == 'SEC-B'
+            assert batch_2['sections'][0]['section_id'] == 'SEC-C'
+
+            readiness = (run_state.run_dir / "automation-readiness.md").read_text(encoding='utf-8')
+            assert "SEC-D: source-slice.md 不存在" in readiness
+            assert "SEC-E: 已审校待发布" in readiness
+            print("  [PASS] run-book --resume 生成 retry batch、阻塞报告和待发布清单")
         finally:
             _restore_monkeypatch(pipeline, orig_find, orig_load)
     finally:
@@ -1276,7 +1467,7 @@ def test_run_book_rejects_non_claude_code_executor():
                 cmd_run_book(args)
                 assert False, "非 Claude Code executor 应被拒绝"
             except SystemExit as e:
-                assert "仅支持 --executor claude-code-queue" in str(e)
+                assert "仅支持 --executor claude-code-queue 或 langgraph-worker" in str(e)
             assert not (book_root / "study-kb" / "Home.md").exists()
             print("  [PASS] run-book 拒绝非 Claude Code executor 且不写 Obsidian 输出")
         finally:
@@ -1307,6 +1498,10 @@ if __name__ == '__main__':
     test_inventory()
     test_make_tasks()
     test_extract()
+    test_expand_page_locator_range_semantics()
+    test_apply_boundary_hint_title_range()
+    test_plan_sections_generates_candidates()
+    test_apply_section_plan_writes_boundary_hints()
     test_extract_missing_pages()
     test_extract_no_overwrite()
     test_extract_force()
@@ -1325,6 +1520,7 @@ if __name__ == '__main__':
     test_obsidian_output_generation()
     test_run_book_dry_run_no_write()
     test_run_book_claude_code_queue_generates_tasks_and_obsidian()
+    test_run_book_resume_generates_retry_batches_and_blockers()
     test_run_book_rejects_non_claude_code_executor()
 
     print("=" * 50)

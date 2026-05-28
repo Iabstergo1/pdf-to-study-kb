@@ -34,7 +34,8 @@
             "properties": {
               "pages": {
                 "type": "array",
-                "items": { "type": "integer" }
+                "items": { "type": "integer" },
+                "description": "页码定位。两个整数表示闭区间页码范围 [start, end]；三个及以上整数表示显式页码列表。"
               }
             },
             "required": ["pages"]

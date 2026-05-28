@@ -90,10 +90,7 @@ class RunStateManager:
         section_states = {}
         for section in sections:
             section_id = section["id"]
-            status = "published" if (
-                section.get("status") == "published"
-                or section.get("publish_status") == "published"
-            ) else "not_started"
+            status = self._status_from_manifest(section)
             section_states[section_id] = SectionState(
                 section_id=section_id,
                 status=status,
@@ -123,7 +120,10 @@ class RunStateManager:
         runs_root = (Path(book_root) / "pipeline-workspace" / "runs") if book_root else self.runs_root
         if not runs_root.exists():
             return None
-        candidates = [p for p in runs_root.iterdir() if p.is_dir() and (p / "run-state.yaml").exists()]
+        candidates = sorted(
+            p for p in runs_root.iterdir()
+            if p.is_dir() and (p / "run-state.yaml").exists()
+        )
         if not candidates:
             return None
         return self.load_run(candidates[-1].name, runs_root.parent.parent)
@@ -181,6 +181,46 @@ class RunStateManager:
         }
         history_item.update(kwargs)
         state.history.append(history_item)
+        run_state.progress = self.calculate_progress(run_state)
+        self.save(run_state)
+
+    def sync_with_manifest(self, run_state: RunState, sections: list[dict[str, Any]]):
+        """Refresh stable section states from the current manifest.
+
+        The manifest remains the source of truth for states produced by
+        deterministic pipeline steps, such as reviewed/published. Retry attempt
+        counts stay in run-state.
+        """
+        max_attempt = int(run_state.config.get("max_revision_retry", 0))
+        seen = set()
+        for section in sections:
+            section_id = section["id"]
+            seen.add(section_id)
+            target_status = self._status_from_manifest(section)
+            state = run_state.section_states.get(section_id)
+            if state is None:
+                run_state.section_states[section_id] = SectionState(
+                    section_id=section_id,
+                    status=target_status,
+                    current_attempt=0,
+                    max_attempt=max_attempt,
+                )
+                continue
+
+            state.max_attempt = max_attempt
+            if target_status in {"published", "reviewed", "needs_human_review"}:
+                state.status = target_status
+            elif target_status == "failed" and state.status not in IN_PROGRESS_STATUSES:
+                state.status = "failed"
+            elif target_status == "not_started" and state.status in {
+                "reviewed", "published", "needs_human_review",
+            }:
+                state.status = "not_started"
+
+        for section_id in list(run_state.section_states):
+            if section_id not in seen:
+                del run_state.section_states[section_id]
+
         run_state.progress = self.calculate_progress(run_state)
         self.save(run_state)
 
@@ -245,3 +285,17 @@ class RunStateManager:
             suffix += 1
             run_id = f"{base}-{suffix:02d}"
         return run_id
+
+    def _status_from_manifest(self, section: dict[str, Any]) -> str:
+        if (
+            section.get("status") == "published"
+            or section.get("publish_status") == "published"
+        ):
+            return "published"
+        status = section.get("status", "registered")
+        if status in {
+            "reviewed", "failed", "needs_human_review",
+            "authoring", "validating", "reviewing", "publishing",
+        }:
+            return status
+        return "not_started"

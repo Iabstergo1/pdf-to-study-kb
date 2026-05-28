@@ -2,6 +2,7 @@
 # 核心依赖
 pymupdf>=1.23.0  # PDF 解析
 pyyaml>=6.0      # YAML 处理
+langgraph>=0.2.0 # 有状态 LLM 流水线（langgraph-worker）
 
 # 测试依赖
 pytest>=7.0      # 测试框架
