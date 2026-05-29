@@ -1,16 +1,25 @@
 ---
-id: {{id}}
+id: {{unit_id}}
 type: section-lesson
 source_title: {{source_title}}
 source_locator:
   pages: {{pages}}
+  headings: {{headings}}
 book_order: "{{book_order}}"
+chapter: "{{chapter}}"
 importance: {{importance}}
 difficulty: {{difficulty}}
-personal_kb_relevance: {{personal_kb_relevance}}
 formula_risk: {{formula_risk}}
 review_status: draft
 generation_stage: draft
+status: draft
+concepts: {{concepts}}
+symbols: {{symbols}}
+depends_on: {{depends_on}}
+source_pdf: {{source_pdf}}
+source_pages: {{source_pages}}
+risk_flags: {{risk_flags}}
+managed_by: pipeline
 ---
 
 # {{title}}
