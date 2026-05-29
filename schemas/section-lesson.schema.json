@@ -1,31 +1,40 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Section Lesson",
-  "description": "小节学习讲义",
+  "description": "单元学习讲义",
   "type": "object",
   "properties": {
     "frontmatter": {
       "type": "object",
       "properties": {
-        "id": { "type": "string" },
+        "id": { "type": "string", "description": "unit_id" },
         "type": { "type": "string", "const": "section-lesson" },
         "source_title": { "type": "string" },
         "source_locator": {
           "type": "object",
           "properties": {
-            "pages": { "type": "array", "items": { "type": "integer" } }
+            "pages": { "type": "array", "items": { "type": "integer" } },
+            "headings": { "type": "array", "items": { "type": "string" } }
           },
           "required": ["pages"]
         },
-        "book_order": { "type": "string" },
+        "book_order": { "type": "string", "description": "章节序号，如 2.3" },
+        "chapter": { "type": "string", "description": "所属章节" },
         "importance": { "type": "string", "enum": ["A", "B", "C"] },
         "difficulty": { "type": "integer", "minimum": 1, "maximum": 5 },
-        "personal_kb_relevance": { "type": "string", "enum": ["high", "medium", "low"] },
         "formula_risk": { "type": "string", "enum": ["low", "medium", "high"] },
         "review_status": { "type": "string", "enum": ["draft", "reviewed", "accepted"] },
-        "generation_stage": { "type": "string", "enum": ["draft", "reviewed", "published"] }
+        "generation_stage": { "type": "string", "enum": ["draft", "reviewed", "published"] },
+        "status": { "type": "string", "enum": ["draft", "reviewed", "published"], "description": "Dataview 用状态字段" },
+        "concepts": { "type": "array", "items": { "type": "string" }, "description": "本 unit 涉及的核心概念" },
+        "symbols": { "type": "array", "items": { "type": "string" }, "description": "本 unit 涉及的符号" },
+        "depends_on": { "type": "array", "items": { "type": "string" }, "description": "依赖的 unit_id" },
+        "source_pdf": { "type": "string", "description": "来源 PDF 文件名" },
+        "source_pages": { "type": "array", "items": { "type": "integer" }, "description": "来源页码（与 source_locator.pages 一致）" },
+        "risk_flags": { "type": "array", "items": { "type": "string" }, "description": "风险标记" },
+        "managed_by": { "type": "string", "const": "pipeline", "description": "标识为流水线管理文件" }
       },
-      "required": ["id", "type", "source_title", "source_locator", "book_order", "importance", "difficulty", "review_status"]
+      "required": ["id", "type", "source_title", "source_locator", "book_order", "chapter", "importance", "difficulty", "formula_risk", "review_status", "status", "managed_by"]
     },
     "sections": {
       "type": "object",

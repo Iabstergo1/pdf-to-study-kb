@@ -3,6 +3,10 @@
 pymupdf>=1.23.0  # PDF 解析
 pyyaml>=6.0      # YAML 处理
 langgraph>=0.2.0 # 有状态 LLM 流水线（langgraph-worker）
+langgraph-checkpoint-sqlite>=3.0.1 # LangGraph SqliteSaver checkpoint
+
+# 可选：高公式页 OCR。Surya 2 Python API 依赖 >=0.20.0；未安装时高公式页进入 Review-Queue 人工处理。
+surya-ocr>=0.20.0
 
 # 测试依赖
 pytest>=7.0      # 测试框架
