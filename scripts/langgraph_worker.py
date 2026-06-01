@@ -11,10 +11,12 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypedDict
 
 import yaml
 
+import business_db
+import memory_store
 from llm_provider import create_provider, load_provider_config
 from validate_section_lesson import validate_section_lesson
 
@@ -25,6 +27,404 @@ class WorkerConfig:
     min_source_chars: int = 50
     author_model: str | None = None
     review_model: str | None = None
+
+
+class UnitGraphState(TypedDict, total=False):
+    run_id: str
+    book_id: str
+    unit_id: str
+    unit: dict[str, Any]
+    context: dict[str, Any]
+    memory: dict[str, Any]
+    draft: str
+    validation: dict[str, Any]
+    review_decision: dict[str, Any]
+    review_report: str
+    revise_count: int
+    status: str
+    risk_flags: list[str]
+    errors: list[str]
+    review_queue_reason: str
+    budget_result: dict[str, Any]
+    pause_reason: str
+
+
+@dataclass
+class UnitWorkerConfig:
+    max_revision_retry: int = 3
+    author_model: str | None = None
+    review_model: str | None = None
+    max_unit_input_tokens: int = 200000
+    max_unit_output_tokens: int = 8000
+    max_book_tokens: int = 10000000
+    max_book_cost: float = 1000.0
+
+
+@dataclass
+class RuntimeDeps:
+    provider: Any
+    provider_config: Any
+    config: UnitWorkerConfig
+    pdf_profile: dict[str, Any]
+    memory: dict[str, Any] | None = None
+    prepare_context_func: Callable[[Path, dict[str, Any], dict[str, Any]], dict[str, Any]] | None = None
+    run_estimate: dict[str, float | int] | None = None
+
+
+def invoke_unit_graph(
+    book_root: Path,
+    run_id: str,
+    book_id: str,
+    unit: dict[str, Any],
+    deps: RuntimeDeps,
+) -> dict[str, Any]:
+    thread_id = f"{run_id}:{unit['unit_id']}"
+    checkpoint_path = book_root / "pipeline-workspace" / "checkpoints" / "langgraph.sqlite"
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    business_db.start_run(book_root, run_id, book_id)
+    initial_state: UnitGraphState = {
+        "run_id": run_id,
+        "book_id": book_id,
+        "unit_id": unit["unit_id"],
+        "unit": unit,
+        "revise_count": 0,
+        "risk_flags": list(unit.get("risk_flags", [])),
+        "errors": [],
+        "memory": deps.memory or memory_store.new_memory(),
+    }
+    with _sqlite_checkpointer(checkpoint_path) as checkpointer:
+        checkpointer.setup()
+        graph = build_unit_graph(book_root, deps).compile(checkpointer=checkpointer)
+        return graph.invoke(
+            initial_state,
+            config={"configurable": {"thread_id": thread_id}},
+        )
+
+
+def prepare_context(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
+    if deps.prepare_context_func is not None:
+        context = deps.prepare_context_func(book_root, state["unit"], deps.pdf_profile)
+    else:
+        from unit_context import prepare_unit_context
+
+        context = prepare_unit_context(book_root, state["unit"], deps.pdf_profile)
+    risk_flags = sorted(set(state.get("risk_flags", []) + context.get("risk_flags", [])))
+    business_db.record_event(book_root, state["run_id"], state["unit_id"], "prepare_context", "ok", {
+        "block_publish": context.get("block_publish", False),
+        "risk_flags": risk_flags,
+    })
+    return {"context": context, "risk_flags": risk_flags}
+
+
+def enforce_unit_budget(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
+    from cost_guard import enforce_budget, estimate_unit_tokens
+
+    unit_estimate = estimate_unit_tokens(
+        state.get("context", {}),
+        state.get("memory", {}),
+        deps.config.max_unit_output_tokens,
+    )
+    run_estimate = deps.run_estimate or {"tokens": 0, "cost": 0.0}
+    result = enforce_budget(unit_estimate, run_estimate, deps.config)
+    business_db.record_event(book_root, state["run_id"], state["unit_id"], "cost_guard", "ok" if result["allowed"] else "blocked", {
+        "unit_estimate": unit_estimate,
+        "run_estimate": run_estimate,
+        "result": result,
+    })
+    return result
+
+
+def generate_note(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
+    response = deps.provider.chat_json(
+        system="你是 semantic unit 学习讲义作者。只输出 JSON，字段 draft 为完整 Markdown。",
+        user=yaml.dump({
+            "unit": state["unit"],
+            "context": state["context"],
+            "memory": state.get("memory", {}),
+        }, allow_unicode=True, sort_keys=False),
+        model=deps.config.author_model or getattr(deps.provider_config, "model", None),
+    )
+    draft = response.get("draft") or response.get("content")
+    if not isinstance(draft, str) or not draft.strip():
+        raise ValueError("author 输出缺少 draft")
+    business_db.record_model_call(
+        book_root,
+        state["run_id"],
+        state["unit_id"],
+        "generate_note",
+        getattr(deps.provider_config, "provider", "unknown"),
+        deps.config.author_model or getattr(deps.provider_config, "model", ""),
+    )
+    return {"draft": draft, "status": "drafted"}
+
+
+def verify_evidence(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
+    from evidence_verifier import verify_note
+
+    validation = verify_note(state.get("draft", ""), state.get("context", {}))
+    risk_flags = sorted(set(state.get("risk_flags", []) + validation.get("risk_flags", [])))
+    validation = {**validation, "risk_flags": risk_flags, "passed": not set(risk_flags).intersection({
+        "formula_loss_risk",
+        "screenshot_ocr_failed",
+        "evidence_missing",
+    })}
+    business_db.record_event(book_root, state["run_id"], state["unit_id"], "verify_evidence", "ok", validation)
+    return {"validation": validation, "risk_flags": risk_flags}
+
+
+def review_note(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
+    response = deps.provider.chat_json(
+        system="你是 semantic unit 审校员。只输出 JSON，包含 decision 对象和 report Markdown。",
+        user=yaml.dump({
+            "unit": state["unit"],
+            "context": state["context"],
+            "draft": state["draft"],
+            "validation": state.get("validation", {}),
+        }, allow_unicode=True, sort_keys=False),
+        model=deps.config.review_model or getattr(deps.provider_config, "review_model", None),
+    )
+    from review_gate import apply_review_gate
+
+    decision = _normalize_unit_decision(response.get("decision") or response, state["unit_id"])
+    report = response.get("report") or response.get("review_report") or "# Review\n\n未提供审校报告"
+    decision = apply_review_gate(decision, report)
+    risk_flags = sorted(set(state.get("risk_flags", []) + decision.get("risk_flags", [])))
+    business_db.record_model_call(
+        book_root,
+        state["run_id"],
+        state["unit_id"],
+        "review_note",
+        getattr(deps.provider_config, "provider", "unknown"),
+        deps.config.review_model or getattr(deps.provider_config, "review_model", ""),
+    )
+    return {"review_decision": decision, "review_report": report, "risk_flags": risk_flags}
+
+
+def revise_note(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
+    response = deps.provider.chat_json(
+        system="你是 semantic unit 讲义修订员。只输出 JSON，字段 draft 为修订后的完整 Markdown。",
+        user=yaml.dump({
+            "unit": state["unit"],
+            "draft": state["draft"],
+            "review_decision": state["review_decision"],
+            "review_report": state.get("review_report", ""),
+        }, allow_unicode=True, sort_keys=False),
+        model=deps.config.author_model or getattr(deps.provider_config, "model", None),
+    )
+    draft = response.get("draft") or response.get("content")
+    if not isinstance(draft, str) or not draft.strip():
+        raise ValueError("revise 输出缺少 draft")
+    business_db.record_model_call(
+        book_root,
+        state["run_id"],
+        state["unit_id"],
+        "revise_note",
+        getattr(deps.provider_config, "provider", "unknown"),
+        deps.config.author_model or getattr(deps.provider_config, "model", ""),
+    )
+    return {"draft": draft, "revise_count": state.get("revise_count", 0) + 1}
+
+
+def update_memory(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
+    memory = memory_store.update_memory(
+        book_root,
+        state["run_id"],
+        state["unit_id"],
+        state.get("memory", memory_store.new_memory()),
+        {
+            "summary": state["draft"][:500],
+            "concepts": [],
+            "symbols": [],
+            "evidence": [],
+        },
+    )
+    business_db.record_event(book_root, state["run_id"], state["unit_id"], "update_memory", "ok", {})
+    return {"memory": memory}
+
+
+def publish_note(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
+    unit_id = state["unit_id"]
+    staging_dir = book_root / "pipeline-workspace" / "staging" / unit_id
+    review_dir = book_root / "pipeline-workspace" / "reviews" / unit_id
+    lesson_dir = book_root / "study-kb" / "Section-Lessons"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    review_dir.mkdir(parents=True, exist_ok=True)
+    lesson_dir.mkdir(parents=True, exist_ok=True)
+    (staging_dir / "section-lesson-draft.md").write_text(state["draft"], encoding="utf-8")
+    (review_dir / "review-decision.yaml").write_text(
+        yaml.dump(state["review_decision"], allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    (review_dir / "review-report.md").write_text(state.get("review_report", ""), encoding="utf-8")
+    (lesson_dir / f"{unit_id}.md").write_text(state["draft"], encoding="utf-8")
+    business_db.record_event(book_root, state["run_id"], unit_id, "publish_note", "ok", {})
+    return {"status": "published"}
+
+
+def route_to_review_queue(book_root: Path, state: UnitGraphState, reason: str) -> dict[str, Any]:
+    unit_id = state["unit_id"]
+    review_queue_dir = book_root / "study-kb" / "Review-Queue"
+    review_queue_dir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "---",
+        "type: review-queue",
+        f"unit_id: {unit_id}",
+        f"reason: {reason}",
+        "managed_by: pipeline",
+        "---",
+        "",
+        f"# Review Queue: {unit_id}",
+        "",
+        f"- reason: {reason}",
+        f"- risk_flags: {state.get('risk_flags', [])}",
+    ]
+    (review_queue_dir / f"{unit_id}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    business_db.record_event(book_root, state["run_id"], unit_id, "route_to_review_queue", reason, {
+        "risk_flags": state.get("risk_flags", []),
+    })
+    state["status"] = "needs_human_review"
+    state["review_queue_reason"] = reason
+    return dict(state)
+
+
+def _sqlite_checkpointer(checkpoint_path: Path):
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    return SqliteSaver.from_conn_string(str(checkpoint_path))
+
+
+def build_unit_graph(book_root: Path, deps: RuntimeDeps):
+    from langgraph.graph import END, StateGraph
+
+    builder = StateGraph(UnitGraphState)
+    builder.add_node("prepare_context", lambda state: prepare_context(book_root, state, deps))
+    builder.add_node("cost_guard", lambda state: cost_guard_node(book_root, state, deps))
+    builder.add_node("generate_note", lambda state: generate_note(book_root, state, deps))
+    builder.add_node("verify_evidence", lambda state: verify_evidence(book_root, state, deps))
+    builder.add_node("review_note", lambda state: review_note(book_root, state, deps))
+    builder.add_node("revise_note", lambda state: revise_note(book_root, state, deps))
+    builder.add_node("update_memory", lambda state: update_memory(book_root, state, deps))
+    builder.add_node("publish_note", lambda state: publish_note(book_root, state, deps))
+    builder.add_node(
+        "route_to_review_queue",
+        lambda state: route_to_review_queue(book_root, state, reason=_auto_review_queue_reason(state)),
+    )
+
+    builder.set_entry_point("prepare_context")
+    builder.add_conditional_edges(
+        "prepare_context",
+        route_after_prepare_context,
+        {"generate": "cost_guard", "review_queue": "route_to_review_queue"},
+    )
+    builder.add_conditional_edges(
+        "cost_guard",
+        route_after_cost_guard,
+        {"generate": "generate_note", "review_queue": "route_to_review_queue", "paused": END},
+    )
+    builder.add_edge("generate_note", "verify_evidence")
+    builder.add_conditional_edges(
+        "verify_evidence",
+        route_after_verify_evidence,
+        {"review": "review_note", "review_queue": "route_to_review_queue"},
+    )
+    builder.add_conditional_edges(
+        "review_note",
+        route_after_review,
+        {"accept": "update_memory", "revise": "revise_note", "review_queue": "route_to_review_queue"},
+    )
+    builder.add_edge("revise_note", "verify_evidence")
+    builder.add_edge("update_memory", "publish_note")
+    builder.add_edge("publish_note", END)
+    builder.add_edge("route_to_review_queue", END)
+    return builder
+
+
+def cost_guard_node(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
+    budget = enforce_unit_budget(book_root, state, deps)
+    if budget.get("allowed"):
+        return {"budget_result": budget}
+    if budget.get("scope") == "book":
+        business_db.finish_run(book_root, state["run_id"], "paused")
+        business_db.record_event(book_root, state["run_id"], state["unit_id"], "cost_guard", "paused", budget)
+        return {"budget_result": budget, "status": "paused", "pause_reason": budget["reason"]}
+    return {"budget_result": budget, "review_queue_reason": budget["reason"]}
+
+
+def route_after_prepare_context(state: UnitGraphState) -> str:
+    if state.get("context", {}).get("block_publish"):
+        return "review_queue"
+    return "generate"
+
+
+def route_after_cost_guard(state: UnitGraphState) -> str:
+    budget = state.get("budget_result", {"allowed": True})
+    if budget.get("allowed"):
+        return "generate"
+    if budget.get("scope") == "book":
+        return "paused"
+    return "review_queue"
+
+
+def route_after_verify_evidence(state: UnitGraphState) -> str:
+    blocking = {"formula_loss_risk", "screenshot_ocr_failed", "evidence_missing"}
+    if blocking.intersection(set(state.get("risk_flags", []))):
+        return "review_queue"
+    return "review"
+
+
+def route_after_review(state: UnitGraphState) -> str:
+    blocking = {"formula_loss_risk", "screenshot_ocr_failed", "evidence_missing"}
+    if blocking.intersection(set(state.get("risk_flags", []))):
+        return "review_queue"
+    decision = state.get("review_decision", {}).get("decision", "reject")
+    confidence = state.get("review_decision", {}).get("confidence", "low")
+    if decision == "accept" and confidence != "low":
+        return "accept"
+    if decision == "revise" and confidence != "low" and state.get("revise_count", 0) < 3:
+        return "revise"
+    return "review_queue"
+
+
+def _auto_review_queue_reason(state: UnitGraphState) -> str:
+    if state.get("review_queue_reason"):
+        return state["review_queue_reason"]
+    if state.get("context", {}).get("block_publish"):
+        return "context_blocked"
+    if route_after_verify_evidence(state) == "review_queue":
+        return _first_blocking_reason(state)
+    return _review_queue_reason_after_review(state)
+
+
+def _first_blocking_reason(state: UnitGraphState) -> str:
+    for reason in ["formula_loss_risk", "screenshot_ocr_failed", "evidence_missing"]:
+        if reason in state.get("risk_flags", []):
+            return reason
+    return "validation_failed"
+
+
+def _review_queue_reason_after_review(state: UnitGraphState) -> str:
+    if state.get("review_decision", {}).get("decision") == "revise" and state.get("revise_count", 0) >= 3:
+        return "max_revise_attempts"
+    return "review_rejected"
+
+
+def _normalize_unit_decision(raw: dict[str, Any], unit_id: str) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("review decision 必须是 JSON 对象")
+    decision = dict(raw)
+    decision.setdefault("unit_id", unit_id)
+    decision.setdefault("reviewer", "langgraph-worker")
+    decision.setdefault("review_date", date.today().isoformat())
+    decision.setdefault("decision", "reject")
+    decision.setdefault("confidence", "low")
+    decision.setdefault("required_fixes", [])
+    decision.setdefault("warnings", [])
+    decision.setdefault("notes", "")
+    if decision["decision"] not in {"accept", "revise", "reject"}:
+        decision["decision"] = "reject"
+    if decision["confidence"] not in {"high", "medium", "low"}:
+        decision["confidence"] = "low"
+    return decision
 
 
 def run_langgraph_worker(book_root: Path, args, run_state, plan: dict[str, Any], manager):

@@ -1,8 +1,11 @@
 """extract_source_slice.py 参数化泛化的单元测试"""
+import pytest
 import unittest
 import sys
 import os
 import tempfile
+
+pytestmark = pytest.mark.legacy
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 

@@ -173,3 +173,17 @@ books/<book-id>/
 ## 旧代码
 
 旧的 `extract`、`source-slice`、Claude Code 队列相关代码已归档到 `scripts/legacy/`。主流程使用新的语义单元规划 + LangGraph 路径。
+
+## Agent skills
+
+### Issue tracker
+
+Work is tracked in GitHub Issues for `Iabstergo1/pdf-to-study-kb`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default triage label vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repo uses a single-context domain layout. Migration context is anchored by `docs/semantic-pdf-to-obsidian-implementation-guide.md`; future domain terms should live in `CONTEXT.md` and ADRs in `docs/adr/`. See `docs/agents/domain.md`.

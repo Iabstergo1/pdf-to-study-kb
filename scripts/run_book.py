@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from obsidian_output import ObsidianOutputGenerator
 from run_state import RunStateManager
@@ -25,9 +28,13 @@ def cmd_run_book(args):
 
     _validate_args(args)
     book_root = pipeline.find_book_root(args.book)
+    config = _config_from_args(args)
+    if config.executor == "langgraph-worker" and _semantic_plan_path(book_root).exists():
+        _cmd_run_semantic_book(args, book_root, config)
+        return
+
     manifest = pipeline.load_manifest(book_root)
     sections = _selected_sections(manifest, getattr(args, "section", None))
-    config = _config_from_args(args)
     manager = RunStateManager(book_root)
 
     if getattr(args, "resume", False):
@@ -120,6 +127,111 @@ def _config_from_args(args) -> RunBookConfig:
         batch_size=getattr(args, "batch_size", 5),
         max_revision_retry=getattr(args, "max_revision_retry", 2),
     )
+
+
+def _semantic_plan_path(book_root: Path) -> Path:
+    return book_root / "config" / "semantic-unit-plan.yaml"
+
+
+def _cmd_run_semantic_book(args, book_root: Path, config: RunBookConfig) -> None:
+    plan = _load_yaml(_semantic_plan_path(book_root))
+    units = _selected_units(plan, getattr(args, "section", None))
+    queue_plan = _build_semantic_queue_plan(units)
+    if getattr(args, "dry_run", False):
+        _print_semantic_dry_run(args, units, queue_plan, config)
+        return
+
+    from langgraph_worker import RuntimeDeps, UnitWorkerConfig, invoke_unit_graph
+    from llm_provider import create_provider, load_provider_config
+    from memory_store import new_memory
+    from obsidian_indexes import build_obsidian_indexes
+
+    provider_config = load_provider_config()
+    provider = create_provider(provider_config)
+    pdf_profile = _load_yaml(book_root / "config" / "pdf-profile.yaml")
+    run_id = "run-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    memory = new_memory()
+    unit_config = UnitWorkerConfig(
+        max_revision_retry=config.max_revision_retry,
+        author_model=provider_config.model,
+        review_model=provider_config.review_model,
+    )
+    results = []
+    for unit in queue_plan["queue"]:
+        deps = RuntimeDeps(
+            provider=provider,
+            provider_config=provider_config,
+            config=unit_config,
+            pdf_profile=pdf_profile,
+            memory=memory,
+            run_estimate={"tokens": 0, "cost": 0.0},
+        )
+        result = invoke_unit_graph(book_root, run_id, args.book, unit, deps)
+        memory = result.get("memory", memory)
+        results.append({"unit_id": unit["unit_id"], "status": result.get("status")})
+
+    build_obsidian_indexes(book_root, plan=plan, memory=memory)
+    summary_path = book_root / "pipeline-workspace" / "runs" / run_id / "semantic-run-summary.json"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps({
+        "run_id": run_id,
+        "book_id": args.book,
+        "results": results,
+        "blocked": queue_plan["blocked"],
+        "skipped": queue_plan["skipped"],
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[OK] semantic run summary: {summary_path}")
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def _selected_units(plan: dict[str, Any], unit_id: str | None) -> list[dict[str, Any]]:
+    units = plan.get("units", [])
+    if not unit_id:
+        return units
+    unit = next((item for item in units if item.get("unit_id") == unit_id), None)
+    if unit is None:
+        raise SystemExit(f"错误：未找到 unit {unit_id}")
+    return [unit]
+
+
+def _build_semantic_queue_plan(units: list[dict[str, Any]]) -> dict[str, Any]:
+    queue = []
+    blocked = []
+    skipped = []
+    for unit in units:
+        unit_id = unit["unit_id"]
+        if not unit.get("include", True):
+            skipped.append({"unit_id": unit_id, "reason": unit.get("skip_reason", "include=false")})
+            continue
+        if unit.get("review_status") not in {"accepted", "edited"}:
+            blocked.append({"unit_id": unit_id, "reason": f"review_status={unit.get('review_status')}"})
+            continue
+        queue.append(unit)
+    return {"queue": queue, "blocked": blocked, "skipped": skipped}
+
+
+def _print_semantic_dry_run(args, units: list[dict[str, Any]], plan: dict[str, Any], config: RunBookConfig) -> None:
+    batch_size = config.batch_size
+    print(f"[DRY-RUN] 书籍：{args.book}")
+    print(f"[DRY-RUN] 总 semantic units：{len(units)}")
+    print(f"[DRY-RUN] 可执行 units：{len(plan['queue'])}")
+    print(f"[DRY-RUN] 阻塞 units：{len(plan['blocked'])}")
+    print(f"[DRY-RUN] 跳过 units：{len(plan['skipped'])}")
+    print(f"[DRY-RUN] executor: {config.executor}")
+    print("[DRY-RUN]")
+    print("[DRY-RUN] 将按以下 unit 顺序处理：")
+    for idx, batch in enumerate(_batches(plan["queue"], batch_size), start=1):
+        ids = ", ".join(unit["unit_id"] for unit in batch)
+        print(f"[DRY-RUN]   batch {idx}: {ids}")
+    if not plan["queue"]:
+        print("[DRY-RUN]   无待处理 unit")
+    if plan["blocked"]:
+        print("[DRY-RUN] 阻塞 unit 清单：")
+        for item in plan["blocked"]:
+            print(f"[DRY-RUN]   {item['unit_id']}: {item['reason']}")
 
 
 def _selected_sections(manifest: dict[str, Any], section_id: str | None) -> list[dict[str, Any]]:

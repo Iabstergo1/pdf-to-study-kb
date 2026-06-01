@@ -3,6 +3,10 @@
 
 统一入口，支持以下命令：
 - init-book: 初始化书籍目录结构和最小配置
+- profile-pdf: 分析 PDF TOC、页码、风险和每页摘要
+- plan-units: 生成 semantic-unit-plan.candidates.yaml
+- validate-unit-plan: 校验 semantic unit plan 覆盖率
+- review-unit-plan: 人工审批 semantic unit plan
 - inventory: 分析 PDF 结构，生成报告和可选 manifest
 - extract: 按 manifest 批量生成 source-slice.md
 - plan-sections: 生成 section 拆分和标题边界候选
@@ -163,10 +167,22 @@ def _ensure_dirs(book_root: Path):
         "pipeline-workspace/reports",
         "pipeline-workspace/staging",
         "pipeline-workspace/reviews",
+        "pipeline-workspace/runs",
+        "pipeline-workspace/checkpoints",
+        "pipeline-workspace/state",
+        "pipeline-workspace/events",
         "pipeline-workspace/tasks",
         "study-kb/Section-Lessons",
+        "study-kb/Concept-Cards",
+        "study-kb/Glossary",
+        "study-kb/Symbols",
+        "study-kb/Formula-Ledger",
+        "study-kb/Claims",
+        "study-kb/Questions",
+        "study-kb/Review-Queue",
         "study-kb/Learning-Maps",
         "study-kb/Source-QA",
+        "study-kb/Dashboards",
     ]
     for d in dirs:
         (book_root / d).mkdir(parents=True, exist_ok=True)
@@ -1199,6 +1215,34 @@ def cmd_run_book(args):
     _cmd_run_book(args)
 
 
+def cmd_profile_pdf(args):
+    """转发到 PDF profile 模块。"""
+    from pdf_profile import profile_pdf_command
+
+    profile_pdf_command(find_book_root(args.book), force=getattr(args, "force", False))
+
+
+def cmd_plan_units(args):
+    """转发到 semantic unit planning 模块。"""
+    from unit_plan import plan_units_command
+
+    plan_units_command(find_book_root(args.book), force=getattr(args, "force", False))
+
+
+def cmd_validate_unit_plan(args):
+    """转发到 semantic unit plan 校验模块。"""
+    from unit_plan import validate_unit_plan_command
+
+    validate_unit_plan_command(find_book_root(args.book))
+
+
+def cmd_review_unit_plan(args):
+    """转发到 semantic unit plan 人工审批模块。"""
+    from unit_plan import review_unit_plan_command
+
+    review_unit_plan_command(find_book_root(args.book), list_only=getattr(args, "list", False))
+
+
 def cmd_plan_sections(args):
     """生成 section manifest 和标题边界候选方案"""
     from section_planner import plan_sections
@@ -1302,6 +1346,25 @@ def main():
     inventory_parser.add_argument('--write', action='store_true', help='写入 section-manifest.yaml')
     inventory_parser.add_argument('--force', action='store_true', help='覆盖已有 manifest')
 
+    # profile-pdf 命令
+    profile_pdf_parser = subparsers.add_parser("profile-pdf", help="分析 PDF TOC、页码、风险和每页摘要")
+    profile_pdf_parser.add_argument("--book", required=True, help="书籍 ID")
+    profile_pdf_parser.add_argument("--force", action="store_true", help="覆盖已有 profile 输出")
+
+    # plan-units 命令
+    plan_units_parser = subparsers.add_parser("plan-units", help="生成 semantic-unit-plan.candidates.yaml")
+    plan_units_parser.add_argument("--book", required=True, help="书籍 ID")
+    plan_units_parser.add_argument("--force", action="store_true", help="覆盖已有候选规划")
+
+    # validate-unit-plan 命令
+    validate_unit_plan_parser = subparsers.add_parser("validate-unit-plan", help="校验 semantic unit plan 覆盖率")
+    validate_unit_plan_parser.add_argument("--book", required=True, help="书籍 ID")
+
+    # review-unit-plan 命令
+    review_unit_plan_parser = subparsers.add_parser("review-unit-plan", help="人工审批 semantic unit plan")
+    review_unit_plan_parser.add_argument("--book", required=True, help="书籍 ID")
+    review_unit_plan_parser.add_argument("--list", action="store_true", help="只列出 unit，不进入交互")
+
     # extract 命令
     extract_parser = subparsers.add_parser('extract', help='按 manifest 生成 source-slice')
     extract_parser.add_argument('--book', required=True, help='书籍 ID')
@@ -1369,6 +1432,10 @@ def main():
         'make-tasks': cmd_make_tasks,
         'init-book': cmd_init_book,
         'inventory': cmd_inventory,
+        'profile-pdf': cmd_profile_pdf,
+        'plan-units': cmd_plan_units,
+        'validate-unit-plan': cmd_validate_unit_plan,
+        'review-unit-plan': cmd_review_unit_plan,
         'extract': cmd_extract,
         'mark-reviewed': cmd_mark_reviewed,
         'run-book': cmd_run_book,
