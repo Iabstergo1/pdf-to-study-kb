@@ -5,12 +5,17 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import time
+import json
 from pathlib import Path
 from typing import Any, Callable
 
 
 class OcrUnavailable(RuntimeError):
     pass
+
+
+_PREDICTOR: Any | None = None
 
 
 def is_surya_available() -> bool:
@@ -44,18 +49,93 @@ def resolve_llama_cpp_binary() -> str | None:
     return None
 
 
+def _surya_cache_dir() -> Path:
+    return Path.home() / ".cache" / "datalab" / "surya"
+
+
+def _pid_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def cleanup_stale_llamacpp_server_state() -> bool:
+    sentinel = _surya_cache_dir() / "llamacpp_server.json"
+    if not sentinel.exists():
+        return False
+    try:
+        data = json.loads(sentinel.read_text(encoding="utf-8"))
+    except Exception:
+        try:
+            sentinel.unlink(missing_ok=True)
+            return True
+        except OSError:
+            return False
+    pid = data.get("pid")
+    if pid and _pid_exists(int(pid)):
+        return False
+    try:
+        sentinel.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def _cached_surya_gguf_paths() -> tuple[str, str] | None:
+    hub_root = Path.home() / ".cache" / "huggingface" / "hub" / "models--datalab-to--surya-ocr-2-gguf"
+    if not hub_root.exists():
+        return None
+    snapshots = sorted(hub_root.glob("snapshots/*"))
+    for snapshot in reversed(snapshots):
+        model = snapshot / "surya-2.gguf"
+        mmproj = snapshot / "surya-2-mmproj.gguf"
+        if model.exists() and mmproj.exists():
+            return str(model), str(mmproj)
+    return None
+
+
 def configure_llama_cpp_binary() -> None:
+    cleanup_stale_llamacpp_server_state()
     binary = resolve_llama_cpp_binary()
     if not binary:
         return
     os.environ["LLAMA_CPP_BINARY"] = binary
-    (Path.home() / ".cache" / "datalab" / "surya").mkdir(parents=True, exist_ok=True)
-    if _surya_gguf_cached():
+    os.environ.setdefault("SURYA_INFERENCE_BACKEND", "llamacpp")
+    os.environ.setdefault("SURYA_INFERENCE_PARALLEL", "1")
+    os.environ.setdefault("SURYA_INFERENCE_TIMEOUT_SECONDS", "900")
+    os.environ.setdefault("SURYA_INFERENCE_LOGPROBS", "false")
+    _surya_cache_dir().mkdir(parents=True, exist_ok=True)
+    cached_paths = _cached_surya_gguf_paths()
+    if cached_paths:
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("SURYA_GGUF_LOCAL_MODEL_PATH", cached_paths[0])
+        os.environ.setdefault("SURYA_GGUF_LOCAL_MMPROJ_PATH", cached_paths[1])
     try:
         from surya.settings import settings
 
         settings.LLAMA_CPP_BINARY = binary
+        settings.SURYA_INFERENCE_BACKEND = os.environ["SURYA_INFERENCE_BACKEND"]
+        settings.SURYA_INFERENCE_PARALLEL = int(os.environ["SURYA_INFERENCE_PARALLEL"])
+        settings.SURYA_INFERENCE_TIMEOUT_SECONDS = float(os.environ["SURYA_INFERENCE_TIMEOUT_SECONDS"])
+        settings.SURYA_INFERENCE_LOGPROBS = os.environ["SURYA_INFERENCE_LOGPROBS"].lower() == "true"
+        if cached_paths:
+            settings.SURYA_GGUF_LOCAL_MODEL_PATH = cached_paths[0]
+            settings.SURYA_GGUF_LOCAL_MMPROJ_PATH = cached_paths[1]
     except ImportError:
         return
 
@@ -99,19 +179,28 @@ def normalize_surya_result(result: Any) -> dict[str, Any]:
 
 
 def recognize_page_image(image_path: Path) -> dict[str, Any]:
+    predictor = _recognition_predictor()
+    from PIL import Image
+
+    with Image.open(image_path) as image:
+        result = predictor([image.copy()])
+    return normalize_surya_result(result)
+
+
+def _recognition_predictor():
+    global _PREDICTOR
+    if _PREDICTOR is not None:
+        return _PREDICTOR
     try:
         configure_llama_cpp_binary()
-        from PIL import Image
         from surya.inference import SuryaInferenceManager
         from surya.recognition import RecognitionPredictor
     except ImportError as exc:
         raise OcrUnavailable("surya-ocr is not installed") from exc
 
-    image = Image.open(image_path)
     manager = SuryaInferenceManager()
-    predictor = RecognitionPredictor(manager)
-    result = predictor([image])
-    return normalize_surya_result(result)
+    _PREDICTOR = RecognitionPredictor(manager)
+    return _PREDICTOR
 
 
 def extract_latex_preview(html: str) -> str:
@@ -135,6 +224,8 @@ def recognize_page_image_with_retry(
             "blocks": [],
         }
     except Exception as first_exc:
+        cleanup_stale_llamacpp_server_state()
+        time.sleep(2)
         try:
             return recognizer(image_path)
         except OcrUnavailable:

@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 
-EVIDENCE_REF_RE = re.compile(r"E-[A-Za-z0-9-]+")
+EVIDENCE_REF_RE = re.compile(r"E-[A-Za-z0-9_.-]+")
 
 
 def extract_evidence_refs(draft: str) -> set[str]:
@@ -15,14 +15,29 @@ def extract_evidence_refs(draft: str) -> set[str]:
 
 def extract_core_claims(draft: str) -> list[str]:
     claims = []
-    for raw_line in (draft or "").splitlines():
+    lines = (draft or "").splitlines()
+    in_frontmatter = bool(lines and lines[0].strip() == "---")
+    for idx, raw_line in enumerate(lines):
         line = raw_line.strip()
+        if in_frontmatter:
+            if line == "---" and idx > 0:
+                in_frontmatter = False
+            continue
         if not line or line.startswith("#") or line.startswith("---"):
             continue
         if "Claim" in line or "结论" in line or "命题" in line:
             claims.append(line)
     if not claims and (draft or "").strip():
-        claims.append((draft or "").strip().splitlines()[0][:200])
+        in_frontmatter = bool(lines and lines[0].strip() == "---")
+        for idx, raw_line in enumerate(lines):
+            line = raw_line.strip()
+            if in_frontmatter:
+                if line == "---" and idx > 0:
+                    in_frontmatter = False
+                continue
+            if line and not line.startswith("#") and not line.startswith("---"):
+                claims.append(line[:200])
+                break
     return claims
 
 
@@ -37,7 +52,6 @@ def extract_formula_risks(draft: str, context: dict[str, Any]) -> list[str]:
 
 def verify_note(draft: str, context: dict[str, Any]) -> dict[str, Any]:
     claims = extract_core_claims(draft)
-    evidence_refs = extract_evidence_refs(draft)
     available_ids = {
         item.get("evidence_id")
         for item in context.get("evidence_candidates", [])
@@ -46,8 +60,12 @@ def verify_note(draft: str, context: dict[str, Any]) -> dict[str, Any]:
     missing = []
     if claims and not available_ids:
         missing = claims
-    elif claims and not evidence_refs.intersection(available_ids):
-        missing = claims
+    elif claims:
+        missing = [
+            claim
+            for claim in claims
+            if not extract_evidence_refs(claim).intersection(available_ids)
+        ]
 
     formula_risks = extract_formula_risks(draft, context)
     risk_flags = []

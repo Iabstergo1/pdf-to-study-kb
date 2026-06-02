@@ -91,6 +91,43 @@ def test_hybrid_ocrs_high_formula_pages_and_writes_preview(monkeypatch, tmp_path
     assert not list((book_root / "pipeline-workspace").glob("**/source-slice.md"))
 
 
+def test_hybrid_uses_cached_ocr_result(monkeypatch, tmp_path):
+    import ocr_surya
+    from unit_context import prepare_unit_context
+
+    book_root, pdf_profile = _make_context_book(tmp_path)
+    cache_dir = book_root / "pipeline-workspace" / "ocr-cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "page-0002.json").write_text(
+        json.dumps({
+            "status": "ok",
+            "blocks": [
+                {
+                    "text": "cached OCR formula",
+                    "html": "<math>cached</math>",
+                    "bbox": [0, 0, 10, 10],
+                }
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    def should_not_call(_image_path):
+        raise AssertionError("cached OCR page should not call Surya")
+
+    monkeypatch.setattr(ocr_surya, "recognize_page_image", should_not_call)
+    unit = {
+        "unit_id": "U-001-01",
+        "source_scope": {"pages": [2]},
+        "extraction_method": "hybrid",
+    }
+
+    context = prepare_unit_context(book_root, unit, pdf_profile)
+
+    assert context["block_publish"] is False
+    assert context["ocr_blocks"][0]["text_preview"] == "cached OCR formula"
+
+
 def test_surya_unavailable_blocks_publish(monkeypatch, tmp_path):
     import ocr_surya
     from unit_context import prepare_unit_context
@@ -163,3 +200,17 @@ def test_surya_gguf_cached_detects_required_files(monkeypatch, tmp_path):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     assert ocr_surya._surya_gguf_cached() is True
+
+
+def test_cleanup_stale_llamacpp_server_state_removes_dead_sentinel(monkeypatch, tmp_path):
+    import ocr_surya
+
+    cache_dir = tmp_path / ".cache" / "datalab" / "surya"
+    cache_dir.mkdir(parents=True)
+    sentinel = cache_dir / "llamacpp_server.json"
+    sentinel.write_text('{"pid": 999999, "port": 51409}', encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(ocr_surya, "_pid_exists", lambda _pid: False)
+
+    assert ocr_surya.cleanup_stale_llamacpp_server_state() is True
+    assert not sentinel.exists()

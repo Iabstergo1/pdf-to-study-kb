@@ -70,6 +70,31 @@ def render_page_image(page: fitz.Page, image_path: Path) -> None:
     pixmap.save(str(image_path))
 
 
+def _ocr_cache_path(book_root: Path, page_number: int) -> Path:
+    return book_root / "pipeline-workspace" / "ocr-cache" / f"page-{page_number:04d}.json"
+
+
+def _load_cached_ocr(book_root: Path, page_number: int) -> dict[str, Any] | None:
+    path = _ocr_cache_path(book_root, page_number)
+    if not path.exists():
+        return None
+    try:
+        result = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    if result.get("status") == "ok" and result.get("blocks"):
+        return result
+    return None
+
+
+def _write_cached_ocr(book_root: Path, page_number: int, result: dict[str, Any]) -> None:
+    if result.get("status") != "ok" or not result.get("blocks"):
+        return
+    path = _ocr_cache_path(book_root, page_number)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _normalize_ocr_blocks(page_number: int, result: dict[str, Any]) -> list[dict[str, Any]]:
     normalized = []
     for block in result.get("blocks", []):
@@ -150,9 +175,12 @@ def prepare_unit_context(book_root: Path, unit: dict[str, Any], pdf_profile: dic
                 if method in {"text", "hybrid"}:
                     text_blocks.extend(extract_text_blocks(page_number, page))
                 if should_ocr_page(method, page_profile):
-                    image_path = tmp_path / f"{unit_id}-p{page_number}.png"
-                    render_page_image(page, image_path)
-                    result = ocr_surya.recognize_page_image_with_retry(image_path)
+                    result = _load_cached_ocr(book_root, page_number)
+                    if result is None:
+                        image_path = tmp_path / f"{unit_id}-p{page_number}.png"
+                        render_page_image(page, image_path)
+                        result = ocr_surya.recognize_page_image_with_retry(image_path)
+                        _write_cached_ocr(book_root, page_number, result)
                     if result.get("block_publish"):
                         block_publish = True
                         formula_risk = result.get("formula_risk", formula_risk)

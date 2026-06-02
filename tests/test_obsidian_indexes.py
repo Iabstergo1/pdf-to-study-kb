@@ -76,6 +76,12 @@ def test_build_obsidian_indexes_generates_full_vault_and_frontmatter(tmp_path):
     staging_dir = book_root / "pipeline-workspace" / "staging" / "U-001-01"
     staging_dir.mkdir(parents=True)
     (staging_dir / "section-lesson-draft.md").write_text("# 第一单元\n\n正文", encoding="utf-8")
+    review_dir = book_root / "pipeline-workspace" / "reviews" / "U-001-01"
+    review_dir.mkdir(parents=True)
+    (review_dir / "review-decision.yaml").write_text(
+        yaml.dump({"decision": "accept", "confidence": "high"}, allow_unicode=True),
+        encoding="utf-8",
+    )
 
     build_obsidian_indexes(book_root, memory=_memory())
 
@@ -123,6 +129,46 @@ def test_build_obsidian_indexes_does_not_publish_placeholder_without_draft(tmp_p
 
     assert not stale_lesson.exists()
     assert not (book_root / "study-kb" / "Review-Queue" / "U-001-01.md").exists()
+
+
+def test_build_obsidian_indexes_does_not_publish_review_queue_draft(tmp_path):
+    from obsidian_indexes import build_obsidian_indexes
+
+    book_root = tmp_path / "books" / "phase10-book"
+    (book_root / "config").mkdir(parents=True)
+    (book_root / "config" / "semantic-unit-plan.yaml").write_text(
+        yaml.dump(_plan(), allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    staging_dir = book_root / "pipeline-workspace" / "staging" / "U-001-01"
+    staging_dir.mkdir(parents=True)
+    (staging_dir / "section-lesson-draft.md").write_text("# Draft queued for review", encoding="utf-8")
+    review_queue = book_root / "study-kb" / "Review-Queue" / "U-001-01.md"
+    review_queue.parent.mkdir(parents=True)
+    review_queue.write_text("---\nmanaged_by: pipeline\n---\n\nneeds review", encoding="utf-8")
+
+    build_obsidian_indexes(book_root, memory=_memory())
+
+    assert review_queue.exists()
+    assert not (book_root / "study-kb" / "Section-Lessons" / "U-001-01.md").exists()
+
+
+def test_build_obsidian_indexes_removes_stale_review_queue_outside_plan(tmp_path):
+    from obsidian_indexes import build_obsidian_indexes
+
+    book_root = tmp_path / "books" / "phase10-book"
+    (book_root / "config").mkdir(parents=True)
+    (book_root / "config" / "semantic-unit-plan.yaml").write_text(
+        yaml.dump(_plan(), allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    stale = book_root / "study-kb" / "Review-Queue" / "OLD-UNIT.md"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("---\nmanaged_by: pipeline\n---\n\nstale", encoding="utf-8")
+
+    build_obsidian_indexes(book_root, memory=_memory())
+
+    assert not stale.exists()
 
 
 def test_build_obsidian_indexes_does_not_overwrite_human_file(tmp_path):

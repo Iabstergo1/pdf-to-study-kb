@@ -10,18 +10,27 @@
 
 ---
 
-## 当前代码基线
+## 当前验证状态
 
-当前仓库已经完成部分文档和契约更新，但实现仍以旧 `section` 流程为主：
+截至 2026-06-02，`codex/semantic-phase-1` 分支已在 `game-model-test` fixture 上跑通 LangGraph semantic unit 主流程。该结论只覆盖下列命令和产物，不表示仓库内所有辅助脚本都已逐个验证。
 
-- `README.md` 和 `CLAUDE.md` 已描述新流程：`profile-pdf -> plan-units -> validate-unit-plan -> review-unit-plan -> run-book`。
-- `schemas/semantic-unit-plan.schema.json` 是语义单元规划 schema。若分支仍存在 `schemas/section-manifest.schema.json` 承载语义单元 schema，先按 Phase 1 Step 2 重命名。
-- `scripts/pipeline.py` 仍只有旧命令：`inventory`, `plan-sections`, `review-sections`, `apply-section-plan`, `extract`, `make-tasks`, `mark-reviewed`。
-- `scripts/run_book.py` 和 `scripts/langgraph_worker.py` 仍按 `sections`, `id`, `source_locator`, `source-slice.md` 工作。
-- `scripts/obsidian_output.py` 仍只生成 `Home.md`, `Learning-Maps/`, `Source-QA/`，还没有 Concept Cards、Glossary、Symbols、Formula Ledger、Claims、Questions、Dashboards。
-- `tests/test_langgraph_worker.py` 仍覆盖旧 section graph，但可以复用 Fake provider 思路。
+已验证：
 
-本指南按“先补确定性底座，再接 LLM 和 LangGraph”的顺序执行，避免在没有校验和观测的情况下直接接入模型。
+- `python scripts/surya_smoke.py --book game-model-test --page 1 --keep-alive`：单页 Surya OCR smoke 连续返回 exit code 0，`status=ok`，识别块数为 16。
+- `python scripts/pipeline.py run-book --book game-model-test --executor langgraph-worker`：最新完整运行产物为 `books/game-model-test/pipeline-workspace/runs/run-20260602-161212/semantic-run-summary.json`，`section-3.1`、`section-3.2`、`section-3.3` 均为 `published`，`blocked=[]`，`skipped=[]`。
+- `books/game-model-test/study-kb/Review-Queue/`：当前计划对应的待审队列为空；三篇当前讲义已写入 `Section-Lessons/section-3.1.md`、`section-3.2.md`、`section-3.3.md`。
+- `python -m pytest -q`：99 passed, 6 skipped。
+- `git diff --check` 和 `python -m py_compile scripts/surya_smoke.py`：通过。
+
+尚未验证或不应外推的范围：
+
+- 未逐个运行仓库里的所有辅助脚本、一次性报告脚本和 `scripts/legacy/` 旧流程。
+- 未在其他 PDF、其他 book id、纯扫描件 PDF 或大体量整书上做端到端复跑。
+- 未验证 vLLM/GPU 后端、Linux/macOS 后端差异或空缓存环境的首次模型下载流程。
+- 未在 Obsidian 客户端中做人工视觉检查或 Dataview 渲染检查。
+- 历史 `pipeline-workspace/runs/` 与历史报告中可能保留旧的 `needs_human_review`、`evidence_missing` 记录；判断当前状态时以最新 run summary 和当前 `study-kb/Review-Queue/` 为准。
+
+本指南仍按“先补确定性底座，再接 LLM 和 LangGraph”的顺序组织，避免在没有校验和观测的情况下直接接入模型。
 
 ## 目标文件结构
 
@@ -64,11 +73,15 @@ Required dependency diff:
 +surya-ocr>=0.20.0
 ```
 
-Surya 2 notes:
+Surya OCR 运行要求与注意事项：
 
-- `surya-ocr>=0.20.0` 会声明 PyTorch 依赖；通常不需要在本项目再单独列 `torch`。
-- OCR 推理后端仍需要运行环境支持。GPU 路径使用 vllm/NVIDIA 容器；CPU 或 Apple Silicon 路径使用 `llama-server` from llama.cpp。
-- 如果推理后端不可用，行为与未安装 surya 相同：高公式 unit 标记 `formula_risk=high` 并进入 `Review-Queue/`。
+- `surya-ocr>=0.20.0` 会声明 PyTorch 相关依赖；通常不需要在本项目再单独列 `torch`。
+- Surya 2 OCR 需要推理后端。GPU 路径通常使用 vLLM/NVIDIA 环境；Windows/CPU 路径使用 llama.cpp 的 `llama-server.exe`。本项目会尝试自动发现 WinGet 安装的 `llama-server.exe`，也可以用 `LLAMA_CPP_BINARY` 显式指定。
+- 模型文件不提交到仓库。首次运行可能需要下载并缓存模型；已验证环境中缓存包括 `surya-2.gguf` 和 `surya-2-mmproj.gguf`。空缓存、离线环境或代理异常时，先跑 smoke check 再跑整书。
+- CPU/llama.cpp 路径很慢，单页 smoke 也可能耗时数分钟。整书运行会把成功 OCR 的页面写入 `books/<book>/pipeline-workspace/ocr-cache/page-XXXX.json`，后续复跑优先使用缓存。
+- 后台 `llama-server` 异常退出时可能遗留 lock/sentinel 状态，表现为 OCR 进程返回 `status=failed` 或无法获取锁。本项目 adapter 会清理指向已退出进程的 stale 状态；如果仍失败，先执行 `python scripts/surya_smoke.py --book <book> --page 1 --keep-alive` 获取明确错误。
+- OCR 结果只能作为证据候选，不应直接当作最终数学结论。高公式、高表格或混合冲突页面仍需要 evidence verifier 和 reviewer gate 兜底。
+- 如果 Surya 未安装、模型不可用或推理后端不可用，行为与 OCR 不可用一致：高风险 unit 不自动发布，进入 `Review-Queue/` 等待人工处理。
 
 ## Phase 1: Book-Level CLI 与目录结构
 

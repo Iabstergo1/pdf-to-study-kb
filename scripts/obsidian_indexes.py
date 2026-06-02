@@ -108,6 +108,7 @@ def build_obsidian_indexes(
     _write_maps(study_kb, units)
     _write_source_qa(study_kb, units)
     _write_dashboard(study_kb, units, memory)
+    _cleanup_stale_review_queue(study_kb, units)
 
 
 def _write_lessons(book_root: Path, study_kb: Path, units: list[dict[str, Any]], source_pdf: str, memory: dict[str, Any]) -> None:
@@ -117,7 +118,7 @@ def _write_lessons(book_root: Path, study_kb: Path, units: list[dict[str, Any]],
         unit_id = unit["unit_id"]
         draft_path = book_root / "pipeline-workspace" / "staging" / unit_id / "section-lesson-draft.md"
         lesson_path = study_kb / "Section-Lessons" / f"{unit_id}.md"
-        if not draft_path.exists():
+        if not draft_path.exists() or not _review_accepts_publish(book_root, unit_id):
             if can_overwrite(lesson_path):
                 lesson_path.unlink(missing_ok=True)
             continue
@@ -128,6 +129,12 @@ def _write_lessons(book_root: Path, study_kb: Path, units: list[dict[str, Any]],
                 body = body.split("\n---", 1)[-1].lstrip()
         content = frontmatter(_unit_lesson_frontmatter(unit, source_pdf, memory)) + body
         write_managed_markdown(lesson_path, content)
+
+
+def _review_accepts_publish(book_root: Path, unit_id: str) -> bool:
+    decision_path = book_root / "pipeline-workspace" / "reviews" / unit_id / "review-decision.yaml"
+    decision = load_yaml(decision_path)
+    return decision.get("decision") == "accept" and decision.get("confidence") != "low"
 
 
 def _write_concepts(study_kb: Path, memory: dict[str, Any]) -> None:
@@ -216,3 +223,13 @@ def _write_dashboard(study_kb: Path, units: list[dict[str, Any]], memory: dict[s
     content += f"- concepts: {len(memory.get('concept_index', {}))}\n"
     content += f"- symbols: {len(memory.get('symbol_index', {}))}\n"
     write_managed_markdown(study_kb / "Dashboards" / "质量看板.md", content)
+
+
+def _cleanup_stale_review_queue(study_kb: Path, units: list[dict[str, Any]]) -> None:
+    valid_unit_ids = {unit["unit_id"] for unit in units if unit.get("include", True)}
+    review_queue = study_kb / "Review-Queue"
+    if not review_queue.exists():
+        return
+    for path in review_queue.glob("*.md"):
+        if path.stem not in valid_unit_ids and can_overwrite(path):
+            path.unlink()

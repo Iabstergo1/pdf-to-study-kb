@@ -4,7 +4,7 @@
 
 > `books/` 是本地书籍工作区，默认不提交。只保留原始 PDF 即可；运行 `init-book` 后会重新生成配置、中间产物和最终知识库。
 
-> 实现状态：本文描述正在迁移的目标架构。当前代码仍保留旧 `section` 流程；新命令和 LangGraph/SQLite 实现步骤见 [执行指导文档](docs/semantic-pdf-to-obsidian-implementation-guide.md)。
+> 实现状态：`game-model-test` 已跑通 LangGraph semantic unit 主流程。详细验证边界、未验证项和 Surya OCR 注意事项见 [执行指导文档](docs/semantic-pdf-to-obsidian-implementation-guide.md)。
 
 ## 它能做什么
 
@@ -64,7 +64,7 @@ PDF 提取三档：
 |------|------|
 | Python 3.11+ | 用于 PDF 解析、LangGraph 编排、发布流水线 |
 | DeepSeek API key | V4 Flash（规划/审校）+ V4 Pro（讲义生成） |
-| surya-ocr（可选） | `requirements.txt` 中已列出 `surya-ocr>=0.20.0`；OCR 还需要 vllm 或 llama.cpp 推理后端，不安装或后端不可用则高公式页走人工 |
+| surya-ocr（可选） | `requirements.txt` 中已列出 `surya-ocr>=0.20.0`；OCR 还需要 vLLM 或 llama.cpp 推理后端，不安装或后端不可用则高公式页走人工 |
 | Obsidian（可选） | 用于阅读生成的知识库 |
 
 ## 快速开始
@@ -81,13 +81,21 @@ pip install -r requirements.txt
 
 `requirements.txt` 默认包含 surya-ocr。若当前环境不准备处理高公式页，可先注释掉该依赖行再安装；未安装或 OCR 推理后端不可用时，高公式页会进入 `Review-Queue/` 人工处理。
 
+OCR 后端 smoke check：
+
+```powershell
+python scripts/surya_smoke.py --book game-model-test --page 1 --keep-alive
+```
+
+该命令只识别一页 PDF，只有 Surya 返回 `status=ok` 且识别块数大于 0 时才返回 exit code 0。第一次运行可能需要下载或加载模型，CPU/llama.cpp 路径会很慢；后续整书运行会复用 `pipeline-workspace/ocr-cache/` 中已成功识别的页。
+
 复制 `.env.example` 为 `.env`，填入本地 API 配置：
 
 ```powershell
 copy .env.example .env
 ```
 
-`.env` 不会提交到仓库。默认使用 DeepSeek V4 Flash（规划/审校）和 V4 Pro（讲义生成）。任何 OpenAI-compatible API 都可以按相同字段配置。surya-ocr 本地运行，无需 API key，也不要求模型支持图片输入；Surya 2 OCR 需要本地 vllm 或 llama.cpp 推理后端。
+`.env` 不会提交到仓库。默认使用 DeepSeek V4 Flash（规划/审校）和 V4 Pro（讲义生成）。任何 OpenAI-compatible API 都可以按相同字段配置。surya-ocr 本地运行，无需 API key，也不要求模型支持图片输入；Surya 2 OCR 需要本地 vLLM 或 llama.cpp 推理后端。Windows/CPU 路径优先使用 llama.cpp 的 `llama-server.exe`，也可以通过 `LLAMA_CPP_BINARY` 显式指定。
 
 ### 2. 初始化书籍目录
 

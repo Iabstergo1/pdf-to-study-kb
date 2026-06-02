@@ -71,6 +71,58 @@ class RuntimeDeps:
     run_estimate: dict[str, float | int] | None = None
 
 
+AUTHOR_EVIDENCE_SYSTEM = (
+    "你是 semantic unit 学习讲义作者。只输出 JSON，字段 draft 为完整 Markdown。"
+    "每个事实性段落和每个核心结论必须在句末引用至少一个 evidence_id，格式如 [E-section-3.1-0005]。"
+    "只能引用 context.evidence_candidates 中存在的 evidence_id；不要编造、改写或省略 evidence_id。"
+    "如果某个事实没有可用证据，写 [证据缺失] 并降低结论强度。"
+)
+
+
+REVISER_EVIDENCE_SYSTEM = (
+    "你是 semantic unit 讲义修订员。只输出 JSON，字段 draft 为修订后的完整 Markdown。"
+    "修订时必须保留或补齐每个事实性段落和核心结论句末的 evidence_id。"
+    "只能引用 context.evidence_candidates 中存在的 evidence_id。"
+)
+
+
+REVIEW_SYSTEM = (
+    "你是 semantic unit 审校员。只输出 JSON，包含 decision 对象和 report Markdown。"
+    "decision.decision 必须且只能是 accept、revise 或 reject；不要使用 status=approved。"
+    "decision.confidence 必须且只能是 high、medium 或 low；decision.decision=accept 时 confidence 必须是 high 或 medium。"
+    "report Markdown 必须包含标题 `## 证据对照表` 和 `## 公式风险清单`，并在每个标题下给出 Markdown 表格。"
+)
+
+
+def _evidence_prompt_items(context: dict[str, Any], limit: int = 80) -> list[dict[str, Any]]:
+    items = []
+    for item in context.get("evidence_candidates", [])[:limit]:
+        if not item.get("evidence_id"):
+            continue
+        items.append({
+            "evidence_id": item["evidence_id"],
+            "page": item.get("page"),
+            "evidence_type": item.get("evidence_type", "text"),
+            "preview": item.get("preview", ""),
+        })
+    return items
+
+
+def _author_payload(state: UnitGraphState) -> dict[str, Any]:
+    context = state.get("context", {})
+    return {
+        "unit": state["unit"],
+        "context": context,
+        "evidence_usage_rules": {
+            "required": True,
+            "format": "[E-...]",
+            "scope": "每个事实性段落和每个核心结论句末至少一个 evidence_id",
+            "allowed_evidence": _evidence_prompt_items(context),
+        },
+        "memory": state.get("memory", {}),
+    }
+
+
 def invoke_unit_graph(
     book_root: Path,
     run_id: str,
@@ -136,12 +188,8 @@ def enforce_unit_budget(book_root: Path, state: UnitGraphState, deps: RuntimeDep
 
 def generate_note(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
     response = deps.provider.chat_json(
-        system="你是 semantic unit 学习讲义作者。只输出 JSON，字段 draft 为完整 Markdown。",
-        user=yaml.dump({
-            "unit": state["unit"],
-            "context": state["context"],
-            "memory": state.get("memory", {}),
-        }, allow_unicode=True, sort_keys=False),
+        system=AUTHOR_EVIDENCE_SYSTEM,
+        user=yaml.dump(_author_payload(state), allow_unicode=True, sort_keys=False),
         model=deps.config.author_model or getattr(deps.provider_config, "model", None),
     )
     draft = response.get("draft") or response.get("content")
@@ -174,12 +222,24 @@ def verify_evidence(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -
 
 def review_note(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
     response = deps.provider.chat_json(
-        system="你是 semantic unit 审校员。只输出 JSON，包含 decision 对象和 report Markdown。",
+        system=REVIEW_SYSTEM,
         user=yaml.dump({
             "unit": state["unit"],
             "context": state["context"],
             "draft": state["draft"],
             "validation": state.get("validation", {}),
+            "required_output_schema": {
+                "decision": {
+                    "unit_id": state["unit_id"],
+                    "decision": "accept|revise|reject",
+                    "confidence": "high|medium|low",
+                    "required_fixes": [],
+                    "warnings": [],
+                    "risk_flags": [],
+                    "notes": "",
+                },
+                "report": "必须包含 ## 证据对照表 和 ## 公式风险清单 两个表格",
+            },
         }, allow_unicode=True, sort_keys=False),
         model=deps.config.review_model or getattr(deps.provider_config, "review_model", None),
     )
@@ -202,10 +262,13 @@ def review_note(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> di
 
 def revise_note(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
     response = deps.provider.chat_json(
-        system="你是 semantic unit 讲义修订员。只输出 JSON，字段 draft 为修订后的完整 Markdown。",
+        system=REVISER_EVIDENCE_SYSTEM,
         user=yaml.dump({
             "unit": state["unit"],
+            "context": state.get("context", {}),
+            "evidence_usage_rules": _author_payload(state)["evidence_usage_rules"],
             "draft": state["draft"],
+            "validation": state.get("validation", {}),
             "review_decision": state["review_decision"],
             "review_report": state.get("review_report", ""),
         }, allow_unicode=True, sort_keys=False),
@@ -244,27 +307,46 @@ def update_memory(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> 
 
 def publish_note(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
     unit_id = state["unit_id"]
-    staging_dir = book_root / "pipeline-workspace" / "staging" / unit_id
-    review_dir = book_root / "pipeline-workspace" / "reviews" / unit_id
     lesson_dir = book_root / "study-kb" / "Section-Lessons"
-    staging_dir.mkdir(parents=True, exist_ok=True)
-    review_dir.mkdir(parents=True, exist_ok=True)
     lesson_dir.mkdir(parents=True, exist_ok=True)
-    (staging_dir / "section-lesson-draft.md").write_text(state["draft"], encoding="utf-8")
-    (review_dir / "review-decision.yaml").write_text(
-        yaml.dump(state["review_decision"], allow_unicode=True, sort_keys=False),
-        encoding="utf-8",
-    )
-    (review_dir / "review-report.md").write_text(state.get("review_report", ""), encoding="utf-8")
+    _write_unit_artifacts(book_root, state)
     (lesson_dir / f"{unit_id}.md").write_text(state["draft"], encoding="utf-8")
+    _remove_managed_review_queue_note(book_root, unit_id)
     business_db.record_event(book_root, state["run_id"], unit_id, "publish_note", "ok", {})
     return {"status": "published"}
+
+
+def _remove_managed_review_queue_note(book_root: Path, unit_id: str) -> None:
+    path = book_root / "study-kb" / "Review-Queue" / f"{unit_id}.md"
+    if not path.exists():
+        return
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if "managed_by: pipeline" in text[:1000]:
+        path.unlink()
+
+
+def _write_unit_artifacts(book_root: Path, state: UnitGraphState) -> None:
+    unit_id = state["unit_id"]
+    staging_dir = book_root / "pipeline-workspace" / "staging" / unit_id
+    review_dir = book_root / "pipeline-workspace" / "reviews" / unit_id
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    review_dir.mkdir(parents=True, exist_ok=True)
+    if state.get("draft"):
+        (staging_dir / "section-lesson-draft.md").write_text(state["draft"], encoding="utf-8")
+    if state.get("review_decision"):
+        (review_dir / "review-decision.yaml").write_text(
+            yaml.dump(state["review_decision"], allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+    if state.get("review_report"):
+        (review_dir / "review-report.md").write_text(state.get("review_report", ""), encoding="utf-8")
 
 
 def route_to_review_queue(book_root: Path, state: UnitGraphState, reason: str) -> dict[str, Any]:
     unit_id = state["unit_id"]
     review_queue_dir = book_root / "study-kb" / "Review-Queue"
     review_queue_dir.mkdir(parents=True, exist_ok=True)
+    _write_unit_artifacts(book_root, state)
     lines = [
         "---",
         "type: review-queue",
@@ -412,6 +494,22 @@ def _normalize_unit_decision(raw: dict[str, Any], unit_id: str) -> dict[str, Any
     if not isinstance(raw, dict):
         raise ValueError("review decision 必须是 JSON 对象")
     decision = dict(raw)
+    status = str(decision.get("status", "")).strip().lower()
+    status_decision_map = {
+        "approved": "accept",
+        "approve": "accept",
+        "accepted": "accept",
+        "pass": "accept",
+        "passed": "accept",
+        "needs_revision": "revise",
+        "needs-revision": "revise",
+        "revise": "revise",
+        "rejected": "reject",
+        "reject": "reject",
+        "failed": "reject",
+    }
+    if "decision" not in decision and status in status_decision_map:
+        decision["decision"] = status_decision_map[status]
     decision.setdefault("unit_id", unit_id)
     decision.setdefault("reviewer", "langgraph-worker")
     decision.setdefault("review_date", date.today().isoformat())
@@ -421,9 +519,16 @@ def _normalize_unit_decision(raw: dict[str, Any], unit_id: str) -> dict[str, Any
     decision.setdefault("warnings", [])
     decision.setdefault("notes", "")
     if decision["decision"] not in {"accept", "revise", "reject"}:
-        decision["decision"] = "reject"
+        decision["decision"] = status_decision_map.get(status, "reject")
     if decision["confidence"] not in {"high", "medium", "low"}:
         decision["confidence"] = "low"
+    if (
+        decision["decision"] == "accept"
+        and decision["confidence"] == "low"
+        and status in {"approved", "approve", "accepted", "pass", "passed"}
+        and not decision.get("required_fixes")
+    ):
+        decision["confidence"] = "medium"
     return decision
 
 

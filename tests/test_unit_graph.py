@@ -64,6 +64,9 @@ def test_unit_graph_accept_writes_staging_review_and_published_note(tmp_path):
         },
     ])
     book_root = tmp_path / "books" / "phase8-book"
+    review_queue = book_root / "study-kb" / "Review-Queue" / "U-001-01.md"
+    review_queue.parent.mkdir(parents=True)
+    review_queue.write_text("---\nmanaged_by: pipeline\n---\n\nstale\n", encoding="utf-8")
 
     result = invoke_unit_graph(book_root, "run-1", "phase8-book", _unit(), _deps(provider, _context()))
 
@@ -71,8 +74,33 @@ def test_unit_graph_accept_writes_staging_review_and_published_note(tmp_path):
     assert (book_root / "pipeline-workspace" / "staging" / "U-001-01" / "section-lesson-draft.md").exists()
     assert (book_root / "pipeline-workspace" / "reviews" / "U-001-01" / "review-report.md").exists()
     assert (book_root / "study-kb" / "Section-Lessons" / "U-001-01.md").exists()
+    assert not review_queue.exists()
     assert (book_root / "pipeline-workspace" / "checkpoints" / "langgraph.sqlite").exists()
     assert (book_root / "pipeline-workspace" / "state" / "study-kb.sqlite").exists()
+
+
+def test_generate_note_prompt_requires_available_evidence_ids(tmp_path):
+    from langgraph_worker import generate_note
+
+    provider = FakeChatProvider([
+        {"draft": "结论：平台先承诺制度设计。[E-U-001-01-0001]"},
+    ])
+    book_root = tmp_path / "books" / "phase8-book"
+    state = {
+        "run_id": "run-1",
+        "unit_id": "U-001-01",
+        "unit": _unit(),
+        "context": _context(),
+        "memory": {},
+    }
+
+    result = generate_note(book_root, state, _deps(provider, _context()))
+
+    call = provider.calls[0]
+    assert result["status"] == "drafted"
+    assert "每个事实性段落" in call["system"]
+    assert "只能引用 context.evidence_candidates 中存在的 evidence_id" in call["system"]
+    assert "E-U-001-01-0001" in call["user"]
 
 
 def test_unit_graph_context_block_goes_to_review_queue(tmp_path):
@@ -176,6 +204,68 @@ def test_review_without_formula_table_rejects(tmp_path):
     assert result["review_decision"]["decision"] == "reject"
     assert result["review_decision"]["confidence"] == "low"
     assert result["review_queue_reason"] == "review_rejected"
+
+
+def test_review_note_prompt_requires_decision_schema_and_tables(tmp_path):
+    from langgraph_worker import review_note
+
+    provider = FakeChatProvider([
+        {
+            "decision": {"decision": "accept", "confidence": "high"},
+            "report": "## 证据对照表\n\n| claim | evidence |\n| --- | --- |\n\n## 公式风险清单\n\n| risk | note |\n| --- | --- |",
+        },
+    ])
+    book_root = tmp_path / "books" / "phase9-book"
+    state = {
+        "run_id": "run-1",
+        "unit_id": "U-001-01",
+        "unit": _unit(),
+        "context": _context(),
+        "draft": "Claim [E-U-001-01-0001]",
+        "validation": {"passed": True},
+        "risk_flags": [],
+    }
+
+    result = review_note(book_root, state, _deps(provider, _context()))
+
+    call = provider.calls[0]
+    assert result["review_decision"]["decision"] == "accept"
+    assert "decision.decision" in call["system"]
+    assert "## 证据对照表" in call["system"]
+    assert "## 公式风险清单" in call["system"]
+
+
+def test_review_status_approved_normalizes_to_accept():
+    from langgraph_worker import _normalize_unit_decision
+
+    decision = _normalize_unit_decision(
+        {"status": "approved", "confidence": "medium"},
+        "U-001-01",
+    )
+
+    assert decision["decision"] == "accept"
+    assert decision["confidence"] == "medium"
+
+
+def test_review_rejected_writes_draft_and_review_artifacts(tmp_path):
+    from langgraph_worker import invoke_unit_graph
+
+    provider = FakeChatProvider([
+        {"draft": "Claim [E-U-001-01-0001]"},
+        {
+            "decision": {"decision": "reject", "confidence": "high"},
+            "report": "## 证据对照表\n\n| claim | evidence |\n| --- | --- |\n\n## 公式风险清单\n\n| risk | note |\n| --- | --- |",
+        },
+    ])
+    book_root = tmp_path / "books" / "phase9-book"
+
+    result = invoke_unit_graph(book_root, "run-1", "phase9-book", _unit(), _deps(provider, _context()))
+
+    assert result["status"] == "needs_human_review"
+    assert result["review_queue_reason"] == "review_rejected"
+    assert (book_root / "pipeline-workspace" / "staging" / "U-001-01" / "section-lesson-draft.md").exists()
+    assert (book_root / "pipeline-workspace" / "reviews" / "U-001-01" / "review-report.md").exists()
+    assert not (book_root / "study-kb" / "Section-Lessons" / "U-001-01.md").exists()
 
 
 def test_unit_budget_over_limit_goes_to_review_queue(tmp_path):
