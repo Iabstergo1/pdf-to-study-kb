@@ -119,3 +119,37 @@ def test_record_model_memory_and_evidence(tmp_path):
 
     assert json.loads(memory_json)["running_book_summary"] == "summary"
     assert json.loads(evidence_json)["preview"] == "evidence"
+
+
+def test_load_evidence_ledger_and_latest_snapshots(tmp_path):
+    from business_db import (
+        initialize_business_db,
+        load_evidence_ledger,
+        load_latest_memory_snapshots,
+        record_evidence,
+        record_memory_snapshot,
+    )
+
+    book_root = tmp_path / "books" / "recon-book"
+    initialize_business_db(book_root)
+
+    # 同一 evidence_id 跨 run 覆盖：保最新
+    record_evidence(book_root, "E-U1-0001", "run-1", "U1", "old claim", 1, None, "text", {"v": 1})
+    record_evidence(book_root, "E-U1-0001", "run-2", "U1", "new claim", 1, None, "text", {"v": 2})
+    record_evidence(book_root, "E-U2-0001", "run-2", "U2", "u2 claim", 3, None, "ocr", {"latex_preview": "x^2"})
+
+    ledger = load_evidence_ledger(book_root)
+    by_id = {it["evidence_id"]: it for it in ledger}
+    assert by_id["E-U1-0001"]["claim"] == "new claim"  # 覆盖保最新
+    assert by_id["E-U1-0001"]["payload"] == {"v": 2}
+    assert by_id["E-U2-0001"]["evidence_type"] == "ocr"
+
+    # 同一 unit 多个快照：取最新
+    record_memory_snapshot(book_root, "run-1", "U1", {"concept_index": {"A": {"definition": "old"}}})
+    record_memory_snapshot(book_root, "run-2", "U1", {"concept_index": {"A": {"definition": "new"}}})
+    record_memory_snapshot(book_root, "run-2", "U2", {"symbol_index": {"x": {"meaning": "state"}}})
+
+    snaps = load_latest_memory_snapshots(book_root)
+    defs = [s.get("concept_index", {}).get("A", {}).get("definition") for s in snaps if "A" in s.get("concept_index", {})]
+    assert defs == ["new"]  # U1 只保留最新快照
+    assert len(snaps) == 2  # U1 + U2 各一条

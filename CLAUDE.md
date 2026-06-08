@@ -62,9 +62,11 @@ prepare_context → generate_note → verify_evidence → review_note
 
 | 任务 | 默认模型 | 说明 |
 |------|----------|------|
-| 语义规划 (`plan-units`) | DeepSeek V4 Flash | Flash 够用且便宜 |
-| 讲义生成 (`generate_note`) | DeepSeek V4 Pro | 复杂生成任务用 Pro |
-| 审校 (`review_note`) | DeepSeek V4 Flash | 审校对推理要求较低 |
+| 语义规划 (`plan-units`) | DeepSeek V4 Flash | `LLM_PLANNER_MODEL`，Flash 够用且便宜 |
+| 讲义生成 (`generate_note`) | DeepSeek V4 Flash | `LLM_MODEL`，默认 Flash |
+| 审校 (`review_note`) | DeepSeek V4 Flash | `LLM_REVIEW_MODEL` |
+| 修订 (`revise_note`) | DeepSeek V4 Pro | `LLM_REVISE_MODEL`，仅 revise 用 Pro 做高质量重写 |
+| 记忆压缩 (compaction) | DeepSeek V4 Flash | 复用 `LLM_PLANNER_MODEL` |
 | 公式风险检测 | PyMuPDF（本地） | 符号/空白变量启发式检测 |
 | 高公式页 OCR | surya-ocr（本地，可选依赖） | 支持中文 + LaTeX 公式；Surya 2 需要 vllm 或 llama.cpp 后端，未安装或后端不可用时走人工处理 |
 
@@ -170,9 +172,9 @@ books/<book-id>/
 
 执行报告、修复报告、审阅报告必须写入项目文件（如 `pipeline-workspace/reports/`），不在对话中复制大段输出。对话中只说一句指引用户读本地文件。
 
-## 旧代码
+## 代码边界
 
-旧的 `extract`、`source-slice`、Claude Code 队列相关代码已归档到 `scripts/legacy/`。主流程使用新的语义单元规划 + LangGraph 路径。
+仓库只保留语义单元规划 + LangGraph 主流程。旧的 `extract` / `source-slice` / `section-manifest` / Claude Code 队列（`make-tasks`）相关命令与脚本（`scripts/legacy/`、`section_planner`、`obsidian_output`、`run_state`、`validate_section_lesson` 等）已删除，不再保留。CLI 仅有 6 个命令：`init-book`、`profile-pdf`、`plan-units`、`validate-unit-plan`、`review-unit-plan`、`run-book`。
 
 ## Agent skills
 

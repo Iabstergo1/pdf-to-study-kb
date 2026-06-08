@@ -1,75 +1,50 @@
-# PDF to Study KB
+<div align="center">
 
-把一本 PDF 变成 Obsidian 知识库：语义化切分、人工审批、LangGraph 编排生成、公式/证据验证、完整生态输出。
+# 📚 PDF → Study KB
 
-> `books/` 是本地书籍工作区，默认不提交。只保留原始 PDF 即可；运行 `init-book` 后会重新生成配置、中间产物和最终知识库。
+**把一本长篇 PDF 编译成本地 Obsidian 学习知识库**
 
-> 实现状态：`game-model-test` 已跑通 LangGraph semantic unit 主流程。详细验证边界、未验证项和 Surya OCR 注意事项见 [执行指导文档](docs/semantic-pdf-to-obsidian-implementation-guide.md)。
+语义切分 · 人工审批 · LangGraph 编排生成 · 公式/证据门禁 · 一键本地前端
 
-## 它能做什么
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![LangGraph](https://img.shields.io/badge/LangGraph-orchestration-1C3C3C)
+![LLM](https://img.shields.io/badge/LLM-DeepSeek%20V4-4D6BFE)
+![OCR](https://img.shields.io/badge/OCR-surya--ocr-FF6F00)
+![Web UI](https://img.shields.io/badge/Web%20UI-zero--build-22C55E)
 
-输入一本 PDF，输出一个本地 Obsidian vault：
+</div>
 
+---
+
+输入一本 PDF，得到一个可以在 Obsidian 里**按主题、难度、阅读路线**导航的知识库——而不是线性地翻 PDF。每个核心结论都带**来源证据引用**，公式从本地 OCR 提取、不允许模型凭空补全。
+
+```text
+📄 your-book.pdf
+        │   profile → plan → 审批 → run-book
+        ▼
+📚 books/your-book/study-kb/   ← 直接当 Obsidian vault 打开
+   ├── Home.md                 入口：进度 + 阅读路线
+   ├── Section-Lessons/        每个语义单元一篇带证据引用的讲义
+   ├── Concept-Cards/          核心概念卡片
+   ├── Glossary/ · Symbols/    术语表 · 符号表（带来源页码）
+   ├── Formula-Ledger/         公式账本（OCR/LaTeX 来源）
+   ├── Claims/                 核心结论 → 证据（区分原文压缩/学习解释/个人桥接）
+   ├── Questions/              每单元自测题
+   ├── Review-Queue/           待人工复核的高风险笔记
+   ├── Learning-Maps/          全书地图 · 入门最短路线 · 难点路线
+   └── Source-QA/ · Dashboards/  覆盖率 · 风险 · 质量看板
 ```
-books/my-book/study-kb/
-├── Home.md                    # 入口：发布进度、阅读路线
-├── Section-Lessons/           # 每个语义单元一篇学习讲义
-│   ├── GTW-001-01.md
-│   ├── GTW-001-02.md
-│   └── ...
-├── Concept-Cards/             # 核心概念独立卡片
-├── Glossary/                  # 术语表（定义 + 来源页码）
-├── Symbols/                   # 符号表（含义 + 首次出现）
-├── Formula-Ledger/            # 公式账本（来源 + 一致性标记）
-├── Claims/                    # 核心结论 → 证据对照
-├── Questions/                 # 每单元自测问题
-├── Review-Queue/              # 待人工复核的高风险笔记
-├── Learning-Maps/             # 多条阅读路线
-│   ├── MOC-全书学习地图.md
-│   ├── MOC-入门最短路线.md
-│   └── MOC-难点与推导重点路线.md
-├── Source-QA/                 # 覆盖率报告、高风险清单
-└── Dashboards/                # 综合看板
-```
 
-每篇讲义包含 12 个固定章节：学习定位、先记住的结论、必须掌握、首遍可略读、核心概念、模型/论证骨架、直觉解释、容易误解的点、个人知识桥接候选、自测问题、何时回原文、原文定位。
+## ✨ 特性
 
-## 架构概览
+- **🖥️ 一键本地前端** — 纯 Python 标准库（`http.server`），**无需 pip / npm**，clone 即用。导入、跑命令（实时日志）、卡片式审批、页内复核、浏览知识库，全在一个网页里。
+- **🧠 语义切分 + 人工审批** — LLM 按阅读连贯性切分 unit，不靠正则；人工卡片式接受/编辑/合并/跳过后才进入生成。
+- **🔗 来源忠实门禁** — 每条核心结论须引用真实 `evidence_id`；自动拦截**幻觉证据**（引用了不存在的 id）和**未落地的原文结论**；论断区分 `原文压缩 / 学习解释 / 个人桥接`。
+- **➗ 公式保真** — 高公式页用 surya-ocr 本地识别为 LaTeX，模型直接嵌入正文；缺证据标 `[公式缺失]` 进复核，不凭空补全。
+- **🔁 稳健编排** — LangGraph 逐 unit 生成，支持断点续跑（SQLite checkpointer）、单 unit 失败隔离（不拖垮整本）、瞬时错误/非法 JSON 自动重试、可调并发。
+- **📊 完整生态输出** — 讲义、概念卡、术语/符号表、公式账本、证据对照、自测题、阅读地图、覆盖率/质量看板，frontmatter 全部 Dataview 友好。
 
-两层架构：
-
-- **Book-level Python 编排**：`profile-pdf → plan-units → validate-unit-plan → 人工审批 → run-book`
-- **Unit-level LangGraph 图**：每个已审批 unit 单独 invoke，`prepare_context → generate_note → verify_evidence → review_note → [revise] → update_memory → publish_note`
-
-双 SQLite 分工：
-- LangGraph checkpointer：unit 图状态恢复（断点续跑）
-- 业务 SQLite：观测（model_calls, tokens, cost）、记忆（memory_snapshots）、证据（evidence_ledger）
-
-PDF 提取三档：
-- `text`：PyMuPDF 文本抽取（纯文本/低公式页）
-- `screenshot_ocr`：PyMuPDF 截图 → surya-ocr 识别（高公式页，支持中文 + LaTeX 公式）
-- `hybrid`：混合策略（默认）
-
-模型分工：DeepSeek V4 Flash（规划/审校）+ V4 Pro（讲义生成）+ surya-ocr（高公式页本地 OCR）。
-
-## 适用场景
-
-- 学术论文、教材、技术白皮书等**结构化 PDF**
-- 内容以文字为主，可含公式/表格（高公式页自动走 OCR 路径）
-- 想在 Obsidian 中按主题、难度、重要性多路线阅读，而非线性翻 PDF
-
-## 前置条件
-
-| 依赖 | 说明 |
-|------|------|
-| Python 3.11+ | 用于 PDF 解析、LangGraph 编排、发布流水线 |
-| DeepSeek API key | V4 Flash（规划/审校）+ V4 Pro（讲义生成） |
-| surya-ocr（可选） | `requirements.txt` 中已列出 `surya-ocr>=0.20.0`；OCR 还需要 vLLM 或 llama.cpp 推理后端，不安装或后端不可用则高公式页走人工 |
-| Obsidian（可选） | 用于阅读生成的知识库 |
-
-## 快速开始
-
-下面以 `my-book` 为书籍 ID。书籍 ID 会成为目录名，建议只用英文、数字、短横线。
+## 🚀 快速开始
 
 ### 1. 安装
 
@@ -79,150 +54,161 @@ cd pdf-to-study-kb
 pip install -r requirements.txt
 ```
 
-`requirements.txt` 默认包含 surya-ocr。若当前环境不准备处理高公式页，可先注释掉该依赖行再安装；未安装或 OCR 推理后端不可用时，高公式页会进入 `Review-Queue/` 人工处理。
+> [!IMPORTANT]
+> 后续所有命令（包括前端）都要用**装了依赖的同一个 Python 解释器**运行。前端会用「启动它的那个 Python」去跑流水线命令，解释器不对会报 `ModuleNotFoundError: No module named 'yaml'` 之类的错。
+> 用 conda 的话：`conda activate <你的环境>`，或直接用全路径 `D:\path\to\env\python.exe`。
 
-OCR 后端 smoke check：
+`requirements.txt` 含 `surya-ocr`（高公式页 OCR，可选）。未安装或推理后端不可用时，高公式页会进入 `Review-Queue/` 人工处理。
 
-```powershell
-python scripts/surya_smoke.py --book game-model-test --page 1 --keep-alive
-```
-
-该命令只识别一页 PDF，只有 Surya 返回 `status=ok` 且识别块数大于 0 时才返回 exit code 0。第一次运行可能需要下载或加载模型，CPU/llama.cpp 路径会很慢；后续整书运行会复用 `pipeline-workspace/ocr-cache/` 中已成功识别的页。
-
-复制 `.env.example` 为 `.env`，填入本地 API 配置：
+### 2. 配置 `.env`
 
 ```powershell
 copy .env.example .env
 ```
 
-`.env` 不会提交到仓库。默认使用 DeepSeek V4 Flash（规划/审校）和 V4 Pro（讲义生成）。任何 OpenAI-compatible API 都可以按相同字段配置。surya-ocr 本地运行，无需 API key，也不要求模型支持图片输入；Surya 2 OCR 需要本地 vLLM 或 llama.cpp 推理后端。Windows/CPU 路径优先使用 llama.cpp 的 `llama-server.exe`，也可以通过 `LLAMA_CPP_BINARY` 显式指定。
+填入 LLM API（任何 OpenAI-compatible 接口都行，默认 DeepSeek V4）。`.env` 不提交。详见 下方「⚙️ 配置」。
 
-### 2. 初始化书籍目录
+### 3. 启动前端（推荐入口）
 
 ```powershell
-python scripts/pipeline.py init-book --book my-book --pdf "C:\path\to\my.pdf" --title "我的PDF标题"
+python scripts/serve.py                 # 默认 http://127.0.0.1:8765
+python scripts/serve.py --port 9000     # 换端口
 ```
 
-这会在 `books/my-book/` 下创建完整的工作区结构，并把 PDF 复制到 `input/` 目录。同时生成配置文件：
+打开浏览器，**整个流程在一个页面里点完**：导入 PDF → 逐步跑命令（实时日志）→ 审批切分 → 编译全书 → 处理复核队列 → 浏览知识库。前端只监听本机 `127.0.0.1`。
 
-| 文件 | 作用 | 是否需要手动改 |
-|------|------|----------------|
-| `config/book-profile.yaml` | 书籍元信息（标题、领域、语言） | 一般不用改 |
-| `config/study-profile.yaml` | 讲义风格（密度、必含章节、阅读路线） | 可按需调整 |
-| `config/personal-context.yaml` | 个人知识桥接方向 | **建议按自己情况填写** |
+> 喜欢命令行 / 要脚本化？看 下方「⌨️ CLI 命令」。两者随时可混用。
 
-### 3. 分析 PDF 结构
+### 4. （可选）OCR 自检
 
 ```powershell
-python scripts/pipeline.py profile-pdf --book my-book
+python scripts/surya_smoke.py --book <book-id> --page 1 --keep-alive
 ```
 
-分析 PDF TOC、页码、文本密度、公式/表格/图片风险，输出到 `pipeline-workspace/reports/`。
+只识别一页：Surya 返回 `status=ok` 且识别块数 > 0 才返回 exit code 0。首次会下载/加载模型，CPU/llama.cpp 路径较慢；整书运行会复用 `pipeline-workspace/ocr-cache/` 的已识别页。
 
-### 4. 语义单元规划
+### 5. 在 Obsidian 中阅读
 
-```powershell
-python scripts/pipeline.py plan-units --book my-book --force
+Obsidian → `Open folder as vault` → 选 `books/<book-id>/study-kb/` → 从 `Home.md` 开始。
+
+## 🖥️ 前端能做什么
+
+| 标签页 | 功能 |
+|--------|------|
+| **流水线** | 三个按钮跑 `profile-pdf` / `plan-units` / `run-book`，底部实时日志自动滚动；可设并发；编译后显示「已发布 / 待复核 / 失败」统计。顶部步骤条显示进度，关掉浏览器重开会自动接续正在运行的作业。 |
+| **切分审批** | 每个 unit 一张卡片（页码、公式风险、OCR 标记、审批状态）；按钮：接受 / 改标题 / 改页码 / 并入前项 / 跳过；「自动判定低风险」一键处理纯文字页；「定稿规划」带覆盖校验。 |
+| **待复核** | 列出 `Review-Queue` 的 unit，点开看草稿（可编辑 + Markdown 预览），按钮：保存草稿 / 接受并发布 / 重跑该 unit。 |
+| **知识库** | 左侧分类树，点文件右侧渲染 Markdown，带 🏠 Home 入口。 |
+
+## 🧩 架构
+
+两层：**Python 负责 book 级编排**，**LangGraph 负责 unit 级生成循环**。
+
+```mermaid
+flowchart LR
+    PDF([📄 PDF]) --> A[profile-pdf<br/>结构/风险分析]
+    A --> B[plan-units<br/>LLM 语义切分]
+    B --> C[validate-unit-plan<br/>覆盖校验]
+    C --> D{{人工审批<br/>review-unit-plan}}
+    D --> E[run-book<br/>逐 unit 编排]
+    E --> KB([📚 study-kb<br/>Obsidian vault])
 ```
 
-用 LLM 生成 `config/semantic-unit-plan.candidates.yaml`。每个单元包含标题、类型、页码范围、提取方式、风险标记、依赖关系。
+每个已审批 unit 单独 invoke 一张 LangGraph 图：
 
-校验覆盖率：
-
-```powershell
-python scripts/pipeline.py validate-unit-plan --book my-book
+```mermaid
+flowchart LR
+    P[prepare_context] --> G[generate_note]
+    G --> V[verify_evidence]
+    V -->|通过| R[review_note]
+    R -->|accept| M[update_memory] --> Pub[publish_note]
+    R -->|revise ≤3 次| Rev[revise_note] --> V
+    V -->|公式丢失 / OCR 失败 / 证据缺失 / 幻觉| Q[(Review-Queue)]
+    R -->|reject| Q
 ```
 
-检查缺页、越界、未解释重叠。校验失败会阻断后续执行。
+**双 SQLite**
 
-### 5. 人工审批语义单元
+| 数据库 | 用途 |
+|--------|------|
+| LangGraph checkpointer | unit 图状态恢复（断点续跑） |
+| 业务库 `study-kb.sqlite` | runs / model_calls / tokens / cost / memory_snapshots / evidence_ledger |
 
-```powershell
-python scripts/pipeline.py review-unit-plan --book my-book
-```
+**PDF 提取三档**
 
-人工接受、编辑、合并、拆分、跳过单元。审批结果写入 `config/semantic-unit-plan.yaml`。
+| 方式 | 适用 | 实现 |
+|------|------|------|
+| `text` | 纯文本 / 低公式页 | PyMuPDF 文本抽取 |
+| `screenshot_ocr` | 高公式 / 空白变量页 | PyMuPDF 截图 → surya-ocr（中文 + LaTeX） |
+| `hybrid` | 混合页（默认） | 段落走文本，公式/表格区域走 OCR |
 
-- `include: false` 的引言/过渡类单元不生成讲义，但仍计入页码覆盖
-- 可以合并连续章节（需说明理由）
-- 可以拆分过大的章节
+**模型分工**（均可在 `.env` 覆盖）
 
-### 6. 运行全书生成
+| 任务 | 默认模型 |
+|------|----------|
+| 语义规划 `plan-units` · 修订 `revise_note` · 记忆压缩 | DeepSeek **V4 Pro** |
+| 讲义生成 `generate_note` · 审校 `review_note` | DeepSeek **V4 Flash** |
+| 公式风险检测 · 高公式页 OCR | 本地 PyMuPDF + surya-ocr |
 
-```powershell
-python scripts/pipeline.py run-book --book my-book --executor langgraph-worker
-```
+> ⚠️ `deepseek-chat` / `deepseek-reasoner` 将于 **2026/07/24** 停用，请用 `deepseek-v4-flash` / `deepseek-v4-pro`。
 
-读取已审批的 `semantic-unit-plan.yaml`，逐个 unit invoke LangGraph 图：
+## ⌨️ CLI 命令（无界面/脚本化）
 
-- `prepare_context`：组装 PDF 内容 + rolling memory + 依赖摘要
-- `generate_note`：author 模型生成讲义
-- `verify_evidence`：自动校验公式/证据覆盖
-- `review_note`：reviewer 模型审校（必须输出证据对照表和公式风险清单）
-- `revise_note`：对 revise 决策自动修订（最多 3 次）
-- `update_memory`：更新 rolling summary、概念/符号/证据索引
-
-高风险 unit（formula_loss_risk、screenshot_ocr_failed、evidence_missing）会进入 `Review-Queue/`，不得自动发布。
-
-全书完成后自动调用 `build_obsidian_indexes` 重建所有索引和看板。
-
-### 7. 在 Obsidian 中阅读
-
-打开 Obsidian → `Open folder as vault` → 选择 `books/my-book/study-kb/` → 从 `Home.md` 开始。
-
-## CLI 命令参考
+前端只是把这些命令包进网页。CLI 仅 6 个命令：
 
 ```powershell
+python scripts/pipeline.py <command> --book <book-id> [options]
 python scripts/pipeline.py <command> --help
 ```
 
 | 命令 | 作用 |
 |------|------|
-| `init-book` | 从 PDF 初始化书籍工作区 |
-| `profile-pdf` | 分析 PDF 结构（TOC、页码、风险） |
-| `plan-units` | LLM 语义单元规划 |
-| `validate-unit-plan` | 校验规划覆盖率和 schema |
-| `review-unit-plan` | 人工审批语义单元 |
-| `run-book` | 全书编排（LangGraph worker） |
-| `publish` | 将审校通过的单元发布到 study-kb/ |
-| `status` | 查看单元状态分布 |
-| `coverage` | 查看章节覆盖率 |
+| `init-book` | 从 PDF 初始化工作区（`--pdf`、`--title`），生成 book/study/personal 配置 |
+| `profile-pdf` | 分析 TOC、页码、文本密度、公式/表格/空白变量风险 |
+| `plan-units` | LLM 生成 `semantic-unit-plan.candidates.yaml`（高公式 unit 自动标 hybrid） |
+| `validate-unit-plan` | 校验覆盖率、越界、未解释重叠、schema |
+| `review-unit-plan` | 人工审批（接受/编辑/合并/拆分/跳过）→ 写 `semantic-unit-plan.yaml` |
+| `run-book` | 逐 unit 编排（`--concurrency N`、`--section <id>` 单跑），发布前过 evidence/review 门，结束后重建 Obsidian 索引 |
 
-## 项目结构
+<details>
+<summary>典型一轮命令行流程</summary>
 
-```text
-pdf-to-study-kb/
-├── .claude/skills/            # Claude Code 自定义 skills
-│   ├── section-lesson-authoring/
-│   └── section-lesson-review/
-├── scripts/                   # 流水线 CLI 与实现
-│   ├── pipeline.py            # 主 CLI 入口
-│   ├── run_book.py            # Book-level 编排
-│   ├── langgraph_worker.py    # Unit-level LangGraph 图
-│   ├── llm_provider.py        # OpenAI-compatible LLM provider
-│   ├── obsidian_output.py     # Obsidian 索引生成
-│   ├── validate_section_lesson.py  # 结构校验
-│   └── legacy/                # 旧 extract/queue 代码（归档）
-├── templates/                 # 讲义和审校报告模板
-├── schemas/                   # 语义单元规划和讲义 JSON schema
-├── tests/                     # 测试
-└── books/                     # 本地书籍工作区（不提交）
-    └── <book-id>/
-        ├── input/             # 原始 PDF
-        ├── config/            # book-profile、semantic-unit-plan 等
-        ├── pipeline-workspace/
-        │   ├── staging/       # unit 生成产物
-        │   ├── reviews/       # 审校产物
-        │   ├── runs/          # 运行状态
-        │   ├── checkpoints/   # LangGraph checkpointer SQLite
-        │   ├── state/         # 业务 SQLite
-        │   └── reports/       # 规划/校验报告
-        └── study-kb/          # 最终 Obsidian vault
+```powershell
+python scripts/pipeline.py init-book --book my-book --pdf "C:\path\my.pdf" --title "我的书"
+python scripts/pipeline.py profile-pdf       --book my-book
+python scripts/pipeline.py plan-units        --book my-book
+python scripts/pipeline.py validate-unit-plan --book my-book
+python scripts/pipeline.py review-unit-plan  --book my-book   # 交互式审批
+python scripts/pipeline.py run-book          --book my-book --concurrency 3
 ```
 
-## Dataview 兼容
+</details>
 
-所有生成笔记的 frontmatter 包含统一字段，可直接用 Dataview 查询：
+## ⚙️ 配置
+
+`.env`（OpenAI-compatible API；默认 DeepSeek V4）：
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `LLM_API_KEY` | — | API key |
+| `LLM_BASE_URL` | `https://api.deepseek.com` | API 基址 |
+| `LLM_MODEL` | `deepseek-v4-flash` | 讲义生成 |
+| `LLM_REVIEW_MODEL` | `deepseek-v4-flash` | 审校 |
+| `LLM_PLANNER_MODEL` | `deepseek-v4-pro` | 语义规划 / 记忆压缩 |
+| `LLM_REVISE_MODEL` | `deepseek-v4-pro` | 修订重写 |
+| `LLM_TEMPERATURE` | `0.3` | 采样温度 |
+| `LLM_TIMEOUT_SECONDS` | `600` | 读超时（Pro 非流式长响应较慢） |
+| `LLM_MAX_RETRIES` | `2` | 瞬时错误/非法 JSON 重试次数（指数退避；4xx 不重试） |
+| `LLM_SSL_VERIFY` | `true` | SSL 校验 |
+| `RUN_BOOK_CONCURRENCY` | `3` | run-book 并发 unit 数（`1`=完全串行，rolling memory 质量最高） |
+| `OCR_PROVIDER` | `surya` | 本地 OCR，无需 API key |
+| `LLAMA_CPP_BINARY` | 自动探测 | 显式指定 `llama-server` 路径（CPU/Windows 路径） |
+
+> surya-ocr 本地运行，不要求模型支持图片输入；Surya 2 需要本地 vLLM 或 llama.cpp 后端，Windows/CPU 优先用 `llama-server.exe`。
+
+### Dataview 友好
+
+所有笔记 frontmatter 含统一字段（`type`、`unit_id`、`chapter`、`difficulty`、`formula_risk`、`status`、`concepts`、`symbols`、`depends_on`、`source_pages`、`risk_flags`…）：
 
 ```dataview
 TABLE difficulty, formula_risk, status
@@ -231,18 +217,43 @@ WHERE status = "published"
 SORT chapter
 ```
 
-```dataview
-LIST
-FROM "Section-Lessons"
-WHERE contains(concepts, "贝叶斯更新")
+## 📂 项目结构
+
+```text
+pdf-to-study-kb/
+├── scripts/
+│   ├── serve.py              # 本地前端 HTTP 服务（标准库）
+│   ├── web_ops.py            # 前端调用的业务逻辑
+│   ├── pipeline.py           # CLI 入口（6 命令）
+│   ├── pdf_profile.py        # PDF 结构 / 风险分析
+│   ├── unit_plan.py          # 语义切分、校验、人工审批
+│   ├── unit_context.py       # 按 unit 抽取文本 / OCR / 证据
+│   ├── ocr_surya.py          # surya-ocr + llama.cpp 适配
+│   ├── run_book.py           # book 级编排（并发 / 续跑 / 失败隔离）
+│   ├── langgraph_worker.py   # unit 级 LangGraph 图
+│   ├── evidence_verifier.py  # 证据 / 公式 / 幻觉门禁
+│   ├── review_gate.py        # 审校输出门
+│   ├── memory_store.py       # rolling memory + 业务库重建
+│   ├── business_db.py        # 业务 SQLite
+│   ├── cost_guard.py         # token/成本预算
+│   ├── obsidian_indexes.py   # Obsidian 索引 / 卡片生成
+│   └── llm_provider.py       # OpenAI-compatible provider（含重试）
+├── webapp/index.html         # 单页前端（Tailwind/Alpine/marked via CDN）
+├── templates/ · schemas/     # 讲义/审校模板 · JSON schema
+├── tests/                    # pytest
+├── docs/                     # 实现指导 / ADR / 领域文档
+└── books/<book-id>/          # 本地书籍工作区（不提交，仅留原始 PDF）
+    ├── input/ · config/
+    ├── pipeline-workspace/   # staging / reviews / runs / checkpoints / state / reports
+    └── study-kb/             # 最终 Obsidian vault
 ```
 
-## 已知限制
+> `books/` 默认不提交（原始 PDF、SQLite 状态库、中间产物、生成的知识库都不入库）。详见 [执行指导文档](docs/semantic-pdf-to-obsidian-implementation-guide.md)。
 
-1. **surya-ocr 未安装或推理后端不可用时**：高公式页标记 `formula_risk=high` 进 Review-Queue，需人工补充公式后才能发布
-2. **DeepSeek 不支持图片输入**：高公式页 OCR 由 surya-ocr 本地完成，不依赖 DeepSeek 的图片能力
-3. **surya-ocr 中文准确率约 82.5%**：公式识别以 LaTeX 输出，可能需要 review 阶段人工校验
-4. **端到端验证仍需完整实跑**：不同类型的 PDF 可能遇到未覆盖的问题
-5. **不支持纯扫描件 PDF**：surya-ocr 对老旧扫描件准确率较低（约 41.8%）
-6. **成本预估是估算值**：per-unit/per-book token 上限基于估算，实际成本可能有偏差
-7. **DeepSeek 旧模型名称即将停用**：`deepseek-chat`/`deepseek-reasoner` 于 2026/07/24 停用，需使用 `deepseek-v4-flash`/`deepseek-v4-pro`
+## ⚠️ 已知限制
+
+- **OCR 后端不可用时**：高公式页标 `formula_risk=high` 进 `Review-Queue/`，需人工补公式后发布。
+- **不支持纯扫描件**：surya-ocr 对老旧扫描件准确率较低；中文常规排版约 82.5%，公式以 LaTeX 输出，可能需 review 校验。
+- **证据门禁是「高精度而非全覆盖」**：能确定性拦截幻觉证据和未落地结论；「引用的证据是否真的支撑该句」属语义判断，交由 reviewer 模型 + 人工 Review-Queue。
+- **成本上限是估算**：per-unit / per-book token 上限基于字符估算，实际可能有偏差。
+- **端到端仍需实跑验证**：不同排版的 PDF 可能遇到未覆盖的边界；失败会被隔离进复核队列，不会污染知识库。

@@ -130,6 +130,8 @@ def _evidence_from_blocks(unit_id: str, text_blocks: list[dict[str, Any]], ocr_b
             "page": block["page"],
             "bbox": [],
             "preview": block["text_preview"],
+            # LaTeX 必须随 OCR 证据传递，author 才能把公式直接嵌入正文并进入 Formula-Ledger
+            "latex": block.get("latex_preview", ""),
             "sha256": block["sha256"],
             "evidence_type": "ocr",
         })

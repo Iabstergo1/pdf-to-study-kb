@@ -35,15 +35,13 @@ PHASE1_DIRS = [
 ]
 
 
-def test_ensure_dirs_creates_semantic_unit_and_legacy_dirs(tmp_path):
+def test_ensure_dirs_creates_semantic_unit_dirs(tmp_path):
     book_root = tmp_path / "books" / "phase1-book"
 
     pipeline._ensure_dirs(book_root)
 
     for rel in PHASE1_DIRS:
         assert (book_root / rel).is_dir(), f"missing Phase 1 dir: {rel}"
-
-    assert (book_root / "pipeline-workspace" / "tasks").is_dir()
 
 
 def test_pipeline_help_lists_semantic_unit_commands():

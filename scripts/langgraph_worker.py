@@ -18,15 +18,6 @@ import yaml
 import business_db
 import memory_store
 from llm_provider import create_provider, load_provider_config
-from validate_section_lesson import validate_section_lesson
-
-
-@dataclass
-class WorkerConfig:
-    max_revision_retry: int = 2
-    min_source_chars: int = 50
-    author_model: str | None = None
-    review_model: str | None = None
 
 
 class UnitGraphState(TypedDict, total=False):
@@ -44,6 +35,11 @@ class UnitGraphState(TypedDict, total=False):
     status: str
     risk_flags: list[str]
     errors: list[str]
+    concepts: list[dict[str, Any]]
+    symbols: list[dict[str, Any]]
+    questions: list[str]
+    claims: list[dict[str, Any]]
+    summary: str
     review_queue_reason: str
     budget_result: dict[str, Any]
     pause_reason: str
@@ -54,6 +50,7 @@ class UnitWorkerConfig:
     max_revision_retry: int = 3
     author_model: str | None = None
     review_model: str | None = None
+    revise_model: str | None = None
     max_unit_input_tokens: int = 200000
     max_unit_output_tokens: int = 8000
     max_book_tokens: int = 10000000
@@ -72,10 +69,25 @@ class RuntimeDeps:
 
 
 AUTHOR_EVIDENCE_SYSTEM = (
-    "你是 semantic unit 学习讲义作者。只输出 JSON，字段 draft 为完整 Markdown。"
+    "你是 semantic unit 学习讲义作者。只输出 JSON 对象。"
+    "draft 字段为完整 Markdown 讲义正文，不要包含 YAML frontmatter（由管线生成）。"
     "每个事实性段落和每个核心结论必须在句末引用至少一个 evidence_id，格式如 [E-section-3.1-0005]。"
     "只能引用 context.evidence_candidates 中存在的 evidence_id；不要编造、改写或省略 evidence_id。"
     "如果某个事实没有可用证据，写 [证据缺失] 并降低结论强度。"
+    "【公式引用规则】正文中出现的每个公式，必须优先从 evidence_candidates 中找 evidence_type=ocr 的对应条目，"
+    "将其 latex 字段的内容直接嵌入正文（行内公式用 $...$，独立公式用 $$...$$），并在句末引用该 OCR 证据的 evidence_id。"
+    "若该公式只有 text 证据没有 ocr 证据，引用 text 证据并在公式后标注 [公式待核]。"
+    "若两者都没有，写 [公式缺失]，禁止凭空补全或猜测公式内容。"
+    "另外输出以下字段："
+    "summary（本 unit 一两句话纯文本摘要，供 rolling memory）；"
+    "concepts（数组，每项 {term, definition}，列出本 unit 引入的核心概念及简短定义，没有则空数组）；"
+    "symbols（数组，每项 {symbol, meaning}，列出本 unit 出现的数学符号及含义，没有则空数组）；"
+    "questions（数组，3-5 个针对本 unit 的自测问题字符串，没有则空数组）；"
+    "claims（数组，逐条列出本 unit 的核心论断，每项 {statement, evidence_ids, type}："
+    "statement=论断文本；evidence_ids=支撑它的 evidence_id 数组（只能取自 context.evidence_candidates）；"
+    "type 三选一——source=对原文的压缩/复述（必须给至少一个有效 evidence_id）、"
+    "explanation=你对原文的学习化解释或推导、bridge=个人桥接/类比/联想（可无 evidence_ids）。"
+    "凡 type=source 的论断必须有有效 evidence_id；严禁给出 evidence_candidates 中不存在的 id）。"
 )
 
 
@@ -83,6 +95,8 @@ REVISER_EVIDENCE_SYSTEM = (
     "你是 semantic unit 讲义修订员。只输出 JSON，字段 draft 为修订后的完整 Markdown。"
     "修订时必须保留或补齐每个事实性段落和核心结论句末的 evidence_id。"
     "只能引用 context.evidence_candidates 中存在的 evidence_id。"
+    "同时重新输出 claims 数组（每项 {statement, evidence_ids, type}，type 为 source/explanation/bridge），"
+    "使其与修订后的正文一致；type=source 的论断必须有有效 evidence_id，且不得引用不存在的 id。"
 )
 
 
@@ -99,12 +113,16 @@ def _evidence_prompt_items(context: dict[str, Any], limit: int = 80) -> list[dic
     for item in context.get("evidence_candidates", [])[:limit]:
         if not item.get("evidence_id"):
             continue
-        items.append({
+        prompt_item = {
             "evidence_id": item["evidence_id"],
             "page": item.get("page"),
             "evidence_type": item.get("evidence_type", "text"),
             "preview": item.get("preview", ""),
-        })
+        }
+        # OCR 证据附带 LaTeX 全文，author 据此把公式嵌入正文（$...$）并引用该证据
+        if item.get("evidence_type") == "ocr" and item.get("latex"):
+            prompt_item["latex"] = item["latex"]
+        items.append(prompt_item)
     return items
 
 
@@ -119,7 +137,8 @@ def _author_payload(state: UnitGraphState) -> dict[str, Any]:
             "scope": "每个事实性段落和每个核心结论句末至少一个 evidence_id",
             "allowed_evidence": _evidence_prompt_items(context),
         },
-        "memory": state.get("memory", {}),
+        # 只传精简 memory 视图（去掉随书膨胀的 evidence_ledger），避免后半本撑爆 token 预算
+        "memory": memory_store.prompt_memory_view(state.get("memory", {})),
     }
 
 
@@ -171,9 +190,10 @@ def prepare_context(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -
 def enforce_unit_budget(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
     from cost_guard import enforce_budget, estimate_unit_tokens
 
+    # 用与作者 prompt 一致的精简 memory 视图估算，预算判断才与真实输入相符
     unit_estimate = estimate_unit_tokens(
         state.get("context", {}),
-        state.get("memory", {}),
+        memory_store.prompt_memory_view(state.get("memory", {})),
         deps.config.max_unit_output_tokens,
     )
     run_estimate = deps.run_estimate or {"tokens": 0, "cost": 0.0}
@@ -203,18 +223,46 @@ def generate_note(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> 
         getattr(deps.provider_config, "provider", "unknown"),
         deps.config.author_model or getattr(deps.provider_config, "model", ""),
     )
-    return {"draft": draft, "status": "drafted"}
+    from evidence_verifier import normalize_claims
+
+    return {
+        "draft": draft,
+        "status": "drafted",
+        "summary": _coerce_str(response.get("summary")),
+        "concepts": _coerce_dict_list(response.get("concepts")),
+        "symbols": _coerce_dict_list(response.get("symbols")),
+        "questions": _coerce_str_list(response.get("questions")),
+        # None 表示模型未输出结构化 claims → verify 退回正则 advisory；list 则走结构化校验
+        "claims": normalize_claims(response.get("claims")),
+    }
+
+
+def _coerce_str(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _coerce_dict_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
 
 
 def verify_evidence(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
     from evidence_verifier import verify_note
 
-    validation = verify_note(state.get("draft", ""), state.get("context", {}))
+    validation = verify_note(state.get("draft", ""), state.get("context", {}), claims=state.get("claims"))
     risk_flags = sorted(set(state.get("risk_flags", []) + validation.get("risk_flags", [])))
     validation = {**validation, "risk_flags": risk_flags, "passed": not set(risk_flags).intersection({
         "formula_loss_risk",
         "screenshot_ocr_failed",
         "evidence_missing",
+        "evidence_hallucinated",
     })}
     business_db.record_event(book_root, state["run_id"], state["unit_id"], "verify_evidence", "ok", validation)
     return {"validation": validation, "risk_flags": risk_flags}
@@ -260,6 +308,15 @@ def review_note(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> di
     return {"review_decision": decision, "review_report": report, "risk_flags": risk_flags}
 
 
+def _revise_model(deps: RuntimeDeps) -> str | None:
+    return (
+        deps.config.revise_model
+        or getattr(deps.provider_config, "revise_model", None)
+        or deps.config.author_model
+        or getattr(deps.provider_config, "model", None)
+    )
+
+
 def revise_note(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
     response = deps.provider.chat_json(
         system=REVISER_EVIDENCE_SYSTEM,
@@ -272,7 +329,7 @@ def revise_note(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> di
             "review_decision": state["review_decision"],
             "review_report": state.get("review_report", ""),
         }, allow_unicode=True, sort_keys=False),
-        model=deps.config.author_model or getattr(deps.provider_config, "model", None),
+        model=_revise_model(deps),
     )
     draft = response.get("draft") or response.get("content")
     if not isinstance(draft, str) or not draft.strip():
@@ -283,9 +340,18 @@ def revise_note(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> di
         state["unit_id"],
         "revise_note",
         getattr(deps.provider_config, "provider", "unknown"),
-        deps.config.author_model or getattr(deps.provider_config, "model", ""),
+        _revise_model(deps) or "",
     )
-    return {"draft": draft, "revise_count": state.get("revise_count", 0) + 1}
+    from evidence_verifier import normalize_claims
+
+    # 始终以修订后的 claims 为准（漏输出则置 None）。不能沿用上一版：旧 source 论断可能已不在
+    # 新正文里，却因 evidence_id 仍有效而蒙混过 verify。置 None 后 verify 走回退路径，在新正文
+    # 上重新做幻觉 + 零落地校验。
+    return {
+        "draft": draft,
+        "claims": normalize_claims(response.get("claims")),
+        "revise_count": state.get("revise_count", 0) + 1,
+    }
 
 
 def update_memory(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
@@ -295,25 +361,77 @@ def update_memory(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> 
         state["unit_id"],
         state.get("memory", memory_store.new_memory()),
         {
-            "summary": state["draft"][:500],
-            "concepts": [],
-            "symbols": [],
-            "evidence": [],
+            "summary": state.get("summary") or state["draft"][:500],
+            "concepts": state.get("concepts", []),
+            "symbols": state.get("symbols", []),
+            "evidence": _referenced_evidence(state),
         },
+        provider=deps.provider,
+        provider_config=deps.provider_config,
     )
     business_db.record_event(book_root, state["run_id"], state["unit_id"], "update_memory", "ok", {})
     return {"memory": memory}
 
 
+def _referenced_evidence(state: UnitGraphState) -> list[dict[str, Any]]:
+    """Build evidence-ledger items from evidence_ids actually cited in the draft."""
+    from evidence_verifier import extract_evidence_refs
+
+    refs = extract_evidence_refs(state.get("draft", ""))
+    candidates = {
+        item.get("evidence_id"): item
+        for item in state.get("context", {}).get("evidence_candidates", [])
+        if item.get("evidence_id")
+    }
+    items = []
+    for evidence_id in sorted(refs):
+        candidate = candidates.get(evidence_id)
+        if not candidate:
+            continue
+        items.append({
+            "evidence_id": evidence_id,
+            "unit_id": state["unit_id"],
+            "claim": candidate.get("preview", ""),
+            "page": candidate.get("page", 0) or 0,
+            "source_heading": None,
+            "evidence_type": candidate.get("evidence_type", "text"),
+            "payload": candidate,
+        })
+    return items
+
+
 def publish_note(book_root: Path, state: UnitGraphState, deps: RuntimeDeps) -> dict[str, Any]:
+    from obsidian_indexes import render_lesson
+
     unit_id = state["unit_id"]
     lesson_dir = book_root / "study-kb" / "Section-Lessons"
     lesson_dir.mkdir(parents=True, exist_ok=True)
     _write_unit_artifacts(book_root, state)
-    (lesson_dir / f"{unit_id}.md").write_text(state["draft"], encoding="utf-8")
+    _write_unit_questions(book_root, unit_id, state.get("questions", []))
+    _write_unit_claims(book_root, unit_id, state.get("claims") or [])
+    source_pdf = (deps.pdf_profile or {}).get("source_pdf", "")
+    content = render_lesson(state["unit"], source_pdf, state.get("memory", {}), state["draft"])
+    (lesson_dir / f"{unit_id}.md").write_text(content, encoding="utf-8")
     _remove_managed_review_queue_note(book_root, unit_id)
     business_db.record_event(book_root, state["run_id"], unit_id, "publish_note", "ok", {})
     return {"status": "published"}
+
+
+def _write_unit_questions(book_root: Path, unit_id: str, questions: list[str]) -> None:
+    staging_dir = book_root / "pipeline-workspace" / "staging" / unit_id
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    (staging_dir / "questions.json").write_text(
+        json.dumps(questions, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _write_unit_claims(book_root: Path, unit_id: str, claims: list[dict[str, Any]]) -> None:
+    """落盘结构化 claims，供 Claims 笔记直接渲染（区分 source/explanation/bridge）。"""
+    staging_dir = book_root / "pipeline-workspace" / "staging" / unit_id
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    (staging_dir / "claims.json").write_text(
+        json.dumps(claims, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def _remove_managed_review_queue_note(book_root: Path, unit_id: str) -> None:
@@ -448,14 +566,14 @@ def route_after_cost_guard(state: UnitGraphState) -> str:
 
 
 def route_after_verify_evidence(state: UnitGraphState) -> str:
-    blocking = {"formula_loss_risk", "screenshot_ocr_failed", "evidence_missing"}
+    blocking = {"formula_loss_risk", "screenshot_ocr_failed", "evidence_missing", "evidence_hallucinated"}
     if blocking.intersection(set(state.get("risk_flags", []))):
         return "review_queue"
     return "review"
 
 
 def route_after_review(state: UnitGraphState) -> str:
-    blocking = {"formula_loss_risk", "screenshot_ocr_failed", "evidence_missing"}
+    blocking = {"formula_loss_risk", "screenshot_ocr_failed", "evidence_missing", "evidence_hallucinated"}
     if blocking.intersection(set(state.get("risk_flags", []))):
         return "review_queue"
     decision = state.get("review_decision", {}).get("decision", "reject")
@@ -478,7 +596,7 @@ def _auto_review_queue_reason(state: UnitGraphState) -> str:
 
 
 def _first_blocking_reason(state: UnitGraphState) -> str:
-    for reason in ["formula_loss_risk", "screenshot_ocr_failed", "evidence_missing"]:
+    for reason in ["formula_loss_risk", "screenshot_ocr_failed", "evidence_missing", "evidence_hallucinated"]:
         if reason in state.get("risk_flags", []):
             return reason
     return "validation_failed"
@@ -530,336 +648,3 @@ def _normalize_unit_decision(raw: dict[str, Any], unit_id: str) -> dict[str, Any
     ):
         decision["confidence"] = "medium"
     return decision
-
-
-def run_langgraph_worker(book_root: Path, args, run_state, plan: dict[str, Any], manager):
-    provider_config = load_provider_config()
-    provider = create_provider(provider_config)
-    config = WorkerConfig(
-        max_revision_retry=int(getattr(args, "max_revision_retry", 2)),
-        author_model=provider_config.model,
-        review_model=provider_config.review_model,
-    )
-    queue = plan["queue"]
-    reviewed = 0
-    human = 0
-    failed = 0
-    skipped = 0
-
-    print(f"[LANGGRAPH] 书籍：{args.book}")
-    print(f"[LANGGRAPH] 待执行 {len(queue)} 个小节")
-    print(f"[LANGGRAPH] 阻塞 {len(plan['blocked'])} 个小节")
-
-    for section in queue:
-        section_id = section["id"]
-        if _accepted_outputs_exist(book_root, section_id):
-            skipped += 1
-            manager.update_section(run_state, section_id, "langgraph", "reviewed", skipped_existing=True)
-            continue
-        try:
-            result = run_section_graph(
-                book_root=book_root,
-                book_id=args.book,
-                section=section,
-                provider=provider,
-                config=config,
-                run_dir=run_state.run_dir,
-            )
-        except Exception as exc:
-            failed += 1
-            manager.update_section(run_state, section_id, "langgraph", "failed", error=str(exc))
-            print(f"[LANGGRAPH] [FAIL] {section_id}: {exc}")
-            continue
-
-        status = result["status"]
-        if status == "reviewed":
-            reviewed += 1
-            manager.update_section(run_state, section_id, "langgraph", "reviewed")
-            print(f"[LANGGRAPH] [OK] {section_id}: reviewed")
-        elif status == "needs_human_review":
-            human += 1
-            manager.update_section(
-                run_state,
-                section_id,
-                "langgraph",
-                "needs_human_review",
-                error=result.get("error", ""),
-            )
-            print(f"[LANGGRAPH] [HUMAN] {section_id}: {result.get('error', '')}")
-        else:
-            failed += 1
-            manager.update_section(run_state, section_id, "langgraph", "failed", error=result.get("error", ""))
-            print(f"[LANGGRAPH] [FAIL] {section_id}: {result.get('error', '')}")
-
-    summary = {
-        "reviewed": reviewed,
-        "needs_human_review": human,
-        "failed": failed,
-        "skipped_existing": skipped,
-    }
-    summary_path = run_state.run_dir / "langgraph-worker-summary.json"
-    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[LANGGRAPH] summary: reviewed={reviewed}, human={human}, failed={failed}, skipped={skipped}")
-    return summary
-
-
-def run_section_graph(
-    book_root: Path,
-    book_id: str,
-    section: dict[str, Any],
-    provider,
-    config: WorkerConfig,
-    run_dir: Path,
-) -> dict[str, Any]:
-    """Run one section through load -> author -> validate -> review -> revise."""
-    state = {
-        "book_id": book_id,
-        "section_id": section["id"],
-        "section": section,
-        "revise_count": 0,
-        "status": "not_started",
-        "error": "",
-    }
-
-    loaded = _load_section(book_root, section, config)
-    state.update(loaded)
-    if loaded["status"] == "needs_human_review":
-        return _checkpoint(run_dir, {**state, "node": "human_interrupt"})
-    _checkpoint(run_dir, {**state, "node": "load_section", "status": "loaded"})
-
-    author = _author(provider, config, state)
-    state.update(author)
-    _checkpoint(run_dir, {**state, "node": "author", "status": "authored"})
-
-    while True:
-        validation = validate_section_lesson(state["draft"])
-        state["validation"] = validation
-        if not validation["passed"]:
-            state["status"] = "needs_human_review"
-            state["error"] = "validate 失败: " + "; ".join(validation["errors"])
-            return _checkpoint(run_dir, {**state, "node": "human_interrupt"})
-        _checkpoint(run_dir, {**state, "node": "validate", "status": "validated"})
-
-        review = _review(provider, config, state)
-        state.update(review)
-        decision = state["review_decision"].get("decision")
-        confidence = state["review_decision"].get("confidence", "high")
-        _checkpoint(run_dir, {**state, "node": "review", "status": decision})
-
-        if decision == "accept" and confidence != "low":
-            _write_outputs(book_root, state)
-            state["status"] = "reviewed"
-            return _checkpoint(run_dir, {**state, "node": "write_output"})
-
-        if decision == "revise" and confidence != "low":
-            if state["revise_count"] >= config.max_revision_retry:
-                state["status"] = "needs_human_review"
-                state["error"] = "超过修订上限"
-                return _checkpoint(run_dir, {**state, "node": "human_interrupt"})
-            revised = _revise(provider, config, state)
-            state.update(revised)
-            state["revise_count"] += 1
-            _checkpoint(run_dir, {**state, "node": "revise", "status": "revised"})
-            continue
-
-        state["status"] = "needs_human_review"
-        state["error"] = f"review decision={decision}, confidence={confidence}"
-        return _checkpoint(run_dir, {**state, "node": "human_interrupt"})
-
-
-def _load_section(book_root: Path, section: dict[str, Any], config: WorkerConfig) -> dict[str, Any]:
-    section_id = section["id"]
-    path = book_root / "pipeline-workspace" / "staging" / section_id / "source-slice.md"
-    if not path.exists():
-        return {"status": "needs_human_review", "error": "source-slice.md 不存在"}
-    content = path.read_text(encoding="utf-8", errors="replace")
-    if "needs_boundary_review: true" in content[:1000]:
-        return {"status": "needs_human_review", "error": "source-slice 标记 needs_boundary_review=true"}
-    if "## 原文内容" not in content:
-        return {"status": "needs_human_review", "error": "source-slice.md 缺少 ## 原文内容"}
-    source_content = content.split("## 原文内容", 1)[1].strip()
-    if len(source_content) < config.min_source_chars:
-        return {"status": "needs_human_review", "error": "source-slice 原文内容过短"}
-    return {
-        "source_slice_path": str(path),
-        "source_content": source_content,
-        "source_slice": content,
-        "status": "loaded",
-    }
-
-
-def _author(provider, config: WorkerConfig, state: dict[str, Any]) -> dict[str, Any]:
-    response = provider.chat_json(
-        system="你是学习讲义作者。只输出 JSON，字段 draft 为完整 Markdown 讲义。",
-        user=_author_prompt(state),
-        model=config.author_model,
-    )
-    draft = response.get("draft") or response.get("content")
-    if not isinstance(draft, str) or not draft.strip():
-        raise ValueError("author 输出缺少 draft")
-    return {"draft": draft}
-
-
-def _review(provider, config: WorkerConfig, state: dict[str, Any]) -> dict[str, Any]:
-    response = provider.chat_json(
-        system="你是学习讲义审校员。只输出 JSON，包含 decision 对象和 report Markdown。",
-        user=_review_prompt(state),
-        model=config.review_model,
-    )
-    decision = _normalize_decision(response.get("decision") or response, state["section_id"])
-    report = response.get("report") or response.get("review_report") or "# Review\n\n未提供审校报告"
-    return {"review_decision": decision, "review_report": report}
-
-
-def _revise(provider, config: WorkerConfig, state: dict[str, Any]) -> dict[str, Any]:
-    response = provider.chat_json(
-        system="你是学习讲义修订员。只输出 JSON，字段 draft 为修订后的完整 Markdown 讲义。",
-        user=_revise_prompt(state),
-        model=config.author_model,
-    )
-    draft = response.get("draft") or response.get("content")
-    if not isinstance(draft, str) or not draft.strip():
-        raise ValueError("revise 输出缺少 draft")
-    return {"draft": draft}
-
-
-def _normalize_decision(raw: dict[str, Any], section_id: str) -> dict[str, Any]:
-    if not isinstance(raw, dict):
-        raise ValueError("review decision 必须是 JSON 对象")
-    decision = dict(raw)
-    decision.setdefault("section_id", section_id)
-    decision.setdefault("reviewer", "langgraph-worker")
-    decision.setdefault("review_date", date.today().isoformat())
-    decision.setdefault("decision", "reject")
-    decision.setdefault("confidence", "low")
-    decision.setdefault("scores", {})
-    decision.setdefault("required_fixes", [])
-    decision.setdefault("warnings", [])
-    decision.setdefault("notes", "")
-    if decision["decision"] not in {"accept", "revise", "reject"}:
-        decision["decision"] = "reject"
-    return decision
-
-
-def _write_outputs(book_root: Path, state: dict[str, Any]):
-    section_id = state["section_id"]
-    draft_dir = book_root / "pipeline-workspace" / "staging" / section_id
-    review_dir = book_root / "pipeline-workspace" / "reviews" / section_id
-    draft_dir.mkdir(parents=True, exist_ok=True)
-    review_dir.mkdir(parents=True, exist_ok=True)
-    (draft_dir / "section-lesson-draft.md").write_text(state["draft"], encoding="utf-8")
-    (review_dir / "review-decision.yaml").write_text(
-        yaml.dump(state["review_decision"], allow_unicode=True, sort_keys=False),
-        encoding="utf-8",
-    )
-    (review_dir / "review-report.md").write_text(state["review_report"], encoding="utf-8")
-
-
-def _checkpoint(run_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
-    checkpoint_dir = Path(run_dir) / "langgraph-checkpoints"
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    serializable = _checkpoint_view(state)
-    serializable["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    path = checkpoint_dir / f"{state['section_id']}.json"
-    path.write_text(json.dumps(serializable, ensure_ascii=False, indent=2), encoding="utf-8")
-    return serializable
-
-
-def _checkpoint_view(state: dict[str, Any]) -> dict[str, Any]:
-    keys = [
-        "book_id", "section_id", "node", "status", "error", "revise_count",
-        "validation", "review_decision", "source_slice_path",
-    ]
-    return {key: state.get(key) for key in keys if key in state}
-
-
-def _accepted_outputs_exist(book_root: Path, section_id: str) -> bool:
-    draft = book_root / "pipeline-workspace" / "staging" / section_id / "section-lesson-draft.md"
-    decision_path = book_root / "pipeline-workspace" / "reviews" / section_id / "review-decision.yaml"
-    if not draft.exists() or not decision_path.exists():
-        return False
-    try:
-        decision = yaml.safe_load(decision_path.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError:
-        return False
-    return decision.get("decision") == "accept" and not (decision.get("required_fixes") or [])
-
-
-def _author_prompt(state: dict[str, Any]) -> str:
-    section = state["section"]
-    book_id = state["book_id"]
-    formula_risk = section.get("formula_risk", "unknown")
-    if formula_risk not in ("low", "medium", "high"):
-        formula_risk = "medium"
-    pages = section.get("source_locator", {}).get("pages", [])
-    return yaml.dump({
-        "task": "根据 source_content 生成完整小节学习讲义",
-        "section": section,
-        "source_content": state["source_content"],
-        "required_output": {
-            "draft": (
-                "完整 Markdown，必须以 YAML frontmatter 开头（--- 包裹），"
-                "然后是 12 个必备章节。格式如下：\n\n"
-                "---\n"
-                f"id: {section['id']}\n"
-                "type: section-lesson\n"
-                f"source_title: \"{book_id}\"\n"
-                "source_locator:\n"
-                f"  pages: {pages}\n"
-                f"book_order: \"{section.get('source_order', '')}\"\n"
-                "importance: B\n"
-                "difficulty: 3\n"
-                f"formula_risk: {formula_risk}\n"
-                "review_status: draft\n"
-                "generation_stage: draft\n"
-                "---\n\n"
-                f"# {section.get('title', section['id'])}\n\n"
-                "## 学习定位\n...\n\n"
-                "## 先记住的结论\n...\n\n"
-                "## 必须掌握\n...\n\n"
-                "## 首遍可略读\n...\n\n"
-                "## 核心概念\n...\n\n"
-                "## 模型结构、论证骨架或推导骨架\n...\n\n"
-                "## 直觉解释\n...\n\n"
-                "## 容易误解的点\n...\n\n"
-                "## 与个人知识体系的连接候选\n...\n\n"
-                "## 自测问题\n...\n\n"
-                "## 何时回原文\n...\n\n"
-                "## 原文定位\n..."
-            ),
-        },
-    }, allow_unicode=True, sort_keys=False)
-
-
-def _review_prompt(state: dict[str, Any]) -> str:
-    return yaml.dump({
-        "task": "审校 draft 是否忠实、可学习、结构完整",
-        "section": state["section"],
-        "source_content": state["source_content"],
-        "draft": state["draft"],
-        "required_output": {
-            "decision": {
-                "decision": "accept|revise|reject",
-                "confidence": "high|medium|low",
-                "scores": "faithfulness/learnability/importance/source_return/structure",
-                "required_fixes": [],
-                "warnings": [],
-                "notes": "",
-            },
-            "report": "Markdown 审校报告",
-        },
-    }, allow_unicode=True, sort_keys=False)
-
-
-def _revise_prompt(state: dict[str, Any]) -> str:
-    return yaml.dump({
-        "task": "根据审校意见修订 draft，返回完整 Markdown",
-        "section": state["section"],
-        "source_content": state["source_content"],
-        "draft": state["draft"],
-        "review_decision": state["review_decision"],
-        "review_report": state.get("review_report", ""),
-        "required_output": {
-            "draft": "完整 Markdown，必须保留 YAML frontmatter（--- 包裹）和全部 12 个必备章节标题",
-        },
-    }, allow_unicode=True, sort_keys=False)

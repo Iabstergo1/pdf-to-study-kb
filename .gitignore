@@ -11,10 +11,21 @@ venv/
 .env
 .env.*
 !.env.example
+# 非 .env 的密钥泄露向量（PowerShell $PROFILE、私钥、凭据转储等）
+*profile.ps1
+Microsoft.PowerShell_profile.ps1
+.envrc
+secrets.json
+*.pem
+*.key
+*.pfx
 
 # Local book workspaces and generated assets
 books/*
 !books/.gitkeep
+
+# Local binary tooling (llama.cpp build, large; not for VCS)
+tools/
 
 # Temporary files
 tmp/

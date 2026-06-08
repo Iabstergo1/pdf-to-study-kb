@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import threading
 import time
 import json
 from pathlib import Path
@@ -16,6 +17,14 @@ class OcrUnavailable(RuntimeError):
 
 
 _PREDICTOR: Any | None = None
+# OCR 是进程级共享资源：单个 llama.cpp 推理服务（SURYA_INFERENCE_PARALLEL=1）。
+# run-book 并发执行多个 unit 时，多个线程会同时进入 prepare_context 调 OCR：
+#   - 冷启动下 _recognition_predictor 的惰性初始化会竞态，重复 spawn llama-server
+#     抢同一端口、或同时把模型载入显存导致 OOM；
+#   - 单 parallel 服务器也无法真正并发处理多请求。
+# 因此用一把可重入锁串行化「predictor 初始化 + 单次推理」。llama-server 本就 parallel=1，
+# 串行 OCR 不损失实际吞吐，而各 unit 的 LLM 生成/审校仍可并发。
+_OCR_LOCK = threading.RLock()
 
 
 def is_surya_available() -> bool:
@@ -38,14 +47,21 @@ def resolve_llama_cpp_binary() -> str | None:
         return found
 
     local_app_data = os.environ.get("LOCALAPPDATA")
-    if not local_app_data:
-        return None
-    winget_root = Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
-    if not winget_root.exists():
-        return None
-    matches = sorted(winget_root.glob("ggml.llamacpp_*/*llama-server.exe"))
-    if matches:
-        return str(matches[-1])
+    if local_app_data:
+        winget_root = Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
+        if winget_root.exists():
+            matches = sorted(winget_root.glob("ggml.llamacpp_*/*llama-server.exe"))
+            if matches:
+                return str(matches[-1])
+
+    # Bundled build shipped with the repo (tools/llama-cpp/llama-server.exe);
+    # lowest priority so explicit env / PATH / WinGet installs still win.
+    repo_binary = (
+        Path(__file__).resolve().parent.parent / "tools" / "llama-cpp" / "llama-server.exe"
+    )
+    if repo_binary.exists():
+        return str(repo_binary)
+
     return None
 
 
@@ -109,8 +125,38 @@ def _cached_surya_gguf_paths() -> tuple[str, str] | None:
     return None
 
 
+def _ensure_loopback_proxy_bypass() -> None:
+    """Bypass any system proxy for the local llama-server.
+
+    Surya probes the inference server with ``httpx.Client(trust_env=True)``. On
+    Windows with a system (WinINET) proxy enabled, httpx routes the loopback
+    ``/health`` checks through the proxy and they fail (503), so OCR never
+    starts. Promote the effective proxy to explicit ``HTTP(S)_PROXY`` env vars
+    (so external calls such as the DeepSeek API keep working even though adding
+    ``NO_PROXY`` makes urllib stop reading the registry), then add the loopback
+    hosts to ``NO_PROXY`` so health checks connect directly.
+    """
+    import urllib.request
+
+    detected = urllib.request.getproxies()
+    for scheme in ("http", "https"):
+        proxy = detected.get(scheme)
+        if proxy:
+            os.environ.setdefault(f"{scheme.upper()}_PROXY", proxy)
+            os.environ.setdefault(f"{scheme}_proxy", proxy)
+
+    loopback = ["127.0.0.1", "localhost", "::1"]
+    for var in ("NO_PROXY", "no_proxy"):
+        existing = [h.strip() for h in os.environ.get(var, "").split(",") if h.strip()]
+        for host in loopback:
+            if host not in existing:
+                existing.append(host)
+        os.environ[var] = ",".join(existing)
+
+
 def configure_llama_cpp_binary() -> None:
     cleanup_stale_llamacpp_server_state()
+    _ensure_loopback_proxy_bypass()
     binary = resolve_llama_cpp_binary()
     if not binary:
         return
@@ -179,11 +225,14 @@ def normalize_surya_result(result: Any) -> dict[str, Any]:
 
 
 def recognize_page_image(image_path: Path) -> dict[str, Any]:
-    predictor = _recognition_predictor()
     from PIL import Image
 
-    with Image.open(image_path) as image:
-        result = predictor([image.copy()])
+    # 串行化 predictor 初始化与推理：单 parallel 的 llama.cpp 服务无法真正并发，
+    # 加锁可避免并发 unit 竞态 spawn 多个 llama-server。
+    with _OCR_LOCK:
+        predictor = _recognition_predictor()
+        with Image.open(image_path) as image:
+            result = predictor([image.copy()])
     return normalize_surya_result(result)
 
 
@@ -191,16 +240,21 @@ def _recognition_predictor():
     global _PREDICTOR
     if _PREDICTOR is not None:
         return _PREDICTOR
-    try:
-        configure_llama_cpp_binary()
-        from surya.inference import SuryaInferenceManager
-        from surya.recognition import RecognitionPredictor
-    except ImportError as exc:
-        raise OcrUnavailable("surya-ocr is not installed") from exc
+    # 双检锁：即便此函数被 recognize_page_image 以外的路径直接调用，也保证
+    # 模型/服务只初始化一次。
+    with _OCR_LOCK:
+        if _PREDICTOR is not None:
+            return _PREDICTOR
+        try:
+            configure_llama_cpp_binary()
+            from surya.inference import SuryaInferenceManager
+            from surya.recognition import RecognitionPredictor
+        except ImportError as exc:
+            raise OcrUnavailable("surya-ocr is not installed") from exc
 
-    manager = SuryaInferenceManager()
-    _PREDICTOR = RecognitionPredictor(manager)
-    return _PREDICTOR
+        manager = SuryaInferenceManager()
+        _PREDICTOR = RecognitionPredictor(manager)
+        return _PREDICTOR
 
 
 def extract_latex_preview(html: str) -> str:

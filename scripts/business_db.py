@@ -81,7 +81,14 @@ def events_jsonl_path(book_root: Path, run_id: str) -> Path:
 def connect(book_root: Path) -> sqlite3.Connection:
     path = business_db_path(book_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(path)
+    # WAL + busy_timeout：run-book 并发执行多个 unit 时，多个线程会并发写本库。
+    # WAL 允许一写多读，busy_timeout 让短暂写锁自动重试而非立刻报 "database is locked"。
+    conn = sqlite3.connect(path, timeout=30.0)
+    # busy_timeout 必须先于 journal_mode=WAL：切换 WAL 模式本身要短暂独占锁，
+    # 若先发 WAL pragma 而 busy_timeout 未生效，并发下这一句会立刻 "database is locked"。
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
 
 
 def initialize_business_db(book_root: Path) -> Path:
@@ -191,6 +198,53 @@ def record_memory_snapshot(
             """,
             (run_id, unit_id, json_dumps(memory), utc_now()),
         )
+
+
+def load_evidence_ledger(book_root: Path) -> list[dict[str, Any]]:
+    """读取完整 evidence_ledger 表（按 evidence_id 去重、INSERT OR REPLACE 保最新）。
+
+    用于从持久化业务库重建聚合索引，使局部/续跑也能产出全书一致的 Claims / Formula-Ledger，
+    而不依赖某次运行的进程内瞬时 memory。"""
+    initialize_business_db(book_root)
+    items: list[dict[str, Any]] = []
+    with connect(book_root) as conn:
+        rows = conn.execute(
+            "SELECT evidence_id, unit_id, claim, page, source_heading, evidence_type, payload_json "
+            "FROM evidence_ledger ORDER BY unit_id, evidence_id"
+        ).fetchall()
+    for evidence_id, unit_id, claim, page, source_heading, evidence_type, payload_json in rows:
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+        except json.JSONDecodeError:
+            payload = {}
+        items.append({
+            "evidence_id": evidence_id,
+            "unit_id": unit_id,
+            "claim": claim,
+            "page": page,
+            "source_heading": source_heading,
+            "evidence_type": evidence_type,
+            "payload": payload,
+        })
+    return items
+
+
+def load_latest_memory_snapshots(book_root: Path) -> list[dict[str, Any]]:
+    """返回每个 unit_id 的最新 memory 快照 blob（按 id 取最大）。"""
+    initialize_business_db(book_root)
+    with connect(book_root) as conn:
+        rows = conn.execute(
+            "SELECT m.memory_json FROM memory_snapshots m "
+            "JOIN (SELECT unit_id, MAX(id) AS max_id FROM memory_snapshots GROUP BY unit_id) latest "
+            "ON m.id = latest.max_id"
+        ).fetchall()
+    snapshots = []
+    for (blob,) in rows:
+        try:
+            snapshots.append(json.loads(blob))
+        except json.JSONDecodeError:
+            continue
+    return snapshots
 
 
 def record_evidence(

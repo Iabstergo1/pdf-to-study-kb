@@ -1,8 +1,11 @@
-"""Book-level deterministic orchestration command for Claude Code queues."""
+"""Book-level orchestration: invoke the unit LangGraph for each approved unit."""
 
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -10,122 +13,54 @@ from typing import Any
 
 import yaml
 
-from obsidian_output import ObsidianOutputGenerator
-from run_state import RunStateManager
-
 
 @dataclass
 class RunBookConfig:
-    executor: str = "claude-code-queue"
+    executor: str = "langgraph-worker"
     publish_policy: str = "accepted-only"
     batch_size: int = 5
     max_revision_retry: int = 2
+    concurrency: int = 3
 
 
 def cmd_run_book(args):
-    """Entry point for pipeline.py run-book."""
+    """Entry point for ``pipeline.py run-book`` (semantic LangGraph flow only)."""
     import pipeline
 
     _validate_args(args)
     book_root = pipeline.find_book_root(args.book)
     config = _config_from_args(args)
-    if config.executor == "langgraph-worker" and _semantic_plan_path(book_root).exists():
-        _cmd_run_semantic_book(args, book_root, config)
-        return
-
-    manifest = pipeline.load_manifest(book_root)
-    sections = _selected_sections(manifest, getattr(args, "section", None))
-    manager = RunStateManager(book_root)
-
-    if getattr(args, "resume", False):
-        run_state = manager.load_latest_run(book_root)
-        if run_state is None:
-            raise SystemExit("错误：没有找到可恢复的 run")
-        manager.sync_with_manifest(run_state, manifest.get("sections", []))
-        _print_resume(run_state, manager)
-    elif getattr(args, "dry_run", False):
-        run_state = None
-    else:
-        run_state = manager.create_run(
-            book_id=args.book,
-            config=config.__dict__,
-            sections=manifest.get("sections", []),
+    if not _semantic_plan_path(book_root).exists():
+        raise SystemExit(
+            "错误：未找到已审批的 config/semantic-unit-plan.yaml；"
+            "请先运行 plan-units → validate-unit-plan → review-unit-plan。"
         )
-
-    plan = _build_queue_plan(book_root, sections, run_state)
-
-    if getattr(args, "dry_run", False):
-        _print_dry_run(args, manifest, sections, plan)
-        return
-
-    if config.executor == "langgraph-worker":
-        from langgraph_worker import run_langgraph_worker
-        summary = run_langgraph_worker(book_root, args, run_state, plan, manager)
-        latest_manifest = pipeline.load_manifest(book_root)
-        ObsidianOutputGenerator(book_root, latest_manifest).generate_all()
-        print(f"[OK] Obsidian 输出已更新: {book_root / 'study-kb'}")
-        manager.update_stage(run_state, "langgraph_worker", "completed", **summary)
-        if plan["blocked"] or summary.get("needs_human_review"):
-            manager.update_stage(
-                run_state,
-                "automation_readiness",
-                "blocked",
-                blocked_sections=len(plan["blocked"]) + summary.get("needs_human_review", 0),
-            )
-        else:
-            manager.update_stage(run_state, "automation_readiness", "ready")
-        manager.update_stage(run_state, "obsidian_output", "completed")
-        return
-
-    _generate_claude_code_tasks(args, plan["queue"])
-    queue_meta = _write_queue_files(book_root, args, run_state, plan, config)
-    _print_claude_code_queue(args, plan, queue_meta)
-
-    latest_manifest = pipeline.load_manifest(book_root)
-    ObsidianOutputGenerator(book_root, latest_manifest).generate_all()
-    print(f"[OK] Obsidian 输出已更新: {book_root / 'study-kb'}")
-
-    if run_state is not None:
-        manager.update_stage(
-            run_state,
-            "claude_code_queue",
-            "completed",
-            queued_sections=len(plan["queue"]),
-            blocked_sections=len(plan["blocked"]),
-            batch_count=queue_meta["batch_count"],
-        )
-        if plan["blocked"]:
-            manager.update_stage(
-                run_state,
-                "automation_readiness",
-                "blocked",
-                blocked_sections=len(plan["blocked"]),
-            )
-        else:
-            manager.update_stage(run_state, "automation_readiness", "ready")
-        manager.update_stage(run_state, "obsidian_output", "completed")
+    _cmd_run_semantic_book(args, book_root, config)
 
 
 def _validate_args(args):
     if not getattr(args, "book", None):
         raise SystemExit("错误：必须指定 --book")
-    if getattr(args, "executor", "claude-code-queue") not in {
-        "claude-code-queue",
-        "langgraph-worker",
-    }:
-        raise SystemExit(
-            f"错误：仅支持 --executor claude-code-queue 或 langgraph-worker，不支持 {args.executor}"
-        )
+    executor = getattr(args, "executor", "langgraph-worker")
+    if executor != "langgraph-worker":
+        raise SystemExit(f"错误：仅支持 --executor langgraph-worker，不支持 {executor}")
     if getattr(args, "batch_size", 1) < 1:
         raise SystemExit("错误：--batch-size 必须大于 0")
 
 
 def _config_from_args(args) -> RunBookConfig:
+    # 并发度：命令行 --concurrency 优先，其次环境变量 RUN_BOOK_CONCURRENCY，默认 3。
+    # 设为 1 即退回完全串行（rolling memory 逐 unit 链式，质量最高）。
+    concurrency = getattr(args, "concurrency", None)
+    if concurrency is None:
+        concurrency = int(os.environ.get("RUN_BOOK_CONCURRENCY", "3"))
+    concurrency = max(1, int(concurrency))
     return RunBookConfig(
-        executor=getattr(args, "executor", "claude-code-queue"),
+        executor=getattr(args, "executor", "langgraph-worker"),
         publish_policy=getattr(args, "publish", "accepted-only"),
         batch_size=getattr(args, "batch_size", 5),
         max_revision_retry=getattr(args, "max_revision_retry", 2),
+        concurrency=concurrency,
     )
 
 
@@ -143,34 +78,62 @@ def _cmd_run_semantic_book(args, book_root: Path, config: RunBookConfig) -> None
 
     from langgraph_worker import RuntimeDeps, UnitWorkerConfig, invoke_unit_graph
     from llm_provider import create_provider, load_provider_config
-    from memory_store import new_memory
+    from memory_store import merge_concurrent_memories, new_memory, reconstruct_memory_from_db
     from obsidian_indexes import build_obsidian_indexes
 
     provider_config = load_provider_config()
-    provider = create_provider(provider_config)
     pdf_profile = _load_yaml(book_root / "config" / "pdf-profile.yaml")
     run_id = "run-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    _enable_checkpoint_wal(book_root)
     memory = new_memory()
     unit_config = UnitWorkerConfig(
         max_revision_retry=config.max_revision_retry,
         author_model=provider_config.model,
         review_model=provider_config.review_model,
+        revise_model=getattr(provider_config, "revise_model", "") or provider_config.model,
     )
-    results = []
-    for unit in queue_plan["queue"]:
+
+    def run_one_unit(unit: dict[str, Any], base_memory: dict[str, Any]) -> dict[str, Any]:
+        # 每个 unit 用独立 provider 实例，避免并发线程共享 provider 内部可变状态（self.calls）
         deps = RuntimeDeps(
-            provider=provider,
+            provider=create_provider(provider_config),
             provider_config=provider_config,
             config=unit_config,
             pdf_profile=pdf_profile,
-            memory=memory,
+            memory=base_memory,
             run_estimate={"tokens": 0, "cost": 0.0},
         )
-        result = invoke_unit_graph(book_root, run_id, args.book, unit, deps)
-        memory = result.get("memory", memory)
-        results.append({"unit_id": unit["unit_id"], "status": result.get("status")})
+        try:
+            return invoke_unit_graph(book_root, run_id, args.book, unit, deps)
+        except Exception as exc:  # noqa: BLE001 — 单 unit 失败必须隔离，不能拖垮整本书
+            # 任一 unit 的硬失败（LLM 非法 JSON、网络耗尽重试、节点异常等）只标记该 unit
+            # 失败并落一张 Review-Queue 提示，整本书继续跑后面的 unit。
+            # 返回结果不带 memory 键 → merge_concurrent_memories 会跳过它，不污染 rolling memory。
+            _record_unit_failure(book_root, run_id, args.book, unit, exc)
+            return {"status": "failed", "error": str(exc)}
 
-    build_obsidian_indexes(book_root, plan=plan, memory=memory)
+    results = []
+    queue = queue_plan["queue"]
+    concurrency = max(1, config.concurrency)
+    print(f"[run-book] {len(queue)} 个 unit，并发度={concurrency}")
+    for batch in _batches(queue, concurrency):
+        base_memory = memory  # 批内所有 unit 共享同一份 rolling memory 快照
+        if concurrency == 1 or len(batch) == 1:
+            batch_results = [run_one_unit(unit, base_memory) for unit in batch]
+        else:
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                # map 保持队列顺序，便于 memory 按序合并
+                batch_results = list(pool.map(lambda u: run_one_unit(u, base_memory), batch))
+        # 批后按队列顺序合并各 unit 的 memory 增量，喂给下一批
+        memory = merge_concurrent_memories(base_memory, batch_results)
+        for unit, result in zip(batch, batch_results):
+            results.append({"unit_id": unit["unit_id"], "status": result.get("status")})
+
+    # 用从业务库重建的全书聚合 memory 构建索引，而非本次运行的进程内瞬时 memory：
+    # 这样 --section 局部重跑 / 续跑也产出全书一致的 Glossary/Symbols/Claims/Formula-Ledger，
+    # 不会用残缺 memory 覆盖全局索引。
+    aggregate_memory = reconstruct_memory_from_db(book_root)
+    build_obsidian_indexes(book_root, plan=plan, memory=aggregate_memory)
     summary_path = book_root / "pipeline-workspace" / "runs" / run_id / "semantic-run-summary.json"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps({
@@ -181,6 +144,58 @@ def _cmd_run_semantic_book(args, book_root: Path, config: RunBookConfig) -> None
         "skipped": queue_plan["skipped"],
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[OK] semantic run summary: {summary_path}")
+
+
+def _record_unit_failure(book_root: Path, run_id: str, book_id: str, unit: dict[str, Any], exc: Exception) -> None:
+    """隔离单个 unit 的硬失败：记录事件 + 写 Review-Queue 提示，不抛出。"""
+    import business_db
+
+    unit_id = unit.get("unit_id", "unknown")
+    reason = f"run_failed: {type(exc).__name__}: {exc}"
+    print(f"[run-book] unit {unit_id} 失败，转入 Review-Queue：{reason}")
+    try:
+        business_db.start_run(book_root, run_id, book_id)
+        business_db.record_event(book_root, run_id, unit_id, "run_unit", "failed", {"error": str(exc)})
+    except Exception:  # noqa: BLE001 — 记录失败本身不能再抛
+        pass
+    try:
+        review_queue_dir = book_root / "study-kb" / "Review-Queue"
+        review_queue_dir.mkdir(parents=True, exist_ok=True)
+        lines = [
+            "---",
+            "type: review-queue",
+            f"unit_id: {unit_id}",
+            "reason: run_failed",
+            "managed_by: pipeline",
+            "---",
+            "",
+            f"# Review Queue: {unit_id}",
+            "",
+            f"- reason: {reason}",
+            "- 处理建议：单独重跑该 unit "
+            f"`python scripts/pipeline.py run-book --book {book_id} --section {unit_id} --concurrency 1`",
+        ]
+        (review_queue_dir / f"{unit_id}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _enable_checkpoint_wal(book_root: Path) -> None:
+    """对 LangGraph checkpointer 的 SQLite 文件预启 WAL 模式。
+
+    并发执行多个 unit 时，多个线程会各自打开同一 checkpoint 文件写入。WAL 是数据库
+    文件级的持久属性，提前设置后，即使 langgraph 内部连接不显式设置，也能享受一写多读、
+    减少 "database is locked"。"""
+    path = book_root / "pipeline-workspace" / "checkpoints" / "langgraph.sqlite"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        conn = sqlite3.connect(path, timeout=30.0)
+        # 先 busy_timeout 再 WAL：切 WAL 模式需短暂独占锁，顺序反了并发下会立刻报锁
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.close()
+    except sqlite3.Error:
+        pass  # WAL 启用失败不致命，退回默认 journal 模式
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -234,360 +249,6 @@ def _print_semantic_dry_run(args, units: list[dict[str, Any]], plan: dict[str, A
             print(f"[DRY-RUN]   {item['unit_id']}: {item['reason']}")
 
 
-def _selected_sections(manifest: dict[str, Any], section_id: str | None) -> list[dict[str, Any]]:
-    sections = manifest.get("sections", [])
-    if not section_id:
-        return sections
-    section = next((s for s in sections if s.get("id") == section_id), None)
-    if section is None:
-        raise SystemExit(f"错误：未找到小节 {section_id}")
-    return [section]
-
-
-def _is_published(section: dict[str, Any]) -> bool:
-    return section.get("status") == "published" or section.get("publish_status") == "published"
-
-
-def _print_dry_run(args, manifest: dict[str, Any],
-                   sections: list[dict[str, Any]], plan: dict[str, Any]):
-    total = len(sections)
-    published = sum(1 for s in sections if _is_published(s))
-    batch_size = getattr(args, "batch_size", 5)
-
-    print(f"[DRY-RUN] 书籍：{args.book}")
-    print(f"[DRY-RUN] 总小节：{total}")
-    print(f"[DRY-RUN] 已 published：{published}")
-    print(f"[DRY-RUN] 可入队：{len(plan['queue'])}")
-    print(f"[DRY-RUN] 阻塞：{len(plan['blocked'])}")
-    print(f"[DRY-RUN] 待发布 reviewed：{len(plan['publishable'])}")
-    print(f"[DRY-RUN] executor: {getattr(args, 'executor', 'claude-code-queue')}")
-    print(f"[DRY-RUN] publish-policy: {getattr(args, 'publish', 'accepted-only')}")
-    print("[DRY-RUN]")
-    print("[DRY-RUN] 将按以下顺序处理：")
-    for idx, batch in enumerate(_batches(plan["queue"], batch_size), start=1):
-        ids = ", ".join(s["id"] for s in batch)
-        print(f"[DRY-RUN]   batch {idx}: {ids}")
-    if not plan["queue"]:
-        print("[DRY-RUN]   无待处理小节")
-
-    high_risk = [s for s in plan["queue"] if s.get("formula_risk") == "high"]
-    needs_human = [s for s in manifest.get("sections", []) if s.get("status") == "needs_human_review"]
-    failed = [s for s in manifest.get("sections", []) if s.get("status") == "failed"]
-    print("[DRY-RUN]")
-    print(f"[DRY-RUN] 高风险小节（formula_risk=high）：{len(high_risk)} 个，将正常处理并在 MOC/风险清单/frontmatter 中标记")
-    print(f"[DRY-RUN] 需人工处理：{len(needs_human)} 个小节")
-    print(f"[DRY-RUN] 可重试的 failed：{len(failed)} 个小节")
-    if plan["blocked"]:
-        print("[DRY-RUN] 阻塞清单：")
-        for item in plan["blocked"]:
-            print(f"[DRY-RUN]   {item['section_id']}: {item['reason']}")
-
-
-def _generate_claude_code_tasks(args, pending: list[dict[str, Any]]):
-    """Generate task JSON files for Claude Code to consume."""
-    if not pending:
-        return
-
-    import argparse
-    import pipeline
-
-    for section in pending:
-        pipeline.cmd_make_tasks(argparse.Namespace(
-            book=args.book,
-            section=section["id"],
-            all_registered=False,
-        ))
-
-
-def _print_claude_code_queue(args, plan: dict[str, Any], queue_meta: dict[str, Any]):
-    pending = plan["queue"]
-    print(f"[CLAUDE-CODE] 书籍：{args.book}")
-    print(f"[CLAUDE-CODE] 可入队 {len(pending)} 个小节")
-    print(f"[CLAUDE-CODE] 阻塞 {len(plan['blocked'])} 个小节")
-    print(f"[CLAUDE-CODE] batch 文件：{queue_meta['batches_dir']}")
-    print(f"[CLAUDE-CODE] readiness 报告：{queue_meta['readiness_path']}")
-    print("[CLAUDE-CODE]")
-    print("[CLAUDE-CODE] 队列执行顺序（按 source_order）：")
-    if not pending:
-        print("[CLAUDE-CODE]   无待处理小节")
-    for idx, section in enumerate(pending, start=1):
-        sid = section["id"]
-        print(f"[CLAUDE-CODE]   {idx}. {sid}: author -> section-lesson-authoring")
-        print(f"[CLAUDE-CODE]   {idx}. {sid}: review -> section-lesson-review")
-    print("[CLAUDE-CODE]")
-    print("[CLAUDE-CODE] 在 Claude Code 中发送以下指令：")
-    print(
-        f"[CLAUDE-CODE]   请读取 {queue_meta['queue_path']}，按 batch 顺序执行每个小节的 "
-        "author_task 和 review_task。每个小节必须先生成 draft，再生成 review-decision.yaml 和 review-report.md。"
-    )
-    print("[CLAUDE-CODE]")
-    print("[CLAUDE-CODE] Claude Code 完成后运行：")
-    print(f"[CLAUDE-CODE]   python scripts/pipeline.py mark-reviewed --book {args.book} --all-accepted")
-    print(f"[CLAUDE-CODE]   python scripts/pipeline.py publish --book {args.book} --all-reviewed")
-    print(f"[CLAUDE-CODE]   python scripts/pipeline.py run-book --book {args.book} --executor claude-code-queue")
-
-
-def _print_resume(run_state, manager: RunStateManager):
-    progress = manager.calculate_progress(run_state)
-    print(f"[RESUME] run-id: {run_state.run_id}")
-    print(f"[RESUME] 已 published: {progress['published']}")
-    print(f"[RESUME] 待处理: {progress['not_started']}")
-    print(f"[RESUME] 需人工: {progress['needs_human_review']}")
-    print(f"[RESUME] failed: {progress['failed']}")
-
-
 def _batches(items: list[dict[str, Any]], batch_size: int):
     for start in range(0, len(items), batch_size):
         yield items[start:start + batch_size]
-
-
-def _build_queue_plan(book_root, sections: list[dict[str, Any]], run_state) -> dict[str, Any]:
-    queue = []
-    blocked = []
-    publishable = []
-    skipped = []
-
-    for section in sections:
-        section_id = section["id"]
-        state = run_state.section_states.get(section_id) if run_state else None
-        status = _effective_status(section, state)
-
-        if _is_published(section) or status == "published":
-            skipped.append({"section_id": section_id, "reason": "已 published"})
-            continue
-
-        if status == "reviewed":
-            publishable.append(section)
-            continue
-
-        if status == "needs_human_review":
-            blocked.append({
-                "section_id": section_id,
-                "reason": "status=needs_human_review",
-            })
-            continue
-
-        if status == "failed" and state and state.current_attempt >= state.max_attempt:
-            blocked.append({
-                "section_id": section_id,
-                "reason": (
-                    f"failed 重试次数已达上限 "
-                    f"({state.current_attempt}/{state.max_attempt})"
-                ),
-            })
-            continue
-
-        blocker_reason = _source_slice_blocker(book_root, section)
-        if blocker_reason:
-            blocked.append({
-                "section_id": section_id,
-                "reason": blocker_reason,
-            })
-            continue
-
-        queue.append(section)
-
-    return {
-        "queue": queue,
-        "blocked": blocked,
-        "publishable": publishable,
-        "skipped": skipped,
-    }
-
-
-def _effective_status(section: dict[str, Any], state) -> str:
-    if _is_published(section):
-        return "published"
-    manifest_status = section.get("status", "registered")
-    if manifest_status in {"reviewed", "needs_human_review", "published"}:
-        return manifest_status
-    if state is not None and state.status in {
-        "failed", "authoring", "validating", "reviewing", "publishing",
-        "reviewed", "needs_human_review", "published",
-    }:
-        return state.status
-    if manifest_status == "failed":
-        return "failed"
-    return "not_started"
-
-
-def _source_slice_blocker(book_root, section: dict[str, Any]) -> str | None:
-    section_id = section["id"]
-    path = book_root / "pipeline-workspace" / "staging" / section_id / "source-slice.md"
-    if not path.exists():
-        return "source-slice.md 不存在，请先运行 extract"
-
-    text = path.read_text(encoding="utf-8", errors="replace")
-    if _requires_expanded_page_metadata(section) and "expanded_pages:" not in text[:1000]:
-        return "source-slice 缺少 expanded_pages 元数据，可能由旧版 extract 生成，请运行 extract --force"
-    if "needs_boundary_review: true" in text[:1000] and not _pages_are_continuous(section):
-        return "source-slice 标记 needs_boundary_review=true，需先人工确认边界"
-    if "## 原文内容" not in text:
-        return "source-slice.md 缺少 ## 原文内容"
-    source_text = text.split("## 原文内容", 1)[1].strip()
-    if len(source_text) < 50:
-        return "source-slice 原文内容过短，需确认 PDF 提取是否成功"
-    return None
-
-
-def _pages_are_continuous(section: dict[str, Any]) -> bool:
-    pages = _expanded_pages(section.get("source_locator", {}).get("pages", []))
-    if not pages:
-        return False
-    return pages == list(range(pages[0], pages[-1] + 1))
-
-
-def _requires_expanded_page_metadata(section: dict[str, Any]) -> bool:
-    raw_pages = section.get("source_locator", {}).get("pages", [])
-    expanded_pages = _expanded_pages(raw_pages)
-    return len(raw_pages) == 2 and len(expanded_pages) > 2
-
-
-def _expanded_pages(pages: list) -> list[int]:
-    if not pages:
-        return []
-    pages = [int(p) for p in pages]
-    if len(pages) == 2 and pages[0] <= pages[1]:
-        return list(range(pages[0], pages[1] + 1))
-    return pages
-
-
-def _write_queue_files(book_root, args, run_state, plan: dict[str, Any],
-                       config: RunBookConfig) -> dict[str, Any]:
-    if run_state is None:
-        raise RuntimeError("run_state is required when writing queue files")
-
-    batches_dir = run_state.run_dir / "batches"
-    batches_dir.mkdir(parents=True, exist_ok=True)
-    for path in batches_dir.glob("batch-*.json"):
-        path.unlink()
-
-    batches = list(_batches(plan["queue"], config.batch_size))
-    batch_files = []
-    for idx, batch in enumerate(batches, start=1):
-        batch_path = batches_dir / f"batch-{idx:03d}.json"
-        payload = {
-            "run_id": run_state.run_id,
-            "book_id": args.book,
-            "batch_index": idx,
-            "batch_count": len(batches),
-            "generated_at": _now(),
-            "sections": [_task_entry(args.book, section) for section in batch],
-            "instructions": [
-                "按 sections 顺序执行。",
-                "每个 section 先执行 author_task，再执行 review_task。",
-                "不要直接写入 study-kb，发布必须通过 pipeline.py publish。",
-            ],
-        }
-        batch_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        batch_files.append(batch_path)
-
-    queue_path = run_state.run_dir / "claude-code-queue.json"
-    queue_payload = {
-        "run_id": run_state.run_id,
-        "book_id": args.book,
-        "generated_at": _now(),
-        "batch_size": config.batch_size,
-        "queue_count": len(plan["queue"]),
-        "blocked_count": len(plan["blocked"]),
-        "publishable_count": len(plan["publishable"]),
-        "batches": [
-            {
-                "batch_index": idx,
-                "path": _as_posix(path),
-                "section_ids": [section["id"] for section in batch],
-            }
-            for idx, (path, batch) in enumerate(zip(batch_files, batches), start=1)
-        ],
-        "blocked": plan["blocked"],
-        "publishable": [
-            {"section_id": section["id"], "title": section.get("title", "")}
-            for section in plan["publishable"]
-        ],
-    }
-    queue_path.write_text(
-        json.dumps(queue_payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    readiness_path = run_state.run_dir / "automation-readiness.md"
-    readiness_path.write_text(
-        _render_readiness_report(args, run_state, plan, batch_files, batches),
-        encoding="utf-8",
-    )
-
-    return {
-        "queue_path": _as_posix(queue_path),
-        "readiness_path": _as_posix(readiness_path),
-        "batches_dir": _as_posix(batches_dir),
-        "batch_count": len(batches),
-    }
-
-
-def _task_entry(book_id: str, section: dict[str, Any]) -> dict[str, Any]:
-    section_id = section["id"]
-    return {
-        "section_id": section_id,
-        "source_order": section.get("source_order", ""),
-        "title": section.get("title", ""),
-        "author_task": f"books/{book_id}/pipeline-workspace/tasks/{section_id}_author.json",
-        "review_task": f"books/{book_id}/pipeline-workspace/tasks/{section_id}_review.json",
-    }
-
-
-def _render_readiness_report(args, run_state, plan: dict[str, Any],
-                             batch_files: list, batches: list[list[dict[str, Any]]]) -> str:
-    lines = [
-        "# 自动运行就绪报告",
-        "",
-        f"- run_id: {run_state.run_id}",
-        f"- book_id: {args.book}",
-        f"- generated_at: {_now()}",
-        f"- 可入队小节: {len(plan['queue'])}",
-        f"- 阻塞小节: {len(plan['blocked'])}",
-        f"- 待发布 reviewed 小节: {len(plan['publishable'])}",
-        "",
-        "## Batch 队列",
-        "",
-    ]
-    if not batches:
-        lines.append("- 无可执行 batch")
-    for idx, (path, batch) in enumerate(zip(batch_files, batches), start=1):
-        ids = ", ".join(section["id"] for section in batch)
-        lines.append(f"- batch {idx:03d}: `{_as_posix(path)}` — {ids}")
-
-    lines.extend(["", "## 阻塞小节", ""])
-    if not plan["blocked"]:
-        lines.append("- 无")
-    for item in plan["blocked"]:
-        lines.append(f"- {item['section_id']}: {item['reason']}")
-
-    lines.extend(["", "## 待发布 reviewed 小节", ""])
-    if not plan["publishable"]:
-        lines.append("- 无")
-    for section in plan["publishable"]:
-        lines.append(f"- {section['id']}: {section.get('title', '')}")
-
-    lines.extend([
-        "",
-        "## 后续命令",
-        "",
-        "```powershell",
-        f"python scripts/pipeline.py mark-reviewed --book {args.book} --all-accepted",
-        f"python scripts/pipeline.py publish --book {args.book} --all-reviewed",
-        f"python scripts/pipeline.py run-book --book {args.book} --executor claude-code-queue --resume",
-        "```",
-        "",
-    ])
-    return "\n".join(lines)
-
-
-def _as_posix(path) -> str:
-    return str(path).replace("\\", "/")
-
-
-def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")

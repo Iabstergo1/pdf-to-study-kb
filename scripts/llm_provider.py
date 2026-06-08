@@ -24,9 +24,11 @@ class ProviderConfig:
     model: str
     review_model: str
     planner_model: str
+    revise_model: str = ""
     temperature: float = 0.2
     timeout_seconds: int = 120
     ssl_verify: bool = True
+    max_retries: int = 2
 
 
 def load_provider_config(
@@ -50,6 +52,7 @@ def load_provider_config(
     model = values.get("LLM_MODEL", "").strip()
     review_model = values.get("LLM_REVIEW_MODEL", model).strip()
     planner_model = values.get("LLM_PLANNER_MODEL", model).strip()
+    revise_model = values.get("LLM_REVISE_MODEL", model).strip()
 
     if provider != "fake":
         missing = []
@@ -69,9 +72,11 @@ def load_provider_config(
         model=model,
         review_model=review_model or model,
         planner_model=planner_model or model,
+        revise_model=revise_model or model,
         temperature=float(values.get("LLM_TEMPERATURE", "0.2")),
         timeout_seconds=int(values.get("LLM_TIMEOUT_SECONDS", "120")),
         ssl_verify=values.get("LLM_SSL_VERIFY", "true").strip().lower() != "false",
+        max_retries=int(values.get("LLM_MAX_RETRIES", "2")),
     )
 
 
@@ -110,15 +115,31 @@ class OpenAICompatibleProvider:
             "response_format": {"type": "json_object"},
         }
         self.calls.append({"model": model_name, "system": system, "user": user})
-        response = self._post(payload)
-        try:
-            content = response["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ValueError("LLM 响应缺少 choices[0].message.content") from exc
-        return parse_json_content(content)
+        # 对「输出非法/截断 JSON」也重试：模型在 json_object 模式下偶尔会截断（输出过长触顶）
+        # 或夹带非 JSON 文本，重新生成通常即可恢复。网络层错误已在 _post 内单独重试。
+        import time
+
+        attempts = max(1, self.config.max_retries + 1)
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            response = self._post(payload)
+            try:
+                content = response["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise ValueError("LLM 响应缺少 choices[0].message.content") from exc
+            try:
+                return parse_json_content(content)
+            except ValueError as exc:
+                last_error = exc
+                if attempt < attempts - 1:
+                    backoff = 2 ** attempt
+                    print(f"[retry] LLM 输出非法 JSON（第 {attempt + 1}/{attempts} 次），{backoff}s 后重试")
+                    time.sleep(backoff)
+        raise last_error if last_error else ValueError("LLM 输出不是合法 JSON")
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         import ssl
+        import time
 
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         url = self.config.base_url.rstrip("/") + "/chat/completions"
@@ -137,14 +158,29 @@ class OpenAICompatibleProvider:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
-        try:
-            with urllib.request.urlopen(request, timeout=self.config.timeout_seconds, context=ctx) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"LLM HTTP {exc.code}: {detail}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"LLM 连接失败: {exc}") from exc
+
+        # 只对瞬时错误重试：超时、连接失败、SSL 抖动、HTTP 429/5xx。
+        # 4xx（鉴权、请求格式等）是确定性错误，重试也没用，直接抛出。
+        attempts = max(1, self.config.max_retries + 1)
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=self.config.timeout_seconds, context=ctx
+                ) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                if exc.code != 429 and exc.code < 500:
+                    raise RuntimeError(f"LLM HTTP {exc.code}: {detail}") from exc
+                last_error = RuntimeError(f"LLM HTTP {exc.code}: {detail}")
+            except (urllib.error.URLError, TimeoutError, ssl.SSLError, OSError) as exc:
+                last_error = RuntimeError(f"LLM 连接失败: {exc}")
+            if attempt < attempts - 1:
+                backoff = 2 ** attempt  # 1s, 2s, 4s ...
+                print(f"[retry] LLM 调用失败（第 {attempt + 1}/{attempts} 次），{backoff}s 后重试: {last_error}")
+                time.sleep(backoff)
+        raise last_error if last_error else RuntimeError("LLM 调用失败")
 
 
 class FakeChatProvider:

@@ -220,7 +220,9 @@ def test_plan_units_command_normalizes_real_planner_alias_fields(monkeypatch, tm
     assert first["overlap_reason"] == "同一 PDF 页包含多个语义小节"
     assert second["source_scope"]["pages"] == [1, 2]
     assert second["learning_targets"]["core_takeaways"] == "参与方与时序"
-    assert second["formula_risk"] == "low"
+    # page 2 is formula_risk=high in the profile, so the profile-aware upgrade
+    # promotes the unit covering it to high / hybrid.
+    assert second["formula_risk"] == "high"
     assert second["extraction_method"] == "hybrid"
     assert second["overlap_reason"] == "同一 PDF 页包含多个语义小节"
     assert candidates["coverage_validation"]["passed"] is True
@@ -321,6 +323,29 @@ def test_review_unit_plan_validation_failure_does_not_write_formal_plan(monkeypa
         book_root / "pipeline-workspace" / "reports" / "unit-plan-validation.md"
     ).read_text(encoding="utf-8")
     assert "missing pages" in report
+
+
+def test_fill_coverage_gaps_attaches_missing_page_to_previous_unit():
+    from unit_plan import fill_coverage_gaps, validate_unit_plan
+
+    # 漏覆盖的章节尾页 3，夹在 [1,2] 和 [4,5] 之间，应并入前驱并压成连续区间
+    plan = {"units": [
+        unit("U-001-01", [1, 2], include=True),
+        unit("U-001-02", [4, 5], include=True),
+    ]}
+    fill_coverage_gaps(plan, total_pages=5)
+    assert plan["units"][0]["source_scope"]["pages"] == [1, 3]
+    result = validate_unit_plan(plan, total_pages=5)
+    assert result["missing_pages"] == []
+
+
+def test_fill_coverage_gaps_uses_following_unit_when_no_predecessor():
+    from unit_plan import fill_coverage_gaps
+
+    # 缺页 1 在所有 unit 之前，应归给最近后继 unit
+    plan = {"units": [unit("U-001-01", [2, 3], include=True)]}
+    fill_coverage_gaps(plan, total_pages=3)
+    assert plan["units"][0]["source_scope"]["pages"] == [1, 3]
 
 
 def test_parse_pages_input_accepts_ranges_and_commas():

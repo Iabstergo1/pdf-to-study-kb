@@ -187,3 +187,26 @@ def test_build_obsidian_indexes_does_not_overwrite_human_file(tmp_path):
     build_obsidian_indexes(book_root, memory=_memory())
 
     assert concept_path.read_text(encoding="utf-8") == "# Human note\n\nDo not overwrite."
+
+
+def test_build_indexes_cleans_stale_managed_cards_but_keeps_user_files(tmp_path):
+    """重建索引时，旧 run 残留的管线托管概念卡应被清理；用户手写文件保留。"""
+    from obsidian_indexes import build_obsidian_indexes
+
+    book_root = tmp_path / "books" / "cleanup-book"
+    study_kb = book_root / "study-kb"
+    (study_kb / "Concept-Cards").mkdir(parents=True)
+
+    # 旧 run 留下的托管卡（已不在当前 memory）
+    (study_kb / "Concept-Cards" / "StaleConcept.md").write_text(
+        "---\ntype: concept-card\nmanaged_by: pipeline\n---\n\n# StaleConcept\n", encoding="utf-8"
+    )
+    # 用户手写卡（无 managed_by）
+    (study_kb / "Concept-Cards" / "MyNote.md").write_text("# 我的手写笔记\n", encoding="utf-8")
+
+    build_obsidian_indexes(book_root, plan=_plan(), memory=_memory())
+
+    cards = {p.name for p in (study_kb / "Concept-Cards").glob("*.md")}
+    assert "StaleConcept.md" not in cards          # 陈旧托管文件被清理
+    assert "MyNote.md" in cards                    # 用户文件保留
+    assert "Nash Equilibrium.md" in cards          # 当前 memory 的概念写入

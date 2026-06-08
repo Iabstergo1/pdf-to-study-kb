@@ -10,7 +10,19 @@
 
 ---
 
-## 当前验证状态
+## 当前状态（最新）
+
+本文是**原始构建指南（历史 playbook）**，记录了从旧 section 流程迁移到语义流程的逐步实现。截至当前，迁移已完成并清理：
+
+- CLI 只有 6 个命令：`init-book`、`profile-pdf`、`plan-units`、`validate-unit-plan`、`review-unit-plan`、`run-book`。
+- 旧 section-manifest / source-slice / Claude Code 队列（`make-tasks`）流程与脚本（`scripts/legacy/`、`section_planner`、`obsidian_output`、`run_state`、`validate_section_lesson` 等）已删除。
+- 模型分工：生成 / 审校 / 规划用 DeepSeek V4 Flash，仅 `revise_note` 用 V4 Pro（`LLM_REVISE_MODEL`）。
+- `plan-units` 会按页 profile 自动把覆盖高公式页的 unit 升级为 `hybrid`/`screenshot_ocr`。
+- 发布讲义带 Dataview frontmatter；`update_memory` 填充 concept/symbol/evidence 索引并生成对应卡片。
+
+下文保留历史构建步骤，命令示例中的 `game-model-test` fixture 仅为历史示例。
+
+## 当前验证状态（历史）
 
 截至 2026-06-02，`codex/semantic-phase-1` 分支已在 `game-model-test` fixture 上跑通 LangGraph semantic unit 主流程。该结论只覆盖下列命令和产物，不表示仓库内所有辅助脚本都已逐个验证。
 
