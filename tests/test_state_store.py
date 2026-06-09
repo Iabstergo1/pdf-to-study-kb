@@ -136,3 +136,37 @@ def test_should_run_stage_idempotent_skip(tmp_path):
     state_store.complete_stage(db, "s1", "profiled")
     assert state_store.should_run_stage(db, "s1", "profiled", input_hash="h1") is False
     assert state_store.should_run_stage(db, "s1", "profiled", input_hash="h2") is True
+
+
+def test_double_start_running_rejected(tmp_path):
+    db = tmp_path / "study-kb.sqlite"
+    state_store.init_db(db)
+    state_store.register_source(db, "s1", domain="d", fmt="pdf")
+    state_store.start_stage(db, "s1", "profiled", input_hash="h1")
+    with pytest.raises(state_store.InvalidTransition):
+        state_store.start_stage(db, "s1", "profiled", input_hash="h1")
+    con = state_store.connect(db)
+    n = con.execute(
+        "SELECT COUNT(*) FROM source_stage_runs"
+        " WHERE source_id='s1' AND stage='profiled' AND status='running'"
+    ).fetchone()[0]
+    con.close()
+    assert n == 1  # 只有一条 running，没产生重复
+
+
+def test_complete_without_running_rejected_and_state_unchanged(tmp_path):
+    db = tmp_path / "study-kb.sqlite"
+    state_store.init_db(db)
+    state_store.register_source(db, "s1", domain="d", fmt="pdf")
+    with pytest.raises(state_store.InvalidTransition):
+        state_store.complete_stage(db, "s1", "registered")
+    assert state_store.get_source(db, "s1")["current_status"] == "done"  # 未被改动
+
+
+def test_fail_without_running_rejected_and_state_unchanged(tmp_path):
+    db = tmp_path / "study-kb.sqlite"
+    state_store.init_db(db)
+    state_store.register_source(db, "s1", domain="d", fmt="pdf")
+    with pytest.raises(state_store.InvalidTransition):
+        state_store.fail_stage(db, "s1", "registered", error="x")
+    assert state_store.get_source(db, "s1")["current_status"] == "done"  # 未被改成 failed

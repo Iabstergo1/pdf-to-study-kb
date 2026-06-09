@@ -101,7 +101,9 @@ def _allowed_next(stage: str, status: str) -> set[str]:
         return allowed
     if status in ("done", "proposed", "published"):
         return set(NEXT.get(stage, [])) | {stage}
-    return {stage}  # pending|running -> 只能(重)启当前 stage
+    if status == "running":
+        return set()  # 运行中：必须先 complete/fail，不能再 start（拒绝重复 running）
+    return {stage}  # pending -> 只能(重)启当前 stage
 
 
 def register_source(db_path, source_id: str, *, domain: str, fmt: str) -> None:
@@ -154,11 +156,13 @@ def start_stage(db_path, source_id: str, stage: str, *, input_hash: str | None =
 def complete_stage(db_path, source_id: str, stage: str, *, output_hash: str | None = None) -> None:
     con = connect(db_path)
     try:
-        con.execute(
+        cur = con.execute(
             "UPDATE source_stage_runs SET status='done', finished_at=?, output_hash=?"
             " WHERE id=(SELECT id FROM source_stage_runs WHERE source_id=? AND stage=? AND status='running'"
             "           ORDER BY id DESC LIMIT 1)",
             (_now(), output_hash, source_id, stage))
+        if cur.rowcount == 0:
+            raise InvalidTransition(f"no running run for {source_id}/{stage} to complete")
         con.execute("UPDATE sources SET current_status=? WHERE source_id=? AND current_stage=?",
                     (DONE_STATUS.get(stage, "done"), source_id, stage))
         con.commit()
@@ -172,11 +176,13 @@ def complete_stage(db_path, source_id: str, stage: str, *, output_hash: str | No
 def fail_stage(db_path, source_id: str, stage: str, *, error: str) -> None:
     con = connect(db_path)
     try:
-        con.execute(
+        cur = con.execute(
             "UPDATE source_stage_runs SET status='failed', finished_at=?, error=?"
             " WHERE id=(SELECT id FROM source_stage_runs WHERE source_id=? AND stage=? AND status='running'"
             "           ORDER BY id DESC LIMIT 1)",
             (_now(), error, source_id, stage))
+        if cur.rowcount == 0:
+            raise InvalidTransition(f"no running run for {source_id}/{stage} to fail")
         con.execute("UPDATE sources SET current_status='failed' WHERE source_id=? AND current_stage=?",
                     (source_id, stage))
         con.commit()
