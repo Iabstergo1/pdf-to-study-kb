@@ -188,6 +188,35 @@ def cmd_run_book(args):
     _cmd_run_book(args)
 
 
+def _vault_state_db() -> Path:
+    """vault 级单库（repo 根下固定路径，不接 --book）。"""
+    return Path(__file__).resolve().parents[1] / "pipeline-workspace/state/study-kb.sqlite"
+
+
+def cmd_status(args):
+    """列出每个 source 的阶段/状态（vault 级单库）。"""
+    import state_store
+
+    db = _vault_state_db()
+    if not db.exists():
+        print("no state db yet (run a source through preprocess first)")
+        return
+    for r in state_store.status_rows(db):
+        print(f"{r['source_id']:<28} {r['domain']:<14} {r['current_stage']:<16} {r['current_status']}")
+
+
+def cmd_next(args):
+    """列出每个 source 的下一步人工动作（vault 级单库）。"""
+    import state_store
+
+    db = _vault_state_db()
+    if not db.exists():
+        print("no state db yet")
+        return
+    for r in state_store.next_actions(db):
+        print(f"{r['source_id']:<28} {r['current_stage']:<16} -> {r['next_action']}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="PDF to Study KB 流水线 CLI")
     subparsers = parser.add_subparsers(dest='command', help='可用命令')
@@ -230,6 +259,10 @@ def main():
     run_book_parser.add_argument('--concurrency', type=int, default=None,
                                  help='并发执行的 unit 数（默认读 RUN_BOOK_CONCURRENCY 或 3；1=完全串行）')
 
+    # status / next（新架构：vault 级单库状态视图，不接 --book）
+    subparsers.add_parser("status", help="列出每个 source 的阶段/状态（vault 级单库）")
+    subparsers.add_parser("next", help="列出每个 source 的下一步人工动作")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -243,6 +276,8 @@ def main():
         'validate-unit-plan': cmd_validate_unit_plan,
         'review-unit-plan': cmd_review_unit_plan,
         'run-book': cmd_run_book,
+        'status': cmd_status,
+        'next': cmd_next,
     }
 
     commands[args.command](args)
