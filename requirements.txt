@@ -1,12 +1,19 @@
 # PDF to Study KB 依赖
-# 核心依赖
-pymupdf>=1.23.0  # PDF 解析
-pyyaml>=6.0      # YAML 处理
-langgraph>=0.2.0 # 有状态 LLM 流水线（langgraph-worker）
-langgraph-checkpoint-sqlite>=3.0.1 # LangGraph SqliteSaver checkpoint
+# 架构见 docs/superpowers/specs/2026-06-08-claude-code-wiki-redesign-design.md
 
-# 可选：高公式页 OCR。Surya 2 Python API 依赖 >=0.20.0；未安装时高公式页进入 Review-Queue 人工处理。
+# 核心（保留）
+pymupdf>=1.23.0   # PDF 解析 / 页渲染
+pyyaml>=6.0       # YAML
+
+# DEPRECATED：新架构不用 LangGraph（见 docs/adr/0001）。
+# 仅为过渡期旧管线（scripts/langgraph_worker.py）可运行而保留；
+# 随旧代码在 P4 一并删除。
+langgraph>=0.2.0
+langgraph-checkpoint-sqlite>=3.0.1
+
+# 非文字内容后端：新架构在 P1 引入 pymupdf4llm / marker / docling（届时补此处）。
+# surya-ocr 过渡期保留，P1 后由难页 Claude 读图 + marker/docling 取代。
 surya-ocr>=0.20.0
 
-# 测试依赖
-pytest>=7.0      # 测试框架
+# 测试
+pytest>=7.0
