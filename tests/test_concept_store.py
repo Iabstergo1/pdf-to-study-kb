@@ -169,3 +169,22 @@ def test_create_existing_page_raises(tmp_path):
         assert False, "should raise"
     except FileExistsError:
         pass
+
+
+def test_create_concept_body_follows_template(tmp_path):
+    tpl_body = mdpage.read_page(ROOT / "templates" / "concept.md")[1]
+    path = concept_store.create_concept(tmp_path, domain="d", name="纳什均衡")
+    _, body = mdpage.read_page(path)
+    assert body == tpl_body.replace("{name}", "纳什均衡")
+    assert "## 自测" in body  # 模板新增小节随之生效
+
+
+def test_create_concept_falls_back_when_template_missing(tmp_path):
+    orig = concept_store._TEMPLATES_DIR
+    concept_store._TEMPLATES_DIR = tmp_path / "no-such-dir"
+    try:
+        path = concept_store.create_concept(tmp_path, domain="d", name="回退概念")
+        _, body = mdpage.read_page(path)
+        assert "## 直觉" in body  # 回退到内置 CONCEPT_BODY，骨架仍完整
+    finally:
+        concept_store._TEMPLATES_DIR = orig

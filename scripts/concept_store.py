@@ -136,6 +136,18 @@ CONCEPT_BODY = """# {name}
 （待 /ingest 填写）
 """
 
+_TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
+
+
+def _concept_body(name: str) -> str:
+    """概念骨架正文：优先取 templates/concept.md（单一真值）；缺失回退内置常量。
+    用 str.replace 而非 format——模板里可能出现其它花括号。"""
+    tpl = _TEMPLATES_DIR / "concept.md"
+    if tpl.exists():
+        _, body = mdpage.read_page(tpl)
+        return body.replace("{name}", name)
+    return CONCEPT_BODY.format(name=name)
+
 
 def resolve(mention: str, *, domain: str, registry: dict):
     """mention 命中 canonical（名/别名，先本域后 shared）→ (canonical_id, entry)；未命中 → None。"""
@@ -169,7 +181,7 @@ def create_concept(vault, *, domain: str, name: str, aliases=(), source_ref=None
             "domain": domain,
             "source_refs": [source_ref] if source_ref else [],
             "page_path": rel.as_posix(), "managed_by": "pipeline", "status": "proposed"}
-    mdpage.write_page(path, meta, CONCEPT_BODY.format(name=name))
+    mdpage.write_page(path, meta, _concept_body(name))
     return path
 
 
