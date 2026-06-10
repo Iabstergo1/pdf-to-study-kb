@@ -359,3 +359,30 @@ def latest_run_id(db_path, source_id: str, stage: str) -> int | None:
         return int(row["id"]) if row else None
     finally:
         con.close()
+
+
+def add_review_proposal(db_path, source_id: str, *, target_path: str, kind: str,
+                        reason: str, diff_path: str | None = None) -> int:
+    con = connect(db_path)
+    try:
+        cur = con.execute(
+            "INSERT INTO review_proposals(source_id,target_path,kind,diff_path,reason,created_at,status)"
+            " VALUES (?,?,?,?,?,?,'open')",
+            (source_id, target_path, kind, diff_path, reason, _now()))
+        con.commit()
+        return int(cur.lastrowid)
+    finally:
+        con.close()
+
+
+def list_review_proposals(db_path, source_id: str | None = None) -> list[dict]:
+    con = connect(db_path)
+    try:
+        if source_id is None:
+            rows = con.execute("SELECT * FROM review_proposals ORDER BY id").fetchall()
+        else:
+            rows = con.execute("SELECT * FROM review_proposals WHERE source_id=? ORDER BY id",
+                               (source_id,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()

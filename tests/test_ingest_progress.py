@@ -68,3 +68,13 @@ def test_latest_run_id(tmp_path):
     rid = state_store.start_stage(db, "s1", "profiled", input_hash="h")
     assert state_store.latest_run_id(db, "s1", "profiled") == rid
     assert state_store.latest_run_id(db, "s1", "converted") is None
+
+
+def test_add_and_list_review_proposals(tmp_path):
+    db = _db(tmp_path)
+    pid = state_store.add_review_proposal(db, "s1", target_path="domains/d/lessons/x.md",
+                                          kind="L1", reason="bare evidence id [E-1]")
+    assert pid > 0
+    rows = state_store.list_review_proposals(db, "s1")
+    assert rows[0]["kind"] == "L1" and rows[0]["status"] == "open"
+    assert state_store.list_review_proposals(db, "nobody") == []
