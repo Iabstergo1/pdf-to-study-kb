@@ -316,6 +316,29 @@ def _vault_dir() -> Path:
     return _workspace_root() / "wiki"
 
 
+def cmd_init_vault(args):
+    """建 wiki/ 脚手架（spec §4）+ overview/log/purpose 种子。幂等：已存在的文件/目录绝不覆盖。"""
+    vault = _vault_dir()
+    for d in ["_meta", "domains", "concepts", "topics", "comparisons", "synthesis",
+              "sources", "assets", "Review-Queue"]:
+        (vault / d).mkdir(parents=True, exist_ok=True)
+    seeds = {
+        "overview.md": (Path(__file__).resolve().parents[1] / "templates" / "overview.md"
+                        ).read_text(encoding="utf-8"),
+        "log.md": "# 操作日志（append-only：/ingest 与收尾 lint 各自追加）\n",
+        "_meta/purpose.md": ("# 学习目标与偏好（用户维护）\n\n"
+                             "<写下你的学习目标、当前重点、偏好的讲解风格——/ingest 会参考>\n"),
+    }
+    for rel, content in seeds.items():
+        target = vault / rel
+        if not target.exists():
+            target.write_text(content, encoding="utf-8", newline="\n")
+            print(f"[OK] seeded {rel}")
+        else:
+            print(f"[keep] {rel} exists")
+    print(f"[OK] vault skeleton at {vault}")
+
+
 def cmd_rebuild_registry(args):
     """从概念页 frontmatter 确定性重建 concepts/_registry.yaml + aliases.md（派生，勿手改）。"""
     import concept_store
@@ -584,6 +607,7 @@ def main():
                             ("windows", "生成确定性 processing windows")]:
         p = subparsers.add_parser(name, help=help_text)
         p.add_argument("--source", required=True, help="source_id")
+    subparsers.add_parser("init-vault", help="建 wiki/ 脚手架 + overview/log/purpose 种子（幂等）")
     subparsers.add_parser("rebuild-registry", help="从概念页 frontmatter 重建 _registry.yaml + aliases.md")
     wop = subparsers.add_parser("workorder", help="生成 source 级 ingest work order")
     wop.add_argument("--source", required=True)
@@ -644,6 +668,7 @@ def main():
         'source-convert': cmd_source_convert,
         'windows': cmd_windows,
         'fail': cmd_fail,
+        'init-vault': cmd_init_vault,
         'rebuild-registry': cmd_rebuild_registry,
         'workorder': cmd_workorder,
         'show-window': cmd_show_window,
