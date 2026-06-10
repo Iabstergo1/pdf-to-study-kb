@@ -28,3 +28,28 @@ def test_footnote_def_line_not_counted_as_ref():
     body = "[^e1]: 只有定义没有引用\n"
     assert page_rules.footnote_refs(body) == set()
     assert page_rules.missing_footnote_defs(body) == set()
+
+
+def test_required_sections_for_concept_matches_spec8():
+    secs = page_rules.required_sections_for("concept")
+    assert "## 直觉" in secs and "## 形式化" in secs and "## 各章如何处理" in secs
+    assert "## 与其他概念的关系" in secs
+
+
+def test_missing_sections_reports_absent_only():
+    body = "# X\n\n## 直觉\n\n说明\n\n## 形式化\n\n$$x$$\n"
+    missing = page_rules.missing_sections(body, ["## 直觉", "## 形式化", "## 各章如何处理"])
+    assert missing == ["## 各章如何处理"]
+
+
+def test_missing_sections_requires_heading_line_not_substring():
+    body = "正文里提到 ## 直觉 三个字但不是标题行\n"
+    assert page_rules.missing_sections(body, ["## 直觉"]) == ["## 直觉"]
+
+
+def test_unknown_page_type_raises():
+    try:
+        page_rules.required_sections_for("nonsense")
+        assert False, "should raise"
+    except KeyError:
+        pass
