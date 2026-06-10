@@ -311,6 +311,32 @@ def cmd_windows(args):
         raise
 
 
+def _vault_dir() -> Path:
+    """新架构输出 vault（spec §4），与状态库同锚点。"""
+    return _workspace_root() / "wiki"
+
+
+def cmd_rebuild_registry(args):
+    """从概念页 frontmatter 确定性重建 concepts/_registry.yaml + aliases.md（派生，勿手改）。"""
+    import concept_store
+    vault = _vault_dir()
+    if not vault.exists():
+        print("no wiki/ vault yet")
+        return
+    metas = concept_store.scan_concept_pages(vault)
+    registry, errors, warnings = concept_store.build_registry(metas)
+    for w in warnings:
+        print(f"[warn] {w}")
+    if errors:
+        for e in errors:
+            print(f"[error] {e}", file=sys.stderr)
+        raise SystemExit("registry not written (fix duplicate/missing canonical_id first)")
+    sha = concept_store.write_registry(vault, registry)
+    concept_store.write_aliases(vault, registry)
+    shared = sum(1 for e in registry.values() if e["scope"] == "shared")
+    print(f"[OK] registry: {len(registry)} concepts ({shared} shared), sha256={sha[:12]}")
+
+
 def cmd_fail(args):
     """维护命令：把崩溃残留的 running 阶段标记为 failed（之后可重跑该阶段）。"""
     import state_store
@@ -400,6 +426,7 @@ def main():
                             ("windows", "生成确定性 processing windows")]:
         p = subparsers.add_parser(name, help=help_text)
         p.add_argument("--source", required=True, help="source_id")
+    subparsers.add_parser("rebuild-registry", help="从概念页 frontmatter 重建 _registry.yaml + aliases.md")
     fp = subparsers.add_parser("fail", help="维护：把崩溃残留的 running 阶段标记为 failed")
     fp.add_argument("--source", required=True, help="source_id")
     fp.add_argument("--stage", required=True, help="卡死的 stage 名")
@@ -425,6 +452,7 @@ def main():
         'source-convert': cmd_source_convert,
         'windows': cmd_windows,
         'fail': cmd_fail,
+        'rebuild-registry': cmd_rebuild_registry,
     }
 
     commands[args.command](args)
