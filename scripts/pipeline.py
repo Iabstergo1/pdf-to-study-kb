@@ -577,6 +577,48 @@ def cmd_lint(args):
     print(f"[OK] lint passed: promoted {n} pages; index/registry/aliases rebuilt; source published")
 
 
+def cmd_promotion_candidates(args):
+    """检测跨域提升候选（spec §6/§13：只给候选，提升一律人工确认）。--propose 落 Review-Queue。"""
+    import state_store
+    import concept_store
+    import promotion
+    from datetime import date
+    vault = _vault_dir()
+    if not vault.exists():
+        print("no wiki/ vault yet")
+        return
+    registry, errors, _w = concept_store.build_registry(concept_store.scan_concept_pages(vault))
+    if errors:
+        raise SystemExit("corrupt concept pages: " + "; ".join(errors))
+    cands = promotion.find_candidates(registry)
+    if not cands:
+        print("no promotion candidates")
+        return
+    for c in cands:
+        print(f"[candidate] {c['term']}: domains={','.join(c['domains'])} ids={','.join(c['canonical_ids'])}")
+    if getattr(args, "propose", False):
+        db = _vault_state_db()
+        db.parent.mkdir(parents=True, exist_ok=True)
+        state_store.init_db(db)
+        lines = ["# 跨域提升候选（人工确认后用 promote-concept --id <canonical_id> 执行）", ""]
+        for c in cands:
+            lines.append(f"- `{c['term']}`：{', '.join(c['canonical_ids'])}（语义确实复用才提升；同名异义保持各自页）")
+            state_store.add_review_proposal(db, "vault", target_path=c["canonical_ids"][0],
+                                            kind="promotion-candidate",
+                                            reason=f"term '{c['term']}' in domains {','.join(c['domains'])}")
+        queue = vault / "Review-Queue" / f"promotion-{date.today().isoformat()}.md"
+        queue.parent.mkdir(parents=True, exist_ok=True)
+        queue.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+        print(f"[OK] proposals -> {queue}")
+
+
+def cmd_promote_concept(args):
+    """人工确认后的机械提升：移动到顶层 concepts/ + frontmatter 改写 + 全 vault 链接重写。"""
+    import promotion
+    new_cid, new_rel = promotion.promote_to_shared(_vault_dir(), args.id)
+    print(f"[OK] promoted -> {new_cid} ({new_rel}); 建议随后 rebuild-registry")
+
+
 def cmd_fail(args):
     """维护命令：把崩溃残留的 running 阶段标记为 failed（之后可重跑该阶段）。"""
     import state_store
@@ -704,6 +746,10 @@ def main():
     spp.add_argument("--path", required=True)
     lp = subparsers.add_parser("lint", help="收尾门禁：lint proposed → promote 或 回滚+Review-Queue")
     lp.add_argument("--source", required=True)
+    pcp = subparsers.add_parser("promotion-candidates", help="检测跨域提升候选（--propose 落 Review-Queue）")
+    pcp.add_argument("--propose", action="store_true")
+    pmp = subparsers.add_parser("promote-concept", help="人工确认后机械提升一个概念为 shared")
+    pmp.add_argument("--id", required=True, help="canonical_id（concept.<domain>.<slug>）")
     fp = subparsers.add_parser("fail", help="维护：把崩溃残留的 running 阶段标记为 failed")
     fp.add_argument("--source", required=True, help="source_id")
     fp.add_argument("--stage", required=True, help="卡死的 stage 名")
@@ -742,6 +788,8 @@ def main():
         'check-write': cmd_check_write,
         'snapshot-page': cmd_snapshot_page,
         'lint': cmd_lint,
+        'promotion-candidates': cmd_promotion_candidates,
+        'promote-concept': cmd_promote_concept,
     }
 
     commands[args.command](args)
