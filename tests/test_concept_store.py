@@ -99,3 +99,73 @@ def test_write_aliases_derived_view(tmp_path):
     concept_store.write_aliases(tmp_path, reg)
     text = (tmp_path / "aliases.md").read_text(encoding="utf-8")
     assert "Signaling Game" in text and "signaling-game" in text and "派生文件" in text
+
+
+def _registry_of(vault):
+    reg, errors, warnings = concept_store.build_registry(concept_store.scan_concept_pages(vault))
+    assert not errors
+    return reg
+
+
+def test_resolve_hits_alias_in_domain_then_shared(tmp_path):
+    _mk_concept(tmp_path, domain="game-theory", name="信号博弈", aliases=["Signaling Game"])
+    reg = _registry_of(tmp_path)
+    hit = concept_store.resolve("signaling game", domain="game-theory", registry=reg)
+    assert hit is not None and hit[0] == "concept.game-theory.signaling-game"
+    assert concept_store.resolve("不存在的概念", domain="game-theory", registry=reg) is None
+
+
+def test_resolve_or_create_merges_existing_never_duplicates(tmp_path):
+    _mk_concept(tmp_path, domain="game-theory", name="信号博弈", aliases=["Signaling Game"])
+    reg = _registry_of(tmp_path)
+    cid, path, action = concept_store.resolve_or_create_concept(
+        tmp_path, mention="Signaling Game", domain="game-theory", registry=reg,
+        source_ref={"source": "whitepaper", "sections": ["12.2"]})
+    assert action == "merged" and cid == "concept.game-theory.signaling-game"
+    pages = list((tmp_path / "domains" / "game-theory" / "concepts").glob("*.md"))
+    assert len(pages) == 1  # 绝不新建重复页
+    meta, _ = mdpage.read_page(path)
+    assert {"source": "whitepaper", "sections": ["12.2"]} in meta["source_refs"]
+
+
+def test_merge_accumulates_source_refs_and_sections(tmp_path):
+    _mk_concept(tmp_path, domain="game-theory", name="信号博弈", aliases=["Signaling Game"])
+    reg = _registry_of(tmp_path)
+    for sec in ("5.2", "12.2", "5.2"):
+        concept_store.resolve_or_create_concept(
+            tmp_path, mention="信号博弈", domain="game-theory", registry=reg,
+            source_ref={"source": "whitepaper", "sections": [sec]})
+    meta, _ = mdpage.read_page(tmp_path / "domains/game-theory/concepts/signaling-game.md")
+    assert meta["source_refs"] == [{"source": "whitepaper", "sections": ["5.2", "12.2"]}]  # 去重累积
+
+
+def test_resolve_or_create_creates_when_miss(tmp_path):
+    reg = {}
+    cid, path, action = concept_store.resolve_or_create_concept(
+        tmp_path, mention="纳什均衡", domain="game-theory", registry=reg,
+        aliases=["Nash Equilibrium"], source_ref={"source": "wp", "sections": ["3.1"]})
+    assert action == "created" and cid == "concept.game-theory.nash-equilibrium"
+    meta, body = mdpage.read_page(path)
+    assert meta["status"] == "proposed" and meta["managed_by"] == "pipeline"
+    assert meta["scope"] == "domain" and meta["domain"] == "game-theory"
+    # §8 concept 最小结构小节齐全
+    for sec in ("## 一句话", "## 直觉", "## 形式化", "## 各章如何处理", "## 与其他概念的关系"):
+        assert sec in body
+
+
+def test_same_name_different_domain_stays_separate(tmp_path):
+    # 同名异义不合并（spec §6：econ 的 utility vs cs 的 utility）
+    _mk_concept(tmp_path, domain="econ", name="Utility")
+    reg = _registry_of(tmp_path)
+    cid, _, action = concept_store.resolve_or_create_concept(
+        tmp_path, mention="Utility", domain="cs", registry=reg)
+    assert action == "created" and cid == "concept.cs.utility"
+
+
+def test_create_existing_page_raises(tmp_path):
+    _mk_concept(tmp_path, domain="d", name="X")
+    try:
+        concept_store.create_concept(tmp_path, domain="d", name="X")
+        assert False, "should raise"
+    except FileExistsError:
+        pass

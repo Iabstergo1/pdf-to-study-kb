@@ -111,3 +111,103 @@ def write_aliases(vault, registry: dict) -> None:
             rows.add(f"- {term} → [[{e['page_path']}|{e['canonical_name']}]] (`{cid}`)")
     lines = ["# 别名索引（派生文件，由 rebuild-registry 重建，勿手改）", ""] + sorted(rows)
     (Path(vault) / "aliases.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+CONCEPT_BODY = """# {name}
+
+## 一句话
+
+（待 /ingest 填写）
+
+## 直觉
+
+（待 /ingest 填写）
+
+## 形式化
+
+（待 /ingest 填写）
+
+## 各章如何处理
+
+（待 /ingest 填写）
+
+## 与其他概念的关系
+
+（待 /ingest 填写）
+"""
+
+
+def resolve(mention: str, *, domain: str, registry: dict):
+    """mention 命中 canonical（名/别名，先本域后 shared）→ (canonical_id, entry)；未命中 → None。"""
+    if mention in registry:  # 直接给 canonical_id
+        return mention, registry[mention]
+    n = _norm(mention)
+    for want in (domain, "shared"):
+        for cid in sorted(registry):
+            e = registry[cid]
+            if e["domain"] != want:
+                continue
+            if _norm(e["canonical_name"]) == n or any(_norm(a) == n for a in e["aliases"]):
+                return cid, e
+    return None
+
+
+def create_concept(vault, *, domain: str, name: str, aliases=(), source_ref=None) -> Path:
+    """新建骨架概念页（status: proposed；§8 最小结构）。页已存在则拒绝——必须走 merge。"""
+    cid = canonical_id(domain, name, aliases)
+    slug = cid.rsplit(".", 1)[1]
+    if domain == "shared":
+        rel = Path("concepts") / f"{slug}.md"
+    else:
+        rel = Path("domains") / domain / "concepts" / f"{slug}.md"
+    path = Path(vault) / rel
+    if path.exists():
+        raise FileExistsError(f"concept page already exists: {rel} (use merge, never duplicate)")
+    meta = {"type": "concept", "canonical_id": cid, "canonical_name": name,
+            "aliases": list(aliases),
+            "scope": "shared" if domain == "shared" else "domain",
+            "domain": domain,
+            "source_refs": [source_ref] if source_ref else [],
+            "page_path": rel.as_posix(), "managed_by": "pipeline", "status": "proposed"}
+    mdpage.write_page(path, meta, CONCEPT_BODY.format(name=name))
+    return path
+
+
+def merge_concept(vault, page_path: str, *, source_ref=None, new_aliases=()) -> None:
+    """merge 进既有页：只累积 frontmatter 的 source_refs/aliases（去重），绝不新建页、不动正文。"""
+    path = Path(vault) / page_path
+    meta, body = mdpage.read_page(path)
+    if new_aliases:
+        cur = list(meta.get("aliases") or [])
+        known = {_norm(meta.get("canonical_name", ""))} | {_norm(x) for x in cur}
+        for a in new_aliases:
+            if _norm(a) not in known:
+                cur.append(a)
+                known.add(_norm(a))
+        meta["aliases"] = cur
+    if source_ref:
+        refs = list(meta.get("source_refs") or [])
+        hit = next((r for r in refs if r.get("source") == source_ref.get("source")), None)
+        if hit:
+            hit["sections"] = list(dict.fromkeys([*hit.get("sections", []),
+                                                  *source_ref.get("sections", [])]))
+        else:
+            refs.append(source_ref)
+        meta["source_refs"] = refs
+    mdpage.write_page(path, meta, body)
+
+
+def resolve_or_create_concept(vault, *, mention: str, domain: str, registry: dict,
+                              aliases=(), source_ref=None):
+    """唯一入口（spec §6）：命中 → merge 既有页，返回 (cid, path, "merged")；
+    未命中 → create 骨架页，返回 (cid, path, "created")。新建后调用方需重建 registry。"""
+    hit = resolve(mention, domain=domain, registry=registry)
+    if hit:
+        cid, entry = hit
+        merge_concept(vault, entry["page_path"], source_ref=source_ref,
+                      new_aliases=[mention, *aliases])
+        return cid, Path(vault) / entry["page_path"], "merged"
+    path = create_concept(vault, domain=domain, name=mention,
+                          aliases=list(aliases), source_ref=source_ref)
+    meta, _ = mdpage.read_page(path)
+    return meta["canonical_id"], path, "created"
