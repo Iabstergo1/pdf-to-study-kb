@@ -231,3 +231,30 @@ def next_actions(db_path) -> list[dict]:
         out.append({"source_id": r["source_id"], "current_stage": stage,
                     "current_status": status, "next_action": act})
     return out
+
+
+def record_artifact(db_path, source_id: str, *, kind: str, path: str, sha256: str) -> int:
+    """登记/更新一个产物（同 source+kind+path 覆盖，保证幂等重跑不堆重复行）。"""
+    con = connect(db_path)
+    try:
+        con.execute(
+            "DELETE FROM artifacts WHERE source_id=? AND kind=? AND path=?",
+            (source_id, kind, path))
+        cur = con.execute(
+            "INSERT INTO artifacts(source_id,kind,path,sha256,created_at) VALUES (?,?,?,?,?)",
+            (source_id, kind, path, sha256, _now()))
+        con.commit()
+        return int(cur.lastrowid)
+    finally:
+        con.close()
+
+
+def list_artifacts(db_path, source_id: str) -> list[dict]:
+    con = connect(db_path)
+    try:
+        rows = con.execute(
+            "SELECT id,source_id,kind,path,sha256,created_at FROM artifacts WHERE source_id=? ORDER BY id",
+            (source_id,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
