@@ -188,9 +188,127 @@ def cmd_run_book(args):
     _cmd_run_book(args)
 
 
+def _workspace_root() -> Path:
+    """状态库/staging 锚点：默认 repo 根；STUDY_KB_ROOT 覆盖（测试隔离/多库场景）。"""
+    import os
+    env = os.environ.get("STUDY_KB_ROOT")
+    return Path(env) if env else Path(__file__).resolve().parents[1]
+
+
 def _vault_state_db() -> Path:
-    """vault 级单库（repo 根下固定路径，不接 --book）。"""
-    return Path(__file__).resolve().parents[1] / "pipeline-workspace/state/study-kb.sqlite"
+    """vault 级单库（不接 --book）；路径 pipeline-workspace/state/study-kb.sqlite。"""
+    return _workspace_root() / "pipeline-workspace/state/study-kb.sqlite"
+
+
+def _staging_dir(source_id: str) -> Path:
+    return _workspace_root() / "pipeline-workspace/staging" / source_id
+
+
+def cmd_add_source(args):
+    """注册一个来源到状态库（记 raw 路径为 artifact）。"""
+    import state_store
+    import hashlib
+    db = _vault_state_db()
+    db.parent.mkdir(parents=True, exist_ok=True)
+    state_store.init_db(db)
+    state_store.register_source(db, args.source, domain=args.domain, fmt=args.fmt)
+    raw = Path(args.path)
+    sha = hashlib.sha256(raw.read_bytes()).hexdigest() if raw.exists() else ""
+    state_store.record_artifact(db, args.source, kind="raw_source", path=str(raw), sha256=sha)
+    print(f"[OK] registered source '{args.source}' (domain={args.domain}, fmt={args.fmt})")
+
+
+def _raw_path(db, state_store, source_id: str) -> Path:
+    for a in state_store.list_artifacts(db, source_id):
+        if a["kind"] == "raw_source":
+            return Path(a["path"])
+    raise SystemExit(f"no raw_source artifact for {source_id}; run add-source first")
+
+
+def cmd_profile(args):
+    """逐页 profile（产出 staging/<source>/pages.jsonl，needs_vision 标记）。"""
+    import state_store
+    import source_profile
+    import json
+    import hashlib
+    db = _vault_state_db()
+    raw = _raw_path(db, state_store, args.source)
+    src_row = state_store.get_source(db, args.source)
+    ihash = hashlib.sha256(raw.read_bytes()).hexdigest()
+    if not state_store.should_run_stage(db, args.source, "profiled", input_hash=ihash):
+        print("[skip] profiled up-to-date")
+        return
+    state_store.start_stage(db, args.source, "profiled", input_hash=ihash)
+    try:
+        pages = source_profile.profile_source(raw, fmt=src_row["format"])
+        out = _staging_dir(args.source)
+        out.mkdir(parents=True, exist_ok=True)
+        pages_path = out / "pages.jsonl"
+        pages_path.write_text("\n".join(json.dumps(p, ensure_ascii=False) for p in pages),
+                              encoding="utf-8")
+        ohash = hashlib.sha256(pages_path.read_bytes()).hexdigest()
+        state_store.record_artifact(db, args.source, kind="pages", path=str(pages_path), sha256=ohash)
+        state_store.complete_stage(db, args.source, "profiled", output_hash=ohash)
+        n_vision = sum(1 for p in pages if p.get("needs_vision"))
+        print(f"[OK] profiled → {len(pages)} pages ({n_vision} needs_vision)")
+    except Exception as e:
+        state_store.fail_stage(db, args.source, "profiled", error=str(e))
+        raise
+
+
+def cmd_source_convert(args):
+    """source-convert：raw → staging/<source>/source.md + 难页 PNG。"""
+    import state_store
+    import source_convert
+    import hashlib
+    db = _vault_state_db()
+    raw = _raw_path(db, state_store, args.source)
+    src_row = state_store.get_source(db, args.source)
+    ihash = hashlib.sha256(raw.read_bytes()).hexdigest()
+    if not state_store.should_run_stage(db, args.source, "converted", input_hash=ihash):
+        print("[skip] converted up-to-date")
+        return
+    state_store.start_stage(db, args.source, "converted", input_hash=ihash)
+    try:
+        out = _staging_dir(args.source)
+        res = source_convert.convert(raw, out_dir=out, fmt=src_row["format"])
+        # pages.jsonl 已由 profile 阶段产出；convert 内部用同一批纯函数复算 needs_vision，结果一致
+        state_store.record_artifact(db, args.source, kind="source_md", path=res["source_md"], sha256=res["sha256"])
+        state_store.complete_stage(db, args.source, "converted", output_hash=res["sha256"])
+        print(f"[OK] converted → {res['source_md']} (needs_vision pages: {res['needs_vision_pages']})")
+    except Exception as e:
+        state_store.fail_stage(db, args.source, "converted", error=str(e))
+        raise
+
+
+def cmd_windows(args):
+    """确定性 processing windows：source.md → windows.jsonl。"""
+    import state_store
+    import windowing
+    import json
+    import hashlib
+    db = _vault_state_db()
+    out = _staging_dir(args.source)
+    source_md = out / "source.md"
+    if not source_md.exists():
+        raise SystemExit("run source-convert first")
+    md = source_md.read_text(encoding="utf-8")
+    ihash = hashlib.sha256(md.encode("utf-8")).hexdigest()
+    if not state_store.should_run_stage(db, args.source, "windowed", input_hash=ihash):
+        print("[skip] windowed up-to-date")
+        return
+    state_store.start_stage(db, args.source, "windowed", input_hash=ihash)
+    try:
+        ws = windowing.build_windows(md)
+        (out / "windows.jsonl").write_text(
+            "\n".join(json.dumps(w, ensure_ascii=False) for w in ws), encoding="utf-8")
+        state_store.record_artifact(db, args.source, kind="windows",
+                                    path=str(out / "windows.jsonl"), sha256=ihash)
+        state_store.complete_stage(db, args.source, "windowed", output_hash=ihash)
+        print(f"[OK] windowed → {len(ws)} windows")
+    except Exception as e:
+        state_store.fail_stage(db, args.source, "windowed", error=str(e))
+        raise
 
 
 def cmd_status(args):
@@ -263,6 +381,18 @@ def main():
     subparsers.add_parser("status", help="列出每个 source 的阶段/状态（vault 级单库）")
     subparsers.add_parser("next", help="列出每个 source 的下一步人工动作")
 
+    # P1 新架构预处理阶段（vault 级单库，不接 --book）
+    asp = subparsers.add_parser("add-source", help="注册一个来源到状态库")
+    asp.add_argument("--source", required=True, help="source_id")
+    asp.add_argument("--domain", required=True, help="所属领域")
+    asp.add_argument("--path", required=True, help="原始文件路径")
+    asp.add_argument("--fmt", required=True, choices=["pdf", "md", "docx", "pptx"], help="来源格式")
+    for name, help_text in [("profile", "逐页 profile + needs_vision 标记"),
+                            ("source-convert", "转成 staging/<source>/source.md + 难页 PNG"),
+                            ("windows", "生成确定性 processing windows")]:
+        p = subparsers.add_parser(name, help=help_text)
+        p.add_argument("--source", required=True, help="source_id")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -278,6 +408,10 @@ def main():
         'run-book': cmd_run_book,
         'status': cmd_status,
         'next': cmd_next,
+        'add-source': cmd_add_source,
+        'profile': cmd_profile,
+        'source-convert': cmd_source_convert,
+        'windows': cmd_windows,
     }
 
     commands[args.command](args)
