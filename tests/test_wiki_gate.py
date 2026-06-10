@@ -83,3 +83,27 @@ def test_lint_broken_link_and_l6(tmp_path):
     vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
     assert any(v["rule"] == "L6-empty-lesson" for v in vs)
     assert any(v["rule"] == "broken-link" for v in vs)
+
+
+def test_build_index_only_published(tmp_path):
+    _page(tmp_path, "domains/d/lessons/a.md",
+          {"type": "lesson", "status": "published", "title": "A 课"}, GOOD_LESSON)
+    _page(tmp_path, "domains/d/lessons/b.md",
+          {"type": "lesson", "status": "proposed", "title": "B 课"}, GOOD_LESSON)
+    _page(tmp_path, "topics/t.md", {"type": "topic", "status": "published", "title": "主题T"}, "# T\n")
+    text = wiki_gate.build_index(tmp_path)
+    assert "domains/d/lessons/a.md" in text and "topics/t.md" in text
+    assert "lessons/b.md" not in text  # proposed 不上 index
+    wiki_gate.write_index(tmp_path)
+    assert (tmp_path / "index.generated.md").exists()
+
+
+def test_promote_flips_status(tmp_path):
+    _page(tmp_path, "domains/d/lessons/a.md",
+          {"type": "lesson", "status": "proposed"}, GOOD_LESSON)
+    pages = wiki_gate.collect_proposed(tmp_path)
+    n = wiki_gate.promote(tmp_path, pages)
+    assert n == 1
+    meta, _ = mdpage.read_page(tmp_path / "domains/d/lessons/a.md")
+    assert meta["status"] == "published"
+    assert wiki_gate.collect_proposed(tmp_path) == []

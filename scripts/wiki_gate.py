@@ -76,3 +76,44 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
     for e in errors:
         hit("concepts/", "duplicate-canonical", e)
     return vs
+
+
+def _published_pages(vault: Path) -> list[tuple[str, dict]]:
+    out = []
+    for f in sorted(vault.rglob("*.md")):
+        rel = f.relative_to(vault).as_posix()
+        if rel in _DERIVED or rel.split("/")[0] in _EXCLUDE_TOP:
+            continue
+        meta, _ = mdpage.read_page(f)
+        if meta.get("status") == "published":
+            out.append((rel, meta))
+    return out
+
+
+def build_index(vault) -> str:
+    """index.generated.md：只收录 status: published（spec §3.3），按类型分组、确定性排序。"""
+    vault = Path(vault)
+    groups: dict[str, list[str]] = {}
+    for rel, meta in _published_pages(vault):
+        groups.setdefault(meta.get("type", "other"), []).append(
+            f"- [[{rel}|{meta.get('title') or meta.get('canonical_name') or rel}]]")
+    lines = ["# 内容目录（派生文件：由收尾 CLI 重建，只收录 published，勿手改）", ""]
+    for ptype in ["overview", "concept", "topic", "comparison", "synthesis", "lesson", "source", "other"]:
+        if ptype in groups:
+            lines += [f"## {ptype}", ""] + sorted(groups[ptype]) + [""]
+    return "\n".join(lines)
+
+
+def write_index(vault) -> None:
+    (Path(vault) / "index.generated.md").write_text(build_index(vault),
+                                                    encoding="utf-8", newline="\n")
+
+
+def promote(vault, pages: list[dict]) -> int:
+    """proposed → published（只动 frontmatter status，不碰正文）。"""
+    vault = Path(vault)
+    for p in pages:
+        meta, body = mdpage.read_page(vault / p["rel_path"])
+        meta["status"] = "published"
+        mdpage.write_page(vault / p["rel_path"], meta, body)
+    return len(pages)
