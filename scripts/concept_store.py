@@ -98,7 +98,8 @@ def write_registry(vault, registry: dict) -> str:
     out.parent.mkdir(parents=True, exist_ok=True)
     text = yaml.safe_dump({k: registry[k] for k in sorted(registry)},
                           allow_unicode=True, sort_keys=True, default_flow_style=False)
-    out.write_text(text, encoding="utf-8")
+    # newline="\n"：磁盘字节必须与返回的 hash 一致（Windows 默认会写 \r\n，导致 stale 守卫误报）
+    out.write_text(text, encoding="utf-8", newline="\n")
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
