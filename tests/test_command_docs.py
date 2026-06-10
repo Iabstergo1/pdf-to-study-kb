@@ -13,6 +13,13 @@ def test_ingest_command_doc_protocol_complete():
     assert "_registry.yaml" in text and "aliases.md" in text and "index.generated.md" in text
 
 
+def test_ingest_doc_synthesis_duties():
+    text = (ROOT / ".claude/commands/ingest.md").read_text(encoding="utf-8")
+    for must in ["综合层职责", "overview.md", "核心概念地图", "章节清单",
+                 "topics/", "comparisons/", "跟随源 TOC"]:
+        assert must in text, f"ingest.md 缺综合层职责要素: {must}"
+
+
 def test_routing_doc_has_negative_examples():
     text = (ROOT / "docs/skill-runtime/routing.md").read_text(encoding="utf-8")
     assert "/ingest" in text and "负例" in text and "总结这篇文章" in text

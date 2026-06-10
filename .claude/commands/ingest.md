@@ -48,6 +48,17 @@ argument-hint: <source_id>
   （自检原语：`scripts/page_rules.py`）。
 - 追加 `log.md`：`## [YYYY-MM-DD] ingest | $1 | <created/updated 页列表>`（append-only）。
 
+## 2.5 综合层职责（一等产物，spec §7——不是可选项）
+
+- **overview.md 每源必更新**：把本源带来的新概念挂进"核心概念地图"、调整"推荐学习路线"、
+  补充"模型家族对比"。overview 是 living synthesis，**禁止退化成章节清单**（L5 会拦）。
+- **topic**：本源与已有内容形成跨章节/跨来源主题时，增量更新 `topics/<主题>.md`
+  （核心综合 + 各来源贡献表 + 未解决问题；与既有结论矛盾时记入"未解决问题"，不要悄悄改写）。
+- **comparison**：出现 2+ 个可横向对比的模型/方法时建/更新 `comparisons/` 页。
+- **synthesis**：跨来源沉淀出单一来源给不了的洞见时写 `synthesis/` 页。
+- **lessons 跟随源 TOC**：每个源章节产出 lesson 是线性辅助层；概念/主题才是主组织。
+- 收尾 CLI 只重建派生（index/registry/aliases），**不改写以上综合内容**——它们由你维护。
+
 ## 3. 收工
 
 1. 全部 window 完成后：写/更新 `sources/$1.md`（来源摘要页，模板 `templates/source.md`）。
