@@ -53,3 +53,8 @@ def test_unknown_page_type_raises():
         assert False, "should raise"
     except KeyError:
         pass
+
+
+def test_overview_required_sections_l5():
+    secs = page_rules.required_sections_for("overview")
+    assert "## 核心概念地图" in secs and "## 推荐学习路线" in secs and "## 模型家族对比" in secs

@@ -32,6 +32,12 @@ def test_templates_contain_required_sections():
             f"{t}.md 缺必需小节"
 
 
+def test_overview_template_exists_with_l5_sections():
+    meta, body = mdpage.read_page(TEMPLATES / "overview.md")
+    assert meta["type"] == "overview" and meta["managed_by"] == "pipeline"
+    assert page_rules.missing_sections(body, page_rules.required_sections_for("overview")) == []
+
+
 def test_lesson_template_clean_prose_contract():
     _, body = mdpage.read_page(TEMPLATES / "lesson.md")
     assert page_rules.find_bare_evidence_ids(body) == []      # 无裸 E-ID
