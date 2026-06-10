@@ -518,6 +518,65 @@ def cmd_snapshot_page(args):
     print(f"[OK] snapshot {args.path} -> {manifest}")
 
 
+def cmd_lint(args):
+    """收尾门禁（spec §10/§11）：lint proposed 集合 → 过则 promote+重建派生；败则回滚+Review-Queue。"""
+    import state_store
+    import wiki_gate
+    import concept_store
+    import snapshots
+    import hashlib
+    import shutil
+    from datetime import date
+    db = _vault_state_db()
+    vault = _vault_dir()
+    proposed = wiki_gate.collect_proposed(vault) if vault.exists() else []
+    ihash = hashlib.sha256("\n".join(
+        f"{p['rel_path']}:{hashlib.sha256(p['body'].encode('utf-8')).hexdigest()}"
+        for p in proposed).encode("utf-8")).hexdigest()
+    if not state_store.should_run_stage(db, args.source, "lint", input_hash=ihash):
+        print("[skip] lint up-to-date")
+        return
+    state_store.start_stage(db, args.source, "lint", input_hash=ihash)
+    violations = wiki_gate.lint_pages(vault, proposed)
+    if violations:
+        for v in violations:
+            print(f"[lint] {v['rule']} {v['path']}: {v['detail']}")
+            state_store.add_review_proposal(db, args.source, target_path=v["path"],
+                                            kind=v["rule"], reason=v["detail"])
+        # 回滚本 source 的全部就地 merge 快照
+        snap_dir = _workspace_root() / "pipeline-workspace/snapshots" / args.source
+        for manifest in sorted(snap_dir.rglob("manifest.json")):
+            snapshots.rollback(manifest)
+            print(f"[rollback] {manifest}")
+        queue = vault / "Review-Queue" / f"{args.source}-lint-{date.today().isoformat()}.md"
+        queue.parent.mkdir(parents=True, exist_ok=True)
+        queue.write_text(
+            "# Lint 未过（不 promote；就地 merge 已回滚）\n\n" +
+            "\n".join(f"- **{v['rule']}** `{v['path']}`：{v['detail']}" for v in violations) +
+            "\n\n处理后回流：修复 → 重新 /ingest（状态机已允许 lint failed → ingest_waiting）。\n",
+            encoding="utf-8", newline="\n")
+        state_store.fail_stage(db, args.source, "lint",
+                               error=f"{len(violations)} lint violations")
+        raise SystemExit(f"lint failed: {len(violations)} violations -> {queue}")
+    # 通过：promote + 重建派生 + 日志 + 清快照
+    n = wiki_gate.promote(vault, proposed)
+    registry, errors, _w = concept_store.build_registry(concept_store.scan_concept_pages(vault))
+    if errors:
+        state_store.fail_stage(db, args.source, "lint", error="; ".join(errors))
+        raise SystemExit("registry corrupt: " + "; ".join(errors))
+    concept_store.write_registry(vault, registry)
+    concept_store.write_aliases(vault, registry)
+    wiki_gate.write_index(vault)
+    log = vault / "log.md"
+    with open(log, "a", encoding="utf-8", newline="\n") as f:
+        f.write(f"\n## [{date.today().isoformat()}] lint | {args.source} | promoted {n} pages\n")
+    snap_dir = _workspace_root() / "pipeline-workspace/snapshots" / args.source
+    if snap_dir.exists():
+        shutil.rmtree(snap_dir)
+    state_store.complete_stage(db, args.source, "lint", output_hash=ihash)
+    print(f"[OK] lint passed: promoted {n} pages; index/registry/aliases rebuilt; source published")
+
+
 def cmd_fail(args):
     """维护命令：把崩溃残留的 running 阶段标记为 failed（之后可重跑该阶段）。"""
     import state_store
@@ -643,6 +702,8 @@ def main():
     spp = subparsers.add_parser("snapshot-page", help="就地 merge 前快照该页")
     spp.add_argument("--source", required=True)
     spp.add_argument("--path", required=True)
+    lp = subparsers.add_parser("lint", help="收尾门禁：lint proposed → promote 或 回滚+Review-Queue")
+    lp.add_argument("--source", required=True)
     fp = subparsers.add_parser("fail", help="维护：把崩溃残留的 running 阶段标记为 failed")
     fp.add_argument("--source", required=True, help="source_id")
     fp.add_argument("--stage", required=True, help="卡死的 stage 名")
@@ -680,6 +741,7 @@ def main():
         'resolve-concept': cmd_resolve_concept,
         'check-write': cmd_check_write,
         'snapshot-page': cmd_snapshot_page,
+        'lint': cmd_lint,
     }
 
     commands[args.command](args)
