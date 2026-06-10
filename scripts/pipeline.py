@@ -337,6 +337,54 @@ def cmd_rebuild_registry(args):
     print(f"[OK] registry: {len(registry)} concepts ({shared} shared), sha256={sha[:12]}")
 
 
+def cmd_workorder(args):
+    """生成 source 级 ingest work order（spec §9）：windowed → workorder_ready。"""
+    import state_store
+    import workorder
+    import json
+    import hashlib
+    db = _vault_state_db()
+    src_row = state_store.get_source(db, args.source)
+    if src_row is None:
+        raise SystemExit(f"unknown source: {args.source}")
+    staging = _staging_dir(args.source)
+    windows_file = staging / "windows.jsonl"
+    if not windows_file.exists():
+        raise SystemExit("run windows first")
+    ihash = hashlib.sha256(windows_file.read_bytes()).hexdigest()
+    if not state_store.should_run_stage(db, args.source, "workorder_ready", input_hash=ihash):
+        print("[skip] workorder up-to-date")
+        return
+    state_store.start_stage(db, args.source, "workorder_ready", input_hash=ihash)
+    try:
+        wo = workorder.build_workorder(_vault_dir(), source_id=args.source,
+                                       domain=src_row["domain"], staging_dir=staging)
+        path = workorder.write_workorder(staging, wo)
+        ohash = hashlib.sha256(path.read_bytes()).hexdigest()
+        state_store.record_work_order(db, args.source, path=str(path),
+                                      registry_hash=wo["registry"]["hash"],
+                                      write_scope_json=json.dumps(wo["write_scope"]))
+        state_store.record_artifact(db, args.source, kind="workorder", path=str(path), sha256=ohash)
+        state_store.complete_stage(db, args.source, "workorder_ready", output_hash=ohash)
+        print(f"[OK] workorder → {path} (registry {wo['registry']['hash'][:12]})")
+    except Exception as e:
+        state_store.fail_stage(db, args.source, "workorder_ready", error=str(e))
+        raise
+
+
+def cmd_show_window(args):
+    """打印指定 processing window 的源文本（/ingest 逐窗读取用）。"""
+    import json
+    staging = _staging_dir(args.source)
+    md = (staging / "source.md").read_text(encoding="utf-8")
+    for line in (staging / "windows.jsonl").read_text(encoding="utf-8").splitlines():
+        w = json.loads(line)
+        if w["window_id"] == args.window:
+            print(md[w["char_start"]:w["char_end"]])
+            return
+    raise SystemExit(f"window not found: {args.window}")
+
+
 def cmd_fail(args):
     """维护命令：把崩溃残留的 running 阶段标记为 failed（之后可重跑该阶段）。"""
     import state_store
@@ -427,6 +475,11 @@ def main():
         p = subparsers.add_parser(name, help=help_text)
         p.add_argument("--source", required=True, help="source_id")
     subparsers.add_parser("rebuild-registry", help="从概念页 frontmatter 重建 _registry.yaml + aliases.md")
+    wop = subparsers.add_parser("workorder", help="生成 source 级 ingest work order")
+    wop.add_argument("--source", required=True)
+    swp = subparsers.add_parser("show-window", help="打印指定 window 的源文本")
+    swp.add_argument("--source", required=True)
+    swp.add_argument("--window", required=True)
     fp = subparsers.add_parser("fail", help="维护：把崩溃残留的 running 阶段标记为 failed")
     fp.add_argument("--source", required=True, help="source_id")
     fp.add_argument("--stage", required=True, help="卡死的 stage 名")
@@ -453,6 +506,8 @@ def main():
         'windows': cmd_windows,
         'fail': cmd_fail,
         'rebuild-registry': cmd_rebuild_registry,
+        'workorder': cmd_workorder,
+        'show-window': cmd_show_window,
     }
 
     commands[args.command](args)
