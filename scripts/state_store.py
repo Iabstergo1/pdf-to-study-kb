@@ -258,3 +258,104 @@ def list_artifacts(db_path, source_id: str) -> list[dict]:
         return [dict(r) for r in rows]
     finally:
         con.close()
+
+
+def start_window(db_path, source_id: str, window_id: str, *, input_hash: str) -> None:
+    """window 级进度（spec §3.3）：UPSERT 为 running（重启同窗合法——窗口本身幂等可重做）。"""
+    con = connect(db_path)
+    try:
+        con.execute(
+            "INSERT INTO ingest_progress(source_id,window_id,input_hash,started_at,status)"
+            " VALUES (?,?,?,?,'running')"
+            " ON CONFLICT(source_id,window_id) DO UPDATE SET"
+            "   input_hash=excluded.input_hash, started_at=excluded.started_at,"
+            "   status='running', error=NULL, finished_at=NULL",
+            (source_id, window_id, input_hash, _now()))
+        con.commit()
+    finally:
+        con.close()
+
+
+def finish_window(db_path, source_id: str, window_id: str, *,
+                  write_set_json: str | None = None, proposal_set_json: str | None = None) -> None:
+    con = connect(db_path)
+    try:
+        cur = con.execute(
+            "UPDATE ingest_progress SET status='finished', finished_at=?,"
+            " write_set_json=?, proposal_set_json=? WHERE source_id=? AND window_id=?",
+            (_now(), write_set_json, proposal_set_json, source_id, window_id))
+        if cur.rowcount == 0:
+            raise InvalidTransition(f"no window {source_id}/{window_id} to finish")
+        con.commit()
+    finally:
+        con.close()
+
+
+def fail_window(db_path, source_id: str, window_id: str, *, error: str) -> None:
+    con = connect(db_path)
+    try:
+        cur = con.execute(
+            "UPDATE ingest_progress SET status='failed', finished_at=?, error=?"
+            " WHERE source_id=? AND window_id=?", (_now(), error, source_id, window_id))
+        if cur.rowcount == 0:
+            raise InvalidTransition(f"no window {source_id}/{window_id} to fail")
+        con.commit()
+    finally:
+        con.close()
+
+
+def should_run_window(db_path, source_id: str, window_id: str, *, input_hash: str) -> bool:
+    con = connect(db_path)
+    try:
+        row = con.execute(
+            "SELECT 1 FROM ingest_progress WHERE source_id=? AND window_id=?"
+            "   AND status='finished' AND input_hash=? LIMIT 1",
+            (source_id, window_id, input_hash)).fetchone()
+        return row is None
+    finally:
+        con.close()
+
+
+def window_states(db_path, source_id: str) -> list[dict]:
+    con = connect(db_path)
+    try:
+        rows = con.execute(
+            "SELECT window_id,status,input_hash,write_set_json,proposal_set_json,error"
+            " FROM ingest_progress WHERE source_id=? ORDER BY window_id", (source_id,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def record_work_order(db_path, source_id: str, *, path: str, registry_hash: str,
+                      write_scope_json: str) -> None:
+    con = connect(db_path)
+    try:
+        con.execute(
+            "INSERT INTO work_orders(source_id,path,registry_hash,write_scope_json,created_at)"
+            " VALUES (?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET"
+            "   path=excluded.path, registry_hash=excluded.registry_hash,"
+            "   write_scope_json=excluded.write_scope_json, created_at=excluded.created_at",
+            (source_id, path, registry_hash, write_scope_json, _now()))
+        con.commit()
+    finally:
+        con.close()
+
+
+def get_work_order(db_path, source_id: str):
+    con = connect(db_path)
+    try:
+        return con.execute("SELECT * FROM work_orders WHERE source_id=?", (source_id,)).fetchone()
+    finally:
+        con.close()
+
+
+def latest_run_id(db_path, source_id: str, stage: str) -> int | None:
+    con = connect(db_path)
+    try:
+        row = con.execute(
+            "SELECT id FROM source_stage_runs WHERE source_id=? AND stage=?"
+            " ORDER BY id DESC LIMIT 1", (source_id, stage)).fetchone()
+        return int(row["id"]) if row else None
+    finally:
+        con.close()
