@@ -619,6 +619,18 @@ def cmd_promote_concept(args):
     print(f"[OK] promoted -> {new_cid} ({new_rel}); 建议随后 rebuild-registry")
 
 
+def cmd_check_session(args):
+    """Q1 确定性检查：query-session 目录契约（--saved 按 /kb-save 后完整契约）。"""
+    import query_session
+    d = _workspace_root() / "pipeline-workspace/query-sessions" / args.id
+    problems = query_session.check_session(d, saved=getattr(args, "saved", False))
+    if problems:
+        for p in problems:
+            print(f"[Q1] {p}")
+        raise SystemExit(f"check-session failed: {len(problems)} problems")
+    print(f"[OK] session {args.id} passes Q1 ({'saved' if args.saved else 'query'} contract)")
+
+
 def cmd_fail(args):
     """维护命令：把崩溃残留的 running 阶段标记为 failed（之后可重跑该阶段）。"""
     import state_store
@@ -750,6 +762,9 @@ def main():
     pcp.add_argument("--propose", action="store_true")
     pmp = subparsers.add_parser("promote-concept", help="人工确认后机械提升一个概念为 shared")
     pmp.add_argument("--id", required=True, help="canonical_id（concept.<domain>.<slug>）")
+    csp = subparsers.add_parser("check-session", help="Q1：query-session 目录契约检查")
+    csp.add_argument("--id", required=True, help="session run_id")
+    csp.add_argument("--saved", action="store_true", help="按 /kb-save 后完整契约检查")
     fp = subparsers.add_parser("fail", help="维护：把崩溃残留的 running 阶段标记为 failed")
     fp.add_argument("--source", required=True, help="source_id")
     fp.add_argument("--stage", required=True, help="卡死的 stage 名")
@@ -790,6 +805,7 @@ def main():
         'lint': cmd_lint,
         'promotion-candidates': cmd_promotion_candidates,
         'promote-concept': cmd_promote_concept,
+        'check-session': cmd_check_session,
     }
 
     commands[args.command](args)
