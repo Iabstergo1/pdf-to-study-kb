@@ -6,7 +6,7 @@
 
 1. **设计唯一真值**：`docs/superpowers/specs/2026-06-08-claude-code-wiki-redesign-design.md`。代码与该 spec 冲突时以 spec 为准（除非更新的 spec/ADR 取代）。
 2. **决策记录**：`docs/adr/`（如 `0001` 舍弃 LangGraph）。
-3. **构建计划/进度**：`docs/superpowers/plans/`（P0–P7）。
+3. **构建计划/记录**：`docs/superpowers/plans/`（P0–P8 + 清理期，已全部完成）。
 4. **Agent 指令**：根 `CLAUDE.md`。
 5. **人读概览**：`README.md`。
 
@@ -31,4 +31,4 @@
 4. 先确定性底座、后 LLM 行为；实现同时加聚焦测试。
 5. 未过收尾门禁的内容不 promote，转 `Review-Queue/`。
 6. 覆盖已存在页前须：在 work-order snapshot 中、`managed_by != human`、磁盘 hash 一致；否则不覆盖、出 proposal。
-7. 旧管线代码（`langgraph_worker.py`、`plan-units` 等）在其删除期（P4）前仍在仓库；**不要在旧路径上加新功能**。
+7. 旧管线代码已在清理期删除（`tests/test_legacy_removed.py` 守卫）；**不要重新引入**（见 `docs/adr/0001`）。
