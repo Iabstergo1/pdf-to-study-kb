@@ -38,3 +38,22 @@ def test_source_convert_and_windows_advance_state(tmp_path):
     # 状态推进到 windowed/done
     r = _run(["status"], tmp_path)
     assert "windowed" in r.stdout
+
+
+def test_fail_command_unsticks_crashed_running_stage(tmp_path):
+    note = tmp_path / "raw" / "note.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# T\n\nbody\n", encoding="utf-8")
+    _run(["add-source", "--source", "note", "--domain", "misc", "--path", str(note), "--fmt", "md"], tmp_path)
+    # 模拟崩溃：库层 start_stage 后不 complete/fail
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("state_store", ROOT / "scripts" / "state_store.py")
+    state_store = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(state_store)
+    db = tmp_path / "pipeline-workspace/state/study-kb.sqlite"
+    state_store.start_stage(db, "note", "profiled", input_hash="h-crashed")
+    r = _run(["fail", "--source", "note", "--stage", "profiled", "--error", "crashed"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert state_store.get_source(db, "note")["current_status"] == "failed"
+    # 救回后该阶段可正常重跑
+    assert _run(["profile", "--source", "note"], tmp_path).returncode == 0

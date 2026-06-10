@@ -311,6 +311,14 @@ def cmd_windows(args):
         raise
 
 
+def cmd_fail(args):
+    """维护命令：把崩溃残留的 running 阶段标记为 failed（之后可重跑该阶段）。"""
+    import state_store
+    db = _vault_state_db()
+    state_store.fail_stage(db, args.source, args.stage, error=args.error)
+    print(f"[OK] {args.source}/{args.stage} marked failed: {args.error}")
+
+
 def cmd_status(args):
     """列出每个 source 的阶段/状态（vault 级单库）。"""
     import state_store
@@ -392,6 +400,10 @@ def main():
                             ("windows", "生成确定性 processing windows")]:
         p = subparsers.add_parser(name, help=help_text)
         p.add_argument("--source", required=True, help="source_id")
+    fp = subparsers.add_parser("fail", help="维护：把崩溃残留的 running 阶段标记为 failed")
+    fp.add_argument("--source", required=True, help="source_id")
+    fp.add_argument("--stage", required=True, help="卡死的 stage 名")
+    fp.add_argument("--error", required=True, help="失败原因（记入 source_stage_runs.error）")
 
     args = parser.parse_args()
 
@@ -412,6 +424,7 @@ def main():
         'profile': cmd_profile,
         'source-convert': cmd_source_convert,
         'windows': cmd_windows,
+        'fail': cmd_fail,
     }
 
     commands[args.command](args)
