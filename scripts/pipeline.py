@@ -385,6 +385,116 @@ def cmd_show_window(args):
     raise SystemExit(f"window not found: {args.window}")
 
 
+def cmd_ingest_start(args):
+    """/ingest 开工：取 vault 锁 + stale registry 硬校验 + 推进到 ingesting。"""
+    import state_store
+    import locks
+    import ingest_guards
+    import os
+    db = _vault_state_db()
+    wo_row = state_store.get_work_order(db, args.source)
+    if wo_row is None:
+        raise SystemExit("run workorder first")
+    if not locks.acquire(db, scope="vault", holder=args.source, pid=os.getpid()):
+        row = locks.get(db, scope="vault")
+        raise SystemExit(f"vault lock held by {row['holder']} since {row['started_at']}")
+    try:
+        if not ingest_guards.registry_fresh(_vault_dir(), wo_row["registry_hash"]):
+            raise SystemExit("stale registry: disk _registry.yaml != work order hash; re-run workorder")
+        ihash = wo_row["registry_hash"]
+        state_store.start_stage(db, args.source, "ingest_waiting", input_hash=ihash)
+        state_store.complete_stage(db, args.source, "ingest_waiting")
+        state_store.start_stage(db, args.source, "ingesting", input_hash=ihash)
+    except BaseException:
+        locks.release(db, scope="vault", holder=args.source)
+        raise
+    print(f"[OK] ingesting '{args.source}' (vault lock held); per window: window-start → 写页 → window-done")
+
+
+def cmd_ingest_done(args):
+    """/ingest 收工：完成 ingesting + ingested（status=proposed），释放锁。"""
+    import state_store
+    import locks
+    db = _vault_state_db()
+    state_store.complete_stage(db, args.source, "ingesting")
+    state_store.start_stage(db, args.source, "ingested")
+    state_store.complete_stage(db, args.source, "ingested")
+    locks.release(db, scope="vault", holder=args.source)
+    print(f"[OK] '{args.source}' ingested (status=proposed); 收尾 lint/promote 见 P6")
+
+
+def cmd_window_start(args):
+    import state_store
+    state_store.start_window(_vault_state_db(), args.source, args.window, input_hash=args.hash)
+    print(f"[OK] window {args.window} running")
+
+
+def cmd_window_done(args):
+    import state_store
+    state_store.finish_window(_vault_state_db(), args.source, args.window,
+                              write_set_json=args.writes, proposal_set_json=args.proposals)
+    print(f"[OK] window {args.window} finished")
+
+
+def cmd_window_fail(args):
+    import state_store
+    state_store.fail_window(_vault_state_db(), args.source, args.window, error=args.error)
+    print(f"[OK] window {args.window} failed: {args.error}")
+
+
+def cmd_resolve_concept(args):
+    """概念归一唯一入口（spec §6）：实时扫描概念页构建 registry，命中合并、未命中新建。不写派生文件。"""
+    import concept_store
+    vault = _vault_dir()
+    metas = concept_store.scan_concept_pages(vault) if vault.exists() else []
+    registry, errors, _w = concept_store.build_registry(metas)
+    if errors:
+        raise SystemExit("corrupt concept pages: " + "; ".join(errors))
+    source_ref = None
+    if args.ref_source:
+        source_ref = {"source": args.ref_source,
+                      "sections": (args.ref_sections or "").split(",") if args.ref_sections else []}
+    cid, path, action = concept_store.resolve_or_create_concept(
+        vault, mention=args.mention, domain=args.domain, registry=registry,
+        aliases=args.alias or [], source_ref=source_ref)
+    print(f"[{action}] {cid} -> {path}")
+
+
+def cmd_check_write(args):
+    """写前守卫：写入边界 + 覆盖保护三条件，DENY 时 exit 1（spec §9）。"""
+    import state_store
+    import ingest_guards
+    import yaml as _yaml
+    db = _vault_state_db()
+    wo_row = state_store.get_work_order(db, args.source)
+    if wo_row is None:
+        raise SystemExit("run workorder first")
+    wo = _yaml.safe_load(Path(wo_row["path"]).read_text(encoding="utf-8"))
+    rel = args.path.replace("\\", "/")
+    if not ingest_guards.in_write_scope(rel, wo["write_scope"]):
+        print(f"DENY {rel}: outside write_scope")
+        raise SystemExit(1)
+    snap = list(wo.get("concept_pages_snapshot") or []) + list(wo.get("other_pages_snapshot") or [])
+    ok, reason = ingest_guards.can_overwrite(_vault_dir(), rel, snap)
+    if not ok:
+        print(f"DENY {rel}: {reason}; 改走 Review-Queue proposal")
+        raise SystemExit(1)
+    print(f"ALLOW {rel}: {reason}")
+
+
+def cmd_snapshot_page(args):
+    """就地 merge 前的 pre-ingest 快照（spec §3.3，非 git）。"""
+    import state_store
+    import snapshots
+    db = _vault_state_db()
+    rid = state_store.latest_run_id(db, args.source, "ingesting")
+    run_id = f"r{rid}" if rid else "manual"
+    manifest = snapshots.take_snapshot(
+        _workspace_root() / "pipeline-workspace/snapshots", source_id=args.source,
+        run_id=run_id, files=[_vault_dir() / args.path], base_dir=_vault_dir())
+    print(f"[OK] snapshot {args.path} -> {manifest}")
+
+
 def cmd_fail(args):
     """维护命令：把崩溃残留的 running 阶段标记为 failed（之后可重跑该阶段）。"""
     import state_store
@@ -480,6 +590,35 @@ def main():
     swp = subparsers.add_parser("show-window", help="打印指定 window 的源文本")
     swp.add_argument("--source", required=True)
     swp.add_argument("--window", required=True)
+    for name, help_text in [("ingest-start", "/ingest 开工：锁 + stale registry 校验 + ingesting"),
+                            ("ingest-done", "/ingest 收工：ingested(proposed) + 释放锁")]:
+        p = subparsers.add_parser(name, help=help_text)
+        p.add_argument("--source", required=True)
+    wsp2 = subparsers.add_parser("window-start", help="记录一个 window 开始")
+    wsp2.add_argument("--source", required=True)
+    wsp2.add_argument("--window", required=True)
+    wsp2.add_argument("--hash", required=True)
+    wdp = subparsers.add_parser("window-done", help="记录一个 window 完成")
+    wdp.add_argument("--source", required=True)
+    wdp.add_argument("--window", required=True)
+    wdp.add_argument("--writes", default=None)
+    wdp.add_argument("--proposals", default=None)
+    wfp = subparsers.add_parser("window-fail", help="记录一个 window 失败")
+    wfp.add_argument("--source", required=True)
+    wfp.add_argument("--window", required=True)
+    wfp.add_argument("--error", required=True)
+    rcp = subparsers.add_parser("resolve-concept", help="概念归一唯一入口（命中合并/未命中新建）")
+    rcp.add_argument("--mention", required=True)
+    rcp.add_argument("--domain", required=True)
+    rcp.add_argument("--alias", action="append", default=[])
+    rcp.add_argument("--ref-source", default=None)
+    rcp.add_argument("--ref-sections", default=None)
+    cwp = subparsers.add_parser("check-write", help="写前守卫：边界 + 覆盖保护（DENY 则 exit 1）")
+    cwp.add_argument("--source", required=True)
+    cwp.add_argument("--path", required=True)
+    spp = subparsers.add_parser("snapshot-page", help="就地 merge 前快照该页")
+    spp.add_argument("--source", required=True)
+    spp.add_argument("--path", required=True)
     fp = subparsers.add_parser("fail", help="维护：把崩溃残留的 running 阶段标记为 failed")
     fp.add_argument("--source", required=True, help="source_id")
     fp.add_argument("--stage", required=True, help="卡死的 stage 名")
@@ -508,6 +647,14 @@ def main():
         'rebuild-registry': cmd_rebuild_registry,
         'workorder': cmd_workorder,
         'show-window': cmd_show_window,
+        'ingest-start': cmd_ingest_start,
+        'ingest-done': cmd_ingest_done,
+        'window-start': cmd_window_start,
+        'window-done': cmd_window_done,
+        'window-fail': cmd_window_fail,
+        'resolve-concept': cmd_resolve_concept,
+        'check-write': cmd_check_write,
+        'snapshot-page': cmd_snapshot_page,
     }
 
     commands[args.command](args)
