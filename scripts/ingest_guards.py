@@ -21,8 +21,21 @@ def _glob_to_re(pattern: str) -> re.Pattern:
     return re.compile("^" + "".join(out) + "$")
 
 
-def in_write_scope(rel_path: str, write_scope: list[str]) -> bool:
+def _normalize_rel(rel_path: str) -> str | None:
+    """归一化 vault 相对路径；绝对路径/盘符/含 .. 段一律返回 None（拒绝，防穿越逃出 vault）。"""
     p = rel_path.replace("\\", "/")
+    if p.startswith("/") or re.match(r"^[A-Za-z]:", p):
+        return None
+    parts = [s for s in p.split("/") if s not in ("", ".")]
+    if not parts or ".." in parts:
+        return None
+    return "/".join(parts)
+
+
+def in_write_scope(rel_path: str, write_scope: list[str]) -> bool:
+    p = _normalize_rel(rel_path)
+    if p is None:
+        return False
     return any(_glob_to_re(g).match(p) for g in write_scope)
 
 
@@ -33,10 +46,13 @@ def _sha256_file(p: Path) -> str:
 def can_overwrite(vault, rel_path: str, snapshot_entries: list[dict]) -> tuple[bool, str]:
     """覆盖保护（spec §9 三条件，全过才许覆盖）：①在 snapshot 中 ②managed_by != human ③磁盘 hash == snapshot hash。
     目标页不存在 = 新建，放行（写入边界另由 in_write_scope 把守）。"""
-    target = Path(vault) / rel_path
+    safe = _normalize_rel(rel_path)
+    if safe is None:
+        return False, "unsafe path (absolute or traversal)"
+    target = Path(vault) / safe
     if not target.exists():
         return True, "new page"
-    entry = next((e for e in snapshot_entries if e.get("path") == rel_path), None)
+    entry = next((e for e in snapshot_entries if e.get("path") == safe), None)
     if entry is None:
         return False, "not in work-order snapshot"
     if entry.get("managed_by") == "human":

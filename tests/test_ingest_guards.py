@@ -48,6 +48,25 @@ def test_can_overwrite_new_page_allowed(tmp_path):
     assert ok and reason == "new page"
 
 
+def test_in_write_scope_rejects_traversal_and_absolute():
+    # P0 回归（docs/reviews/2026-06-11-p9-code-review.md）：路径穿越/绝对路径不得命中写入边界
+    assert not ingest_guards.in_write_scope("domains/misc/../../outside.md", ["domains/misc/**"])
+    assert not ingest_guards.in_write_scope("domains\\misc\\..\\..\\outside.md", ["domains/misc/**"])
+    assert not ingest_guards.in_write_scope("../escape.md", ["**"])
+    assert not ingest_guards.in_write_scope("/etc/passwd", ["**"])
+    assert not ingest_guards.in_write_scope("C:/temp/x.md", ["**"])
+    # 含 ./ 的等价路径归一化后仍正常匹配
+    assert ingest_guards.in_write_scope("domains/misc/./lessons/a.md", ["domains/misc/**"])
+
+
+def test_can_overwrite_rejects_unsafe_path(tmp_path):
+    # P0 回归：can_overwrite 对逃出 vault 的路径必须拒绝（即使目标"不存在"）
+    ok, reason = ingest_guards.can_overwrite(tmp_path, "domains/misc/../../outside.md", [])
+    assert not ok
+    ok, reason = ingest_guards.can_overwrite(tmp_path, "C:/temp/outside.md", [])
+    assert not ok
+
+
 def test_registry_fresh(tmp_path):
     reg = tmp_path / "concepts" / "_registry.yaml"
     reg.parent.mkdir(parents=True)

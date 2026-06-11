@@ -16,6 +16,8 @@ import argparse
 import sys
 from pathlib import Path
 
+LOCK_TTL_SECONDS = 1800  # vault 锁 stale 判定：heartbeat 超过此秒数视为崩溃残留（spec §3.3）
+
 
 def _workspace_root() -> Path:
     """状态库/staging 锚点：默认 repo 根；STUDY_KB_ROOT 覆盖（测试隔离/多库场景）。"""
@@ -131,9 +133,10 @@ def cmd_windows(args):
         ws = windowing.build_windows(md)
         (out / "windows.jsonl").write_text(
             "\n".join(json.dumps(w, ensure_ascii=False) for w in ws), encoding="utf-8")
+        ohash = hashlib.sha256((out / "windows.jsonl").read_bytes()).hexdigest()
         state_store.record_artifact(db, args.source, kind="windows",
-                                    path=str(out / "windows.jsonl"), sha256=ihash)
-        state_store.complete_stage(db, args.source, "windowed", output_hash=ihash)
+                                    path=str(out / "windows.jsonl"), sha256=ohash)
+        state_store.complete_stage(db, args.source, "windowed", output_hash=ohash)
         print(f"[OK] windowed → {len(ws)} windows")
     except Exception as e:
         state_store.fail_stage(db, args.source, "windowed", error=str(e))
@@ -277,14 +280,20 @@ def cmd_ingest_done(args):
 
 def cmd_window_start(args):
     import state_store
-    state_store.start_window(_vault_state_db(), args.source, args.window, input_hash=args.hash)
+    import locks
+    db = _vault_state_db()
+    state_store.start_window(db, args.source, args.window, input_hash=args.hash)
+    locks.heartbeat(db, scope="vault", holder=args.source)
     print(f"[OK] window {args.window} running")
 
 
 def cmd_window_done(args):
     import state_store
-    state_store.finish_window(_vault_state_db(), args.source, args.window,
+    import locks
+    db = _vault_state_db()
+    state_store.finish_window(db, args.source, args.window,
                               write_set_json=args.writes, proposal_set_json=args.proposals)
+    locks.heartbeat(db, scope="vault", holder=args.source)
     print(f"[OK] window {args.window} finished")
 
 
@@ -354,19 +363,46 @@ def cmd_lint(args):
     import concept_store
     import snapshots
     import hashlib
+    import json
     import shutil
     from datetime import date
     db = _vault_state_db()
     vault = _vault_dir()
-    proposed = wiki_gate.collect_proposed(vault) if vault.exists() else []
-    ihash = hashlib.sha256("\n".join(
+    proposed_all = wiki_gate.collect_proposed(vault) if vault.exists() else []
+    # 范围隔离：只 lint/promote 归属本 source 的 proposed 页（frontmatter 归属 ∪ window write_set）。
+    # 归属其他已注册 source 的页放行跳过（等各自收尾）；不归属任何 source 的孤儿页阻断
+    # （fail-closed：多半是 /ingest 漏了 window-done --writes 记账）。
+    source_ids = [r["source_id"] for r in state_store.status_rows(db)]
+    if args.source not in source_ids:
+        source_ids.append(args.source)
+    written_by: dict[str, set[str]] = {}
+    for sid in source_ids:
+        ws: set[str] = set()
+        for w in state_store.window_states(db, sid):
+            if w["write_set_json"]:
+                ws.update(str(x).replace("\\", "/") for x in json.loads(w["write_set_json"]))
+        written_by[sid] = ws
+    proposed, orphans = [], []
+    for p in proposed_all:
+        if wiki_gate.belongs_to_source(p["rel_path"], p["meta"], args.source, written_by[args.source]):
+            proposed.append(p)
+        elif any(wiki_gate.belongs_to_source(p["rel_path"], p["meta"], s, written_by[s])
+                 for s in source_ids if s != args.source):
+            print(f"[skip] proposed 页归属其他 source，留待其所属 source 收尾: {p['rel_path']}")
+        else:
+            orphans.append(p)
+    ihash = hashlib.sha256(("\n".join(
         f"{p['rel_path']}:{hashlib.sha256(p['body'].encode('utf-8')).hexdigest()}"
-        for p in proposed).encode("utf-8")).hexdigest()
+        for p in proposed) + "\n!orphans:" + ",".join(p["rel_path"] for p in orphans)
+    ).encode("utf-8")).hexdigest()
     if not state_store.should_run_stage(db, args.source, "lint", input_hash=ihash):
         print("[skip] lint up-to-date")
         return
     state_store.start_stage(db, args.source, "lint", input_hash=ihash)
-    violations = wiki_gate.lint_pages(vault, proposed)
+    violations = [{"path": p["rel_path"], "rule": "unattributed-proposed",
+                   "detail": "proposed 页不归属任何 source（缺 window-done --writes 记账"
+                             "或 frontmatter 归属），fail-closed 阻断发布"}
+                  for p in orphans] + wiki_gate.lint_pages(vault, proposed)
     if violations:
         for v in violations:
             print(f"[lint] {v['rule']} {v['path']}: {v['detail']}")
@@ -469,8 +505,9 @@ def cmd_fail(args):
 
 
 def cmd_status(args):
-    """列出每个 source 的阶段/状态（vault 级单库）。"""
+    """列出每个 source 的阶段/状态 + vault 锁持有者（spec §3.3）。"""
     import state_store
+    import locks
 
     db = _vault_state_db()
     if not db.exists():
@@ -478,11 +515,18 @@ def cmd_status(args):
         return
     for r in state_store.status_rows(db):
         print(f"{r['source_id']:<28} {r['domain']:<14} {r['current_stage']:<16} {r['current_status']}")
+    row = locks.get(db, scope="vault")
+    if row:
+        stale = locks.is_stale(db, scope="vault", ttl_seconds=LOCK_TTL_SECONDS)
+        mark = "  [STALE → pipeline.py unlock]" if stale else ""
+        print(f"[lock] vault held by {row['holder']} since {row['started_at']}"
+              f" (heartbeat {row['heartbeat_at']}){mark}")
 
 
 def cmd_next(args):
-    """列出每个 source 的下一步人工动作（vault 级单库）。"""
+    """列出每个 source 的下一步人工动作 + stale 锁清理建议（spec §3.3）。"""
     import state_store
+    import locks
 
     db = _vault_state_db()
     if not db.exists():
@@ -490,6 +534,31 @@ def cmd_next(args):
         return
     for r in state_store.next_actions(db):
         print(f"{r['source_id']:<28} {r['current_stage']:<16} -> {r['next_action']}")
+    row = locks.get(db, scope="vault")
+    if row and locks.is_stale(db, scope="vault", ttl_seconds=LOCK_TTL_SECONDS):
+        print(f"vault-lock ({row['holder']}){'':<13} -> stale (heartbeat {row['heartbeat_at']});"
+              f" 运行: pipeline.py unlock")
+
+
+def cmd_unlock(args):
+    """受控回收 stale vault 锁（spec §3.3）：heartbeat 未超时的活锁绝不破。"""
+    import locks
+
+    db = _vault_state_db()
+    if not db.exists():
+        print("no state db yet")
+        return
+    row = locks.get(db, scope="vault")
+    if row is None:
+        print("no vault lock held")
+        return
+    if locks.break_stale(db, scope="vault", ttl_seconds=args.ttl):
+        print(f"[OK] stale vault lock released (was held by {row['holder']},"
+              f" heartbeat {row['heartbeat_at']})")
+        return
+    raise SystemExit(f"vault lock held by {row['holder']} is not stale"
+                     f" (heartbeat {row['heartbeat_at']}, ttl {args.ttl}s)；"
+                     f"可能有活跃 /ingest，等待或先 window-fail 收尾")
 
 
 def main():
@@ -499,6 +568,8 @@ def main():
     # status / next（vault 级单库状态视图，不接 --book）
     subparsers.add_parser("status", help="列出每个 source 的阶段/状态（vault 级单库）")
     subparsers.add_parser("next", help="列出每个 source 的下一步人工动作")
+    ulp = subparsers.add_parser("unlock", help="回收 stale vault 锁（heartbeat 超时才允许；活锁拒绝）")
+    ulp.add_argument("--ttl", type=int, default=LOCK_TTL_SECONDS, help="stale 判定秒数")
 
     # P1 新架构预处理阶段（vault 级单库，不接 --book）
     asp = subparsers.add_parser("add-source", help="注册一个来源到状态库")
@@ -570,6 +641,7 @@ def main():
     commands = {
         'status': cmd_status,
         'next': cmd_next,
+        'unlock': cmd_unlock,
         'add-source': cmd_add_source,
         'profile': cmd_profile,
         'source-convert': cmd_source_convert,

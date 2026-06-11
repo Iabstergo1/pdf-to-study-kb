@@ -1,7 +1,9 @@
 ---
 type: overview
 title: 知识库总览
-status: proposed
+# 种子脚手架由确定性 init-vault 落地，不是 LLM 提案，直接 published；
+# /ingest 更新本页时改回 proposed 并记入 window write_set，照常走门禁。
+status: published
 managed_by: pipeline
 ---
 # 知识库总览（living synthesis）

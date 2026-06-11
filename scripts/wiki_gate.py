@@ -33,6 +33,17 @@ def collect_proposed(vault) -> list[dict]:
     return out
 
 
+def belongs_to_source(rel_path: str, meta: dict, source_id: str, written: set[str]) -> bool:
+    """页面归属判定（lint/promote 范围隔离）：本 source 的 window write_set 优先（覆盖
+    topic/synthesis/overview 等无归属字段的页），其次 frontmatter 归属。"""
+    if rel_path in written or rel_path == f"sources/{source_id}.md":
+        return True
+    if meta.get("source") == source_id or meta.get("source_id") == source_id:
+        return True
+    return any(isinstance(r, dict) and r.get("source") == source_id
+               for r in (meta.get("source_refs") or []))
+
+
 def _link_exists(vault: Path, target: str) -> bool:
     t = target.strip()
     return (vault / t).exists() or (vault / f"{t}.md").exists()

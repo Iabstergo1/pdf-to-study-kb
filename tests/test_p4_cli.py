@@ -17,6 +17,7 @@ def _load(name):
 
 
 state_store = _load("state_store")
+locks = _load("locks")
 
 
 def _run(args, cwd):
@@ -80,6 +81,36 @@ def test_ingest_start_done_lifecycle_with_lock(tmp_path):
     assert (src["current_stage"], src["current_status"]) == ("ingested", "proposed")
     # 锁已释放：note2 现在能开工
     assert _run(["ingest-start", "--source", "note2"], tmp_path).returncode == 0
+
+
+def test_stale_lock_visible_and_recoverable(tmp_path):
+    # P1 回归（spec §3.3 / docs/reviews/2026-06-11-p9-code-review.md）：
+    # status 显示锁持有者；window 记账刷新 heartbeat；next 对 stale 锁给清理建议；
+    # unlock 只破 stale 锁（活跃 /ingest 不可破）。
+    from datetime import datetime, timedelta, timezone
+    db = _prep_source(tmp_path)
+    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    # status 显示锁持有者
+    r = _run(["status"], tmp_path)
+    assert "lock" in r.stdout.lower() and "note" in r.stdout
+    # 活锁不可破
+    r = _run(["unlock"], tmp_path)
+    assert r.returncode != 0
+    assert locks.get(db, scope="vault") is not None
+    # window 记账刷新 heartbeat：做旧后 window-start 应让锁不再 stale
+    old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+    locks.force_set_heartbeat(db, scope="vault", iso=old)
+    assert _run(["window-start", "--source", "note", "--window", "w0000", "--hash", "h1"],
+                tmp_path).returncode == 0
+    assert not locks.is_stale(db, scope="vault", ttl_seconds=1800)
+    # 再做旧模拟崩溃残留：next 给清理建议，unlock 受控破锁
+    locks.force_set_heartbeat(db, scope="vault", iso=old)
+    r = _run(["next"], tmp_path)
+    assert "unlock" in r.stdout
+    r = _run(["unlock"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert locks.get(db, scope="vault") is None
 
 
 def test_ingest_start_aborts_on_stale_registry(tmp_path):

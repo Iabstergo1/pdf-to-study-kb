@@ -1,3 +1,5 @@
+import hashlib
+import importlib.util
 import os
 import subprocess
 import sys
@@ -5,6 +7,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PIPELINE = ROOT / "scripts" / "pipeline.py"
+
+_spec = importlib.util.spec_from_file_location("state_store", ROOT / "scripts" / "state_store.py")
+state_store = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(state_store)
 
 
 def _run(args, cwd):
@@ -38,6 +44,23 @@ def test_source_convert_and_windows_advance_state(tmp_path):
     # 状态推进到 windowed/done
     r = _run(["status"], tmp_path)
     assert "windowed" in r.stdout
+
+
+def test_windows_artifact_records_windows_jsonl_hash(tmp_path):
+    # P2 回归（docs/reviews/2026-06-11-p9-code-review.md）：windows artifact 的 sha256
+    # 必须是 windows.jsonl 本体的 hash，而不是输入 source.md 的 hash。
+    note = tmp_path / "raw" / "note.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# A\n\naaa\n\n# B\n\nbbb\n", encoding="utf-8")
+    _run(["add-source", "--source", "note", "--domain", "misc", "--path", str(note), "--fmt", "md"], tmp_path)
+    assert _run(["profile", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["source-convert", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["windows", "--source", "note"], tmp_path).returncode == 0
+    wj = tmp_path / "pipeline-workspace/staging/note/windows.jsonl"
+    expected = hashlib.sha256(wj.read_bytes()).hexdigest()
+    db = tmp_path / "pipeline-workspace/state/study-kb.sqlite"
+    rows = [r for r in state_store.list_artifacts(db, "note") if r["kind"] == "windows"]
+    assert rows and rows[0]["sha256"] == expected
 
 
 def test_fail_command_unsticks_crashed_running_stage(tmp_path):
