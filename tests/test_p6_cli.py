@@ -64,7 +64,7 @@ def test_lint_pass_promotes_and_indexes(tmp_path):
 
 
 def test_lint_scopes_to_own_source_pages(tmp_path):
-    # P1 回归（docs/reviews/2026-06-11-p9-code-review.md）：lint --source B 不得 promote 其他
+    # P1 回归（2026-06-11 P9 code review）：lint --source B 不得 promote 其他
     # source 的 proposed 页；无 frontmatter 归属的页靠本 source 的 window write_set 归属。
     db = _ingest_ready(tmp_path, sid="a")
     mdpage.write_page(tmp_path / "wiki/domains/misc/lessons/a.md",
@@ -102,7 +102,7 @@ def test_lint_scopes_to_own_source_pages(tmp_path):
 
 
 def test_lint_blocks_on_unattributed_proposed(tmp_path):
-    # P1 余项回归（docs/reviews/2026-06-11-p9-review-fix-verification.md）：孤儿 proposed 页
+    # P1 余项回归（2026-06-11 P9 review 复验）：孤儿 proposed 页
     # （不归属任何已注册 source）必须阻断 lint——不发布 source、写 Review-Queue、lint/failed。
     # 归属其他 source 的页放行跳过（见 test_lint_scopes_to_own_source_pages），孤儿页阻断。
     db = _ingest_ready(tmp_path)

@@ -84,7 +84,7 @@ def test_ingest_start_done_lifecycle_with_lock(tmp_path):
 
 
 def test_stale_lock_visible_and_recoverable(tmp_path):
-    # P1 回归（spec §3.3 / docs/reviews/2026-06-11-p9-code-review.md）：
+    # P1 回归（spec §3.3 / 2026-06-11 P9 code review）：
     # status 显示锁持有者；window 记账刷新 heartbeat；next 对 stale 锁给清理建议；
     # unlock 只破 stale 锁（活跃 /ingest 不可破）。
     from datetime import datetime, timedelta, timezone

@@ -6,10 +6,10 @@
 
 1. **设计唯一真值**：`docs/superpowers/specs/2026-06-08-claude-code-wiki-redesign-design.md`。代码与本 spec 冲突时以 spec 为准（除非更新的 spec/ADR 取代）。
 2. **决策**：`docs/adr/`（如 `0001` 舍弃 LangGraph）。
-3. **构建记录/计划**：`docs/superpowers/plans/`（P0–P8 + 清理期，已全部完成）。
-4. **领域语言/术语**：`docs/agents/domain.md`。
+3. **领域语言/术语**：`docs/agents/domain.md`。
 
 > 旧 LangGraph/section/plan-units 管线已在清理期删除（`tests/test_legacy_removed.py` 守卫）。**不要重新引入 LangGraph / 双 SQLite / plan-units / 逐 unit 孤立生成**（见 ADR-0001）。
+> 构建期文档（P0–P9 plans / 执行报告 / 审阅报告）已随收尾清理删除，需要时查 git 历史。
 
 ## 架构（一句话）
 

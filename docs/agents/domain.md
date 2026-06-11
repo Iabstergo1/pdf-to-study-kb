@@ -6,9 +6,10 @@
 
 1. **设计唯一真值**：`docs/superpowers/specs/2026-06-08-claude-code-wiki-redesign-design.md`。代码与该 spec 冲突时以 spec 为准（除非更新的 spec/ADR 取代）。
 2. **决策记录**：`docs/adr/`（如 `0001` 舍弃 LangGraph）。
-3. **构建计划/记录**：`docs/superpowers/plans/`（P0–P8 + 清理期，已全部完成）。
-4. **Agent 指令**：根 `CLAUDE.md`。
-5. **人读概览**：`README.md`。
+3. **Agent 指令**：根 `CLAUDE.md`。
+4. **人读概览**：`README.md`。
+
+> 构建期文档（P0–P9 plans / 执行报告 / 审阅报告）已随收尾清理删除，需要时查 git 历史。
 
 ## 领域术语（现行架构）
 
@@ -27,8 +28,7 @@
 
 1. spec 是权威；**不要重新引入 LangGraph、`plan-units`、双 SQLite、逐 unit 孤立生成**——这些是被刻意移除的（见 `docs/adr/0001`）。
 2. 预处理与收尾是确定性 Python CLI（零 LLM）；唯一 LLM 是人工触发的 `/ingest`。
-3. 按 `docs/superpowers/plans/` 逐期构建；P0（状态底座 + 文档同步）是硬前置。
-4. 先确定性底座、后 LLM 行为；实现同时加聚焦测试。
-5. 未过收尾门禁的内容不 promote，转 `Review-Queue/`。
-6. 覆盖已存在页前须：在 work-order snapshot 中、`managed_by != human`、磁盘 hash 一致；否则不覆盖、出 proposal。
-7. 旧管线代码已在清理期删除（`tests/test_legacy_removed.py` 守卫）；**不要重新引入**（见 `docs/adr/0001`）。
+3. 先确定性底座、后 LLM 行为；实现同时加聚焦测试。
+4. 未过收尾门禁的内容不 promote，转 `Review-Queue/`。
+5. 覆盖已存在页前须：在 work-order snapshot 中、`managed_by != human`、磁盘 hash 一致；否则不覆盖、出 proposal。
+6. 旧管线代码已在清理期删除（`tests/test_legacy_removed.py` 守卫）；**不要重新引入**（见 `docs/adr/0001`）。

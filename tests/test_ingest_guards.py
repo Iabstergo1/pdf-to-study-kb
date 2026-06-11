@@ -49,7 +49,7 @@ def test_can_overwrite_new_page_allowed(tmp_path):
 
 
 def test_in_write_scope_rejects_traversal_and_absolute():
-    # P0 回归（docs/reviews/2026-06-11-p9-code-review.md）：路径穿越/绝对路径不得命中写入边界
+    # P0 回归（2026-06-11 P9 code review，报告已清理、见 git 历史）：路径穿越/绝对路径不得命中写入边界
     assert not ingest_guards.in_write_scope("domains/misc/../../outside.md", ["domains/misc/**"])
     assert not ingest_guards.in_write_scope("domains\\misc\\..\\..\\outside.md", ["domains/misc/**"])
     assert not ingest_guards.in_write_scope("../escape.md", ["**"])

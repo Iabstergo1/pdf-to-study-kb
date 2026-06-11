@@ -47,7 +47,7 @@ def test_source_convert_and_windows_advance_state(tmp_path):
 
 
 def test_windows_artifact_records_windows_jsonl_hash(tmp_path):
-    # P2 回归（docs/reviews/2026-06-11-p9-code-review.md）：windows artifact 的 sha256
+    # P2 回归（2026-06-11 P9 code review）：windows artifact 的 sha256
     # 必须是 windows.jsonl 本体的 hash，而不是输入 source.md 的 hash。
     note = tmp_path / "raw" / "note.md"
     note.parent.mkdir(parents=True)
