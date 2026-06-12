@@ -1,6 +1,6 @@
-# PDF to Study KB — Claude Code 项目指令
+# PDF to Study KB — Codex 项目指令
 
-> 本文件是 **Claude Code 理解本项目的唯一真值**（Codex 对应 `AGENTS.md`，内容对等、调同一套 CLI）。
+> 本文件是 **Codex 理解本项目的唯一真值**（Claude Code 对应 `CLAUDE.md`，内容对等、调同一套 CLI）。
 > 详细运行时协议在 `docs/skill-runtime/*`（skill 执行时按需加载）。其余历史设计文档已删除，**勿据已删文档开工**。
 
 ## 1. 本质
@@ -10,8 +10,8 @@
 ## 2. 架构（两层 + 两 agent）
 
 - **确定性执行层** `scripts/pipeline.py`（零 LLM）：预处理 + 后置 lint 门禁 + 索引重建 + 单一业务 SQLite 状态机/锁。**全部业务逻辑在此**，由 `tests/` 覆盖。
-- **对话编排层** `.claude/skills/<name>/SKILL.md`（Claude）/ Codex 侧 skill：自然语言指令 + 流程编排，**不承载业务 Python**，通过 shell 调同一 CLI。
-- 两 agent 共享同一 `pipeline.py` 与同一 `wiki/` vault；Claude 读本文件，Codex 读 `AGENTS.md`。
+- **对话编排层** `.agents/skills/<name>/SKILL.md`（Codex）/ Claude Code 侧 skill：自然语言指令 + 流程编排，**不承载业务 Python**，通过 shell 调同一 CLI。
+- 两 agent 共享同一 `pipeline.py` 与同一 `wiki/` vault；Codex 读本文件，Claude Code 读 `CLAUDE.md`。
 
 ```text
 ingest skill 编排预处理（零 LLM）：add-source → profile → source-convert → windows → workorder
@@ -30,11 +30,11 @@ ingest skill 编排预处理（零 LLM）：add-source → profile → source-co
 
 ## 4. 命令层（skills 驱动，可自动触发）
 
-LLM 能力 = `.claude/skills/{ingest,kb-query,kb-save,kb-review,wiki-lint-semantic}/SKILL.md`，**全部允许模型按 `description` 自动触发**（无 `disable-model-invocation`）。误触发靠 description 负样本压制（"总结这篇/解释/翻译"不进 wiki 流程）；数据安全由 CLI 守卫强制，与是否自动触发正交。详细协议：`docs/skill-runtime/{routing,schema,concept-resolution,save-back-policy}.md`（skill 按需加载）。
+LLM 能力 = `.agents/skills/{ingest,kb-query,kb-save,kb-review,wiki-lint-semantic}/SKILL.md`，**全部允许模型按 `description` 自动触发**（无 `disable-model-invocation`）。误触发靠 description 负样本压制（"总结这篇/解释/翻译"不进 wiki 流程）；数据安全由 CLI 守卫强制，与是否自动触发正交。详细协议：`docs/skill-runtime/{routing,schema,concept-resolution,save-back-policy}.md`（skill 按需加载）。
 
-## 5. 双 agent 协作约定（Claude + Codex）
+## 5. 双 agent 协作约定（Codex + Claude Code）
 
-- **同一时刻同一 vault 只允许一个 ingest**（`source_locks` 强制）。Claude 与 Codex **不得同时对同一库 ingest**；崩溃残留锁用 `python scripts/pipeline.py unlock` 回收。
+- **同一时刻同一 vault 只允许一个 ingest**（`source_locks` 强制）。Codex 与 Claude Code **不得同时对同一库 ingest**；崩溃残留锁用 `python scripts/pipeline.py unlock` 回收。
 - **共享 CLI 是唯一契约**：两 agent 都只调 `scripts/pipeline.py`，**业务逻辑只改这里**，不在各自 skill 里重复实现；改了 CLI 行为要保证两边 skill 仍一致。
 - **解释器统一用 `study-kb` conda 环境**（`D:\miniconda3\envs\study-kb\python.exe`）：含 marker + CUDA torch；**勿用 `pythonProject`**。
 - **生成物非 git**：`wiki/`、`pipeline-workspace/` 已 gitignore，不提交——它们是每机运行时状态。
@@ -48,7 +48,7 @@ LLM 能力 = `.claude/skills/{ingest,kb-query,kb-save,kb-review,wiki-lint-semant
 
 ## 7. Windows / PowerShell 工具约定
 
-Claude Code 的 Bash 工具底层是 Git Bash (MSYS2)，处理含中文的 Windows 路径会崩溃。
+Codex 的 Bash 工具底层是 Git Bash (MSYS2)，处理含中文的 Windows 路径会崩溃。
 
 1. **优先用原生工具**：Glob、Grep、Read、Edit —— 不经过 Bash，无路径问题。
 2. **要执行命令时**：直接调 `pwsh`（PowerShell 7）+ study-kb 解释器，不要用 Git Bash 调 PowerShell。
@@ -57,7 +57,7 @@ Claude Code 的 Bash 工具底层是 Git Bash (MSYS2)，处理含中文的 Windo
 
 ## 8. 权威收敛与报告约定
 
-- **本文件 = Claude 的项目真值**；`AGENTS.md` = Codex 的（内容对等）。两者冲突时以行为更安全的一方为准并同步修正。
+- **本文件 = Codex 的项目真值**；`CLAUDE.md` = Claude Code 的（内容对等）。两者冲突时以行为更安全的一方为准并同步修正。
 - `docs/skill-runtime/*` = skill 运行时协议（保持准确、按需加载），不是"背景文档"。
 - 旧 `docs/`（spec / adr / agents）已删除——不要据已删文档开工；**不要重新引入 LangGraph / 双 SQLite / plan-units / 逐 unit 孤立生成 / surya 硬管线**（`tests/test_legacy_removed.py` 守卫）。
 - 执行/修复/审阅报告写入项目文件（如 `pipeline-workspace/reports/`），对话中只说一句指引，不复制大段输出。

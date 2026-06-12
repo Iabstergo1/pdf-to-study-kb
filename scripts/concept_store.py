@@ -135,6 +135,10 @@ CONCEPT_BODY = """# {name}
 ## 与其他概念的关系
 
 （待 /ingest 填写）
+
+## 自测
+
+（待 /ingest 填写：1–3 个自测问题，链接相关 lesson）
 """
 
 _TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"

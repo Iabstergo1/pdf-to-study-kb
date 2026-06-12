@@ -24,6 +24,12 @@ secrets.json
 books/*
 !books/.gitkeep
 
+# Generated knowledge-base vault + local pipeline runtime state
+# (state db / staging / snapshots / query-sessions / reports; spec §3.3: snapshots 默认非 git)
+# 若想把知识库纳入版本控制，删掉 wiki/ 这一行即可。
+wiki/
+pipeline-workspace/
+
 # Local binary tooling (llama.cpp build, large; not for VCS)
 tools/
 

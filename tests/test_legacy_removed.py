@@ -1,4 +1,4 @@
-"""旧管线下线守卫（spec §12 / ADR-0001）：确保被删除的旧路径不再回来。"""
+"""旧管线下线守卫（见 CLAUDE.md / AGENTS.md 核心约束）：确保被删除的旧路径不再回来。"""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +31,8 @@ def test_pipeline_has_no_legacy_commands_and_no_toplevel_yaml():
 
 
 def test_requirements_free_of_legacy_deps():
+    # langgraph 永不重新引入（CLAUDE.md / AGENTS.md 核心约束）。
+    # 注：surya-ocr 现作为 marker-pdf 的传递依赖被允许（公式保真后端）；旧的 surya 硬 OCR 管线
+    # 仍被 test_legacy_scripts_gone 守卫（ocr_surya.py / surya_smoke.py 不得存在），无需在此禁 surya。
     req = (ROOT / "requirements.txt").read_text(encoding="utf-8")
-    for dep in ["langgraph", "surya"]:
-        assert dep not in req, f"legacy dependency remains: {dep}"
+    assert "langgraph" not in req, "legacy dependency remains: langgraph"

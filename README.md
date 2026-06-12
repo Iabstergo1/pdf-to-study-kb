@@ -1,79 +1,197 @@
 # 📚 PDF → Study KB
 
-把多来源文档（PDF / DOCX / PPTX / Markdown）编译进一个**不断长大的、多领域的本地 Obsidian 学习知识库**——按概念/主题导航，而不是线性翻原文。采用 [llm-wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) 模式：LLM 增量维护一个持久、互联的 wiki。
+> 把 **PDF / DOCX / PPTX / Markdown** 多来源文档，用**对话**增量编译进一个**不断长大、跨领域、按概念导航的本地 Obsidian 学习知识库**。
 
-> **状态**：新架构是仓库唯一管线（P0–P9 已完成并入 main）。**设计唯一真值**是 [`docs/superpowers/specs/2026-06-08-claude-code-wiki-redesign-design.md`](docs/superpowers/specs/2026-06-08-claude-code-wiki-redesign-design.md)，关键决策见 [`docs/adr/`](docs/adr/)（`0001` 舍弃 LangGraph，勿重新引入旧管线）。构建期 plans/报告已清理，需要时查 git 历史。
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-passing-success">
+  <img alt="Pipeline" src="https://img.shields.io/badge/pipeline-zero--LLM-blueviolet">
+  <img alt="Interface" src="https://img.shields.io/badge/interface-Claude%20Code%20skills-orange">
+  <img alt="Output" src="https://img.shields.io/badge/output-Obsidian%20vault-7C3AED">
+</p>
 
-## 架构
+这是一个 **Claude Code skills 驱动的项目**：你在 Claude Code 里用自然语言说“把这本书加进知识库”，背后的 LLM 就会自己跑完**预处理 → 写笔记 → 概念归一 → 收尾发布**全流程。不是“按章节翻译原文”，而是 [llm-wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) 模式：相同概念**合并更新**，新内容**新增页面**，库越长越互联。
 
-确定性 Python CLI 做预处理 + 后置门禁 + 索引 + 状态跟踪（**零 LLM**）；唯一的 LLM 是**人工触发**的交互式 Claude Code `/ingest`，它读整源、写并合并 wiki、跨页归一概念。
+> [!NOTE]
+> **项目真值**：Claude Code 看 [`CLAUDE.md`](CLAUDE.md)，Codex 看 [`AGENTS.md`](AGENTS.md)（两者对等、调同一套 CLI）。skill 运行时协议在 [`docs/skill-runtime/`](docs/skill-runtime/)。
+
+---
+
+## 目录
+
+- [✨ 它解决什么](#-它解决什么)
+- [🏗️ 架构](#️-架构)
+- [🚀 上手（克隆后三步）](#-上手克隆后三步)
+- [💬 主接口：对话式 skills](#-主接口对话式-skills)
+- [🛠️ 底层：确定性 CLI（手动逃生通道）](#️-底层确定性-cli手动逃生通道)
+- [🔄 状态机与故障恢复](#-状态机与故障恢复)
+- [📂 Vault 结构](#-vault-结构输出)
+- [👓 在 Obsidian 中阅读](#-在-obsidian-中阅读)
+- [🧪 开发与测试](#-开发与测试)
+- [📚 文档导航](#-文档导航)
+
+---
+
+## ✨ 它解决什么
+
+| 痛点 | 本项目的做法 |
+|------|------|
+| 多本书各存一份笔记，概念重复、互不连通 | 单一 vault、按领域分区；同一概念**走唯一入口合并**，绝不重复建页 |
+| 笔记是线性翻译，越读越像目录 | **概念/主题为主**组织，lessons 跟随源 TOC 只作线性辅助层 |
+| 要记一堆命令、手动跑流水线 | **对话式**：一句“把这本书加进知识库”，skill 自己编排全流程 |
+| 公式/图表在 PDF 里转写易碎 | 文本走 PyMuPDF，**难页渲染整页 PNG** 交 Claude 多模态读图，写成 KaTeX |
+| 自动写库直接覆盖手改内容 | **两阶段发布** + 覆盖保护：先写 `proposed`，过门禁才 `published`，失败回滚进 Review-Queue |
+
+---
+
+## 🏗️ 架构
+
+**对话编排层**（Claude Code skills，唯一 LLM）+ **确定性执行层**（Python CLI，零 LLM）。
+skill 只是自然语言指令，通过 shell 调用 CLI；**所有业务逻辑、安全守卫都在 CLI 里**。
 
 ```text
-CLI 预处理（零 LLM）        add-source → profile → source-convert → windows → workorder
-        ↓ 人工触发
-Claude Code /ingest（唯一 LLM）  读 source.md / 难页图 → 写 status:proposed 页 + 概念归一
-        ↓ 人工触发
-CLI 收尾（零 LLM）          确定性 lint → 门禁 promote(proposed→published) / 失败回滚+Review-Queue → 重建索引
+你在 Claude Code 里说：“把这个 PDF 加进知识库，领域 game-theory”
+                         │
+                         ▼  ingest skill 接管，端到端编排 ↓↓↓
+┌──────────────────────────────────────────────────────────────────────┐
+│  ① 确定性预处理（零 LLM，幂等可重跑）                                    │
+│     add-source → profile → source-convert → windows → workorder        │
+├──────────────────────────────────────────────────────────────────────┤
+│  ② LLM 写库（同一会话）                                                  │
+│     按 processing windows 读整源 / 难页图 → 写 status:proposed 页        │
+│     → 概念归一 + 综合层（overview / topic / comparison / synthesis）     │
+├──────────────────────────────────────────────────────────────────────┤
+│  ③ 确定性收尾（零 LLM）                                                  │
+│     lint 门禁 → promote(proposed→published) 或 回滚+Review-Queue         │
+│     → 从 frontmatter 重建 index / registry / aliases                    │
+└──────────────────────────────────────────────────────────────────────┘
+                         │
+                         ▼  只在需人工决策时停下问你
+              （lint 失败 / 覆盖冲突 / 跨域提升 / human 页）
 ```
 
-设计要点：
+**四条核心约束：**
 
-- **不拆分**：不让 LLM 做语义切分；长源用确定性 processing windows（TOC/标题/token 滑窗）读取。
-- **概念去重**：所有概念创建/更新走单一 `resolve-concept` 入口，命中合并、绝不重复建页；`_registry.yaml`/`aliases.md` 为派生文件。
-- **两阶段发布**：`/ingest` 只写 `status: proposed`；收尾 `lint` 过门禁才 promote 成 `published` 并入 index，失败回滚 + 进 `Review-Queue/`。
-- **非文字内容**：PyMuPDF 文本后端 + 难页渲染 PNG 交 Claude 多模态读图（marker/docling 为可选适配器）。
+1. **不拆分** — 不让 LLM 做语义切分；长源用确定性 *processing windows*（TOC / 页码 / token 滑窗）读取，窗口只是“读取单位”，不决定 wiki 页面结构。
+2. **概念去重** — 所有概念创建/更新走单一 `resolve-concept` 入口，命中合并、绝不重复建页；`_registry.yaml` / `aliases.md` 是**派生文件**。
+3. **两阶段发布** — 先写 `status: proposed`；收尾 `lint` 过门禁才 promote 成 `published` 并入 index，失败回滚 + 进 `Review-Queue/`。
+4. **覆盖保护** — 写已存在页须满足“在快照中 + `managed_by != human` + hash 一致”三条件，否则拒写、出 proposal。
 
-## 快速开始：一个 source 的完整生命周期
+> 自动触发不削弱安全：第 3、4 条由确定性 CLI 守卫强制执行，与“skill 是否被模型自动调用”正交。
 
-```powershell
-$py = "python"   # 入口统一为 python scripts/pipeline.py <command>
+---
 
-# 0) 一次性：建 vault 脚手架（幂等，绝不覆盖已有文件）
-& $py scripts/pipeline.py init-vault
+## 🚀 上手（克隆后三步）
 
-# 1) 预处理（零 LLM，可重跑，幂等跳过）
-& $py scripts/pipeline.py add-source --source mybook --domain game-theory --path raw/mybook.pdf --fmt pdf
-& $py scripts/pipeline.py profile        --source mybook
-& $py scripts/pipeline.py source-convert --source mybook
-& $py scripts/pipeline.py windows        --source mybook
-& $py scripts/pipeline.py workorder      --source mybook
+**前置：** [Python](https://www.python.org/) 3.12+、[Claude Code](https://claude.com/claude-code)（主接口）、[Obsidian](https://obsidian.md/)（可选，用来阅读成品）。
 
-# 2) 唯一 LLM 步骤：在 Claude Code 里人工触发
-#    /ingest mybook
-#    （内部按窗循环：ingest-start → window-start → 写页 → window-done --writes → … → ingest-done）
+```bash
+# ① 安装依赖（建议用虚拟环境 / Conda 环境，避免污染全局）
+python -m pip install -r requirements.txt
 
-# 3) 收尾（零 LLM）：门禁 + 发布
-& $py scripts/pipeline.py lint --source mybook
-
-# 随时查看进度与下一步
-& $py scripts/pipeline.py status
-& $py scripts/pipeline.py next
+# ② 自检：核心依赖就位（应打印 PyMuPDF 与 PyYAML 版本）
+python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yaml.__version__)"
 ```
 
-状态库默认锚定仓库根（`pipeline-workspace/state/study-kb.sqlite`）；设 `STUDY_KB_ROOT` 环境变量可整体重定向（测试/多库场景）。
+```text
+③ 用 Claude Code 打开本项目根目录，然后直接对话（见下一节）。
+```
 
-## CLI 命令面（24 个子命令）
+> [!NOTE]
+> 必需依赖只有 **PyMuPDF + PyYAML**（见 [`requirements.txt`](requirements.txt)）。
+> `pymupdf4llm` / `marker-pdf` / `docling` / `pandoc` 是**可选**转换后端；缺失时 `source-convert` 自动降级为 PyMuPDF 文本 + 难页整页 PNG，流程照常跑通。
 
-| 分组 | 命令 | 说明 |
+---
+
+## 💬 主接口：对话式 skills
+
+在 Claude Code 里，**直接说人话即可**——模型会按意图自动调用对应 skill（也可手敲 `/<skill>`）。
+所有写库 skill 全程受确定性 CLI 守卫保护，只写 `status: proposed`。
+
+| skill | 一句话说什么就触发 | 它做什么 |
 |------|------|------|
-| 状态/维护 | `status` | 每个 source 的阶段/状态 + vault 锁持有者（stale 标记） |
-| | `next` | 每个 source 的下一步人工动作 + stale 锁清理建议 |
-| | `unlock [--ttl 1800]` | 受控回收 stale vault 锁；heartbeat 未超时的活锁拒绝 |
-| | `fail --source --stage --error` | 把崩溃残留的 running 阶段标记 failed，解卡后可重跑 |
-| 预处理 | `add-source` `profile` `source-convert` `windows` `workorder` | 见上"快速开始"；逐阶段推进状态机，输入未变则 `[skip]` |
-| vault | `init-vault` | 建 `wiki/` 脚手架 + overview/log/purpose 种子（幂等） |
-| | `rebuild-registry` | 从概念页 frontmatter 重建 `_registry.yaml` + `aliases.md` |
-| /ingest 会话支撑 | `ingest-start` / `ingest-done` | 开工（取锁 + stale registry 校验）/ 收工（释放锁） |
-| | `show-window` | 打印指定 window 的源文本 |
-| | `window-start` / `window-done --writes` / `window-fail` | window 级记账（写集归属、断点续跑、锁心跳） |
-| | `resolve-concept` | 概念归一唯一入口：命中合并 / 未命中新建 |
-| | `check-write` | 写前守卫：写入边界 + 覆盖保护三条件，DENY 则 exit 1 |
-| | `snapshot-page` | 就地 merge 前快照该页（供 lint 失败回滚） |
-| 收尾门禁 | `lint --source` | 只 lint/promote 归属本 source 的 proposed 页；过则发布+重建派生，败则回滚+Review-Queue |
-| 跨域提升 | `promotion-candidates [--propose]` / `promote-concept --id` | 检测候选（提升一律人工确认）/ 机械提升为 shared |
-| 查询会话 | `check-session --id [--saved]` | `/kb-query`、`/kb-save` 产物的目录契约检查 |
+| **`ingest`** | “把这本书 / 这个 PDF 加进知识库，领域 X” | ⭐端到端：预处理 → 写 proposed → 收尾 lint，只在需决策时停 |
+| **`kb-query`** | “知识库里关于 X 怎么说” | 只读查询 + 持久化 query-session（**不写库**） |
+| **`kb-save`** | “把刚才那个对比 / 结论存进 wiki” | 把 query-session 候选存为 proposed（有准入门槛） |
+| **`kb-review`** | “处理一下复核队列” | 逐条过 Review-Queue，给建议、人工定夺 |
+| **`wiki-lint-semantic`** | “给知识库做个语义体检” | 查对比维度 / 跨页矛盾，只出 proposal |
 
-## 状态机与故障恢复
+> [!IMPORTANT]
+> “总结这篇 / 解释这段 / 翻译一下 / 问个常识”这类只读请求**不会**触发写库——skill 的描述里写了负样本，模型会当普通问题回答。
+
+**端到端示例（仓库内置了一本测试源可直接试）：**
+
+```text
+你：把 books/game-theory-whitepaper/input/ 里那本博弈论白皮书加进知识库，领域 game-theory
+
+Claude（ingest skill）：
+  → 确认 source_id = game-theory-whitepaper、domain = game-theory
+  → 跑预处理：add-source → profile → source-convert → windows → workorder
+  → 逐窗读源、写 lessons/concepts/topics（status: proposed）、归一“信号博弈/Signaling Game”
+  → 跑收尾 lint：通过则 promote 进 index；失败则回滚 + 写 Review-Queue 并告诉你怎么修
+  → 汇报：发布了哪些页 / 哪些进了复核队列
+```
+
+你**不需要**手动敲任何命令，也**不需要**自己写笔记内容——内容由模型在对话中生成。
+
+---
+
+## 🛠️ 底层：确定性 CLI（手动逃生通道）
+
+skills 背后调用的是 `python scripts/pipeline.py <command>`（零 LLM、可独立运行）。
+平时不用手敲；**排查问题、手动重跑某一步**时才需要。共 24 个子命令，按阶段分组：
+
+<details>
+<summary><b>展开：完整 CLI 命令参考</b></summary>
+
+### 状态与维护
+
+| 命令 | 作用 | 关键参数 |
+|------|------|------|
+| `status` | 列出每个 source 的阶段/状态 + vault 锁持有者（`[STALE]` 标记崩溃残留锁） | — |
+| `next` | 列出每个 source 的**下一步人工动作** + stale 锁清理建议 | — |
+| `init-vault` | 建 `wiki/` 脚手架 + 种子文件（幂等，不覆盖） | — |
+| `unlock` | 受控回收 stale vault 锁；活锁拒绝 | `--ttl 1800` |
+| `fail` | 把崩溃残留的 `running` 阶段标记 `failed` | `--source --stage --error` |
+| `rebuild-registry` | 从概念页 frontmatter 重建 `_registry.yaml` + `aliases.md` | — |
+
+### 预处理（零 LLM，顺序固定，幂等跳过）
+
+| 命令 | 作用 | 输入 → 产出 | 关键参数 |
+|------|------|------|------|
+| `add-source` | 注册来源到状态库 | 原始文件 → `sources` 记录 | `--source --domain --path --fmt {pdf,md,docx,pptx}` |
+| `profile` | 逐页 profile + `needs_vision` 判定 | raw → `staging/<src>/pages.jsonl` | `--source` |
+| `source-convert` | 转干净 Markdown，难页渲染 PNG | raw → `staging/<src>/source.md` + `assets/` | `--source` |
+| `windows` | 生成确定性 processing windows | source.md → `windows.jsonl` | `--source` |
+| `workorder` | 生成 ingest 事务契约 | → `staging/<src>/workorder.yaml` | `--source` |
+
+### `ingest` 会话支撑（通常由 skill 内部调用）
+
+| 命令 | 作用 | 关键参数 |
+|------|------|------|
+| `ingest-start` / `ingest-done` | 开工（取锁 + stale registry 校验）/ 收工（释放锁） | `--source` |
+| `show-window` | 打印指定 window 的源文本 | `--source --window` |
+| `window-start` / `window-done` / `window-fail` | window 级记账（断点续跑 + 锁心跳） | `--source --window [--hash/--writes/--error]` |
+| `resolve-concept` | 概念归一唯一入口：命中合并 / 未命中新建 | `--mention --domain [--alias --ref-source --ref-sections]` |
+| `check-write` | 写前守卫：边界 + 覆盖保护（DENY 则 `exit 1`） | `--source --path` |
+| `snapshot-page` | 就地 merge 前快照该页 | `--source --path` |
+
+### 收尾、提升与查询
+
+| 命令 | 作用 | 关键参数 |
+|------|------|------|
+| `lint` | 收尾门禁：proposed 过则 promote、败则回滚 + Review-Queue | `--source` |
+| `promotion-candidates` | 检测跨域提升候选（人工确认） | `--propose` |
+| `promote-concept` | 机械提升一个概念为 shared | `--id concept.<domain>.<slug>` |
+| `check-session` | query-session 目录契约检查（Q1） | `--id <run_id> [--saved]` |
+
+> 状态库默认锚定仓库根：`pipeline-workspace/state/study-kb.sqlite`。设环境变量 `STUDY_KB_ROOT` 可整体重定向（测试隔离 / 多库场景）。
+
+</details>
+
+---
+
+## 🔄 状态机与故障恢复
 
 每个 source 走单向阶段流（单一业务 SQLite 记录）：
 
@@ -82,51 +200,71 @@ registered → profiled → converted → windowed → workorder_ready
           → ingest_waiting → ingesting → ingested(proposed) → lint(published)
 ```
 
-- **阶段崩溃**（卡在 running）：`pipeline.py fail --source X --stage <卡住的阶段> --error "原因"`，然后重跑该阶段。
-- **lint 失败**：自动回滚本 source 的就地 merge 快照、违规清单写 `wiki/Review-Queue/`、source 进 `lint/failed`；修复后直接重跑 `lint`，或回 `/ingest`（状态机允许 `lint failed → ingest_waiting`）。
-- **孤儿 proposed 页**（不归属任何 source，通常是 `/ingest` 漏了 `window-done --writes` 记账）：阻断 lint（fail-closed），按 Review-Queue 提示补归属后重跑。
-- **/ingest 崩溃残留锁**：`status` 会显示 `[STALE]`，`next` 给清理建议，`unlock` 回收（默认 heartbeat 超 1800s 才允许；window 记账会自动续心跳，活跃会话不会被误判）。
+| 故障 | 现象 | 恢复 |
+|------|------|------|
+| **阶段崩溃** | 卡在 `running` | `pipeline.py fail --source X --stage <阶段> --error "原因"` → 重跑该阶段 |
+| **lint 失败** | source 进 `lint/failed` | 自动回滚就地 merge、违规写 `Review-Queue/`；修复后重跑 `lint`，或重走 ingest |
+| **孤儿 proposed 页** | 不归属任何 source | 阻断 lint（fail-closed）；按 Review-Queue 提示补归属后重跑 |
+| **ingest 崩溃残留锁** | `status` 显示 `[STALE]` | `next` 给建议，`unlock` 回收（默认 heartbeat 超 1800s 才允许） |
 
-## LLM 边界（Claude Code slash 命令）
+故障发生时，`ingest` skill 会**停下来**把现象和修复建议告诉你，而不是硬闯。
 
-全部**人工触发**，无无人值守自动化：
+---
 
-- `/ingest <source_id>` —— 唯一写 wiki 的 LLM 步骤（rolling digest、写入守卫、window 级续跑）。
-- `/kb-query` —— 只读查询知识库，持久化 query-session。
-- `/kb-save` —— 把 query-session 候选提升为 proposed 写入（有准入门槛）。
-- `/kb-review` —— 处理 Review-Queue 与 review proposals。
-- `/wiki-lint-semantic` —— 语义体检（L4/矛盾），只产出 proposal 不直接改页。
-
-协议细节见 [`.claude/commands/`](.claude/commands/) 与 [`docs/skill-runtime/`](docs/skill-runtime/)。
-
-## Vault 结构（输出）
+## 📂 Vault 结构（输出）
 
 ```text
 wiki/
-  domains/<domain>/{lessons, concepts}   # 讲义（跟随源 TOC）+ 领域私有概念
-  concepts/        # 仅 shared（跨域提升后），含 _registry.yaml（派生）
-  topics/ comparisons/ synthesis/        # 综合层（一等产物）
-  sources/  assets/  Review-Queue/
-  overview.md      # living synthesis，入口
-  index.generated.md  log.md  aliases.md # 派生（只收录 published）
+├── domains/<domain>/
+│   ├── lessons/        # 讲义：跟随源 TOC 的线性辅助层
+│   └── concepts/       # 领域私有概念（默认归属）
+├── concepts/           # 仅 shared（跨域提升后），含 _registry.yaml（派生）
+├── topics/             # 跨章节/跨来源主题综合
+├── comparisons/        # 横向对比页（如 古诺 vs 伯特兰 vs 斯塔克尔伯格）
+├── synthesis/          # 深度综合/结晶化
+├── sources/            # 所有来源摘要（统一台账）
+├── assets/             # 本地图片、源页截图
+├── Review-Queue/       # 未过门禁 / 需人工决策的 proposal
+├── overview.md         # living synthesis，vault 入口（LLM 维护）
+├── index.generated.md  # 内容目录（派生，只收录 published）
+├── aliases.md          # 别名视图（派生）
+└── log.md              # append-only（ingest / lint 追加）
 ```
 
-## 在 Obsidian 中阅读
+> **概念/主题为主，lessons 跟随源 TOC 为辅。** 派生文件（`index.generated.md` / `aliases.md` / `_registry.yaml`）一律由收尾 CLI 从 frontmatter 重建，写库 skill 绝不手写。
 
-Obsidian → `Open folder as vault` → 选 `wiki/` → 从 `overview.md` 开始。所有生成笔记 frontmatter 为 Dataview 友好（`type`/`canonical_id`/`domain`/`status`/`source_refs`…）。
+---
 
-## 开发
+## 👓 在 Obsidian 中阅读
 
-- 依赖：`requirements.txt`（PyMuPDF + PyYAML + pytest；重转换后端为可选适配器）。
-- 测试：`python -m pytest tests -q`（139 个，全部确定性、零 LLM）。
-- `tests/test_legacy_removed.py` 守卫旧管线不被重新引入（LangGraph / 双 SQLite / plan-units）。
+1. Obsidian → **Open folder as vault** → 选项目里的 `wiki/` 目录
+2. 从 `overview.md` 开始
 
-## 文档导航
+所有生成笔记的 frontmatter 都是 **Dataview 友好**的（`type` / `canonical_id` / `domain` / `status` / `source_refs` …），可用 Dataview 自定义检索视图。
+
+---
+
+## 🧪 开发与测试
+
+```bash
+# 全量测试（确定性、零 LLM）
+python -m pytest tests -q
+
+# 快速冒烟：只检查能否收集
+python -m pytest tests --collect-only -q
+```
+
+- 依赖见 [`requirements.txt`](requirements.txt)。
+- [`tests/test_legacy_removed.py`](tests/test_legacy_removed.py) 守卫旧管线不被重新引入（**LangGraph / 双 SQLite / plan-units / surya** 一旦回归即测试失败）。
+- [`tests/test_command_docs.py`](tests/test_command_docs.py) 锁定 5 个 skill 的协议要素与 `ingest` 的端到端编排。
+
+---
+
+## 📚 文档导航
 
 | 文档 | 用途 |
 |------|------|
-| `docs/superpowers/specs/2026-06-08-…design.md` | 设计唯一真值 |
-| `docs/adr/` | 架构决策记录 |
-| `docs/agents/domain.md` | 领域术语 |
-| `docs/skill-runtime/` | /ingest 等命令的运行时协议 |
-| `CLAUDE.md` | Agent 指令 |
+| [`CLAUDE.md`](CLAUDE.md) | **Claude Code 项目真值**（架构 / 约束 / 协作约定） |
+| [`AGENTS.md`](AGENTS.md) | **Codex 项目真值**（与 CLAUDE.md 对等） |
+| [`docs/skill-runtime/`](docs/skill-runtime/) | skills 的运行时协议（routing / schema / 概念归一 / save-back 准入），skill 按需加载 |
+| [`.claude/skills/`](.claude/skills/) | 5 个对话式 skill 的指令文件 |
