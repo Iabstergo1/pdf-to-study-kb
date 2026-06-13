@@ -43,9 +43,27 @@ def _sha256_file(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
+def _read_managed_by(target: Path) -> str | None:
+    """轻量只读：取页 frontmatter 的 managed_by；无 frontmatter / 无该键 → None。"""
+    try:
+        text = target.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if not text.startswith("---"):
+        return None
+    end = text.find("\n---", 3)
+    if end == -1:
+        return None
+    m = re.search(r"(?m)^managed_by:\s*(\S+)\s*$", text[3:end])
+    return m.group(1) if m else None
+
+
 def can_overwrite(vault, rel_path: str, snapshot_entries: list[dict]) -> tuple[bool, str]:
-    """覆盖保护（spec §9 三条件，全过才许覆盖）：①在 snapshot 中 ②managed_by != human ③磁盘 hash == snapshot hash。
-    目标页不存在 = 新建，放行（写入边界另由 in_write_scope 把守）。"""
+    """覆盖保护（全过才许覆盖）。目标页不存在 = 新建，放行（边界另由 in_write_scope 把守）。
+    在 snapshot 中：①managed_by != human ②磁盘 hash == snapshot hash。
+    不在 snapshot 但存在于磁盘：只可能是本次 ingest 期间新建/维护的页（workorder 已快照所有既有
+    概念/overview/log/source/lessons）——managed_by: pipeline 放行（如 resolve-concept 刚建的概念页、
+    跨 ingest 维护的 topic/synthesis）；human / 未知 frontmatter 一律拒（护住人维护页）。"""
     safe = _normalize_rel(rel_path)
     if safe is None:
         return False, "unsafe path (absolute or traversal)"
@@ -54,6 +72,8 @@ def can_overwrite(vault, rel_path: str, snapshot_entries: list[dict]) -> tuple[b
         return True, "new page"
     entry = next((e for e in snapshot_entries if e.get("path") == safe), None)
     if entry is None:
+        if _read_managed_by(target) == "pipeline":
+            return True, "pipeline page created this run (not in snapshot)"
         return False, "not in work-order snapshot"
     if entry.get("managed_by") == "human":
         return False, "managed_by human"

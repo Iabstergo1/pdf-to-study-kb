@@ -48,6 +48,26 @@ def test_can_overwrite_new_page_allowed(tmp_path):
     assert ok and reason == "new page"
 
 
+def test_can_overwrite_pipeline_page_created_this_run(tmp_path):
+    # resolve-concept 在 ingest 期间新建的概念页：磁盘上存在、managed_by: pipeline、不在 workorder
+    # 快照 → 放行（workorder 已快照所有既有页，故"不在快照"只能是本次新建）。
+    page = tmp_path / "domains" / "d" / "concepts" / "new-concept.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("---\nmanaged_by: pipeline\ntype: concept\n---\n# X\n", encoding="utf-8")
+    ok, reason = ingest_guards.can_overwrite(tmp_path, "domains/d/concepts/new-concept.md", [])
+    assert ok, reason
+    # 但 human 页不在快照仍拒（护住人维护页）
+    hpage = tmp_path / "domains" / "d" / "concepts" / "human.md"
+    hpage.write_text("---\nmanaged_by: human\n---\n# H\n", encoding="utf-8")
+    ok, reason = ingest_guards.can_overwrite(tmp_path, "domains/d/concepts/human.md", [])
+    assert not ok and "snapshot" in reason
+    # 无 frontmatter（未知）也拒
+    npage = tmp_path / "domains" / "d" / "concepts" / "nofm.md"
+    npage.write_text("no frontmatter", encoding="utf-8")
+    ok, reason = ingest_guards.can_overwrite(tmp_path, "domains/d/concepts/nofm.md", [])
+    assert not ok and "snapshot" in reason
+
+
 def test_in_write_scope_rejects_traversal_and_absolute():
     # P0 回归（2026-06-11 P9 code review，报告已清理、见 git 历史）：路径穿越/绝对路径不得命中写入边界
     assert not ingest_guards.in_write_scope("domains/misc/../../outside.md", ["domains/misc/**"])
