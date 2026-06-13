@@ -1,4 +1,4 @@
-"""逐页 profile：文本长度、公式符号密度、needs_vision 判定（确定性，零 LLM；spec §5）。"""
+"""逐页 profile：文本长度、公式符号密度、needs_vision 判定（确定性，零 LLM）。"""
 from __future__ import annotations
 
 import re
@@ -6,7 +6,7 @@ import re
 _FORMULA = re.compile(r"[\\∑∫∂∇√±×÷≤≥≠≈→←↔∈∉⊂⊆∀∃αβγδεθλμπσφψωΩ]|\$[^$]+\$|\^|_\{")
 # 文本层被拍平的公式信号：pymupdf 抽取会把上标/下标/分数拍成纯文本，结构符号消失，
 # 但留下普通中文散文极少出现的特征——下标变量(q1/R1/π1)、真减号 U+2212、arg max / F.O.C.。
-# 这些信号让 marker 缺席时的文本兜底路径仍能把公式页判为 needs_vision（spec §5 难页读图）。
+# 这些信号让纯文本路径把公式页判为 needs_vision（route B：难页渲整页 PNG 供 ingest 读图写 KaTeX）。
 _FLAT_SUBVAR = re.compile(r"[A-Za-zα-ωΑ-Ω][₀-₉0-9](?![0-9A-Za-z])")
 _FLAT_MINUS = re.compile("−")  # 数学减号 −（区别于 hyphen-minus '-'）
 _FLAT_OPS = re.compile(r"arg\s*max|arg\s*min|\bF\.?\s*O\.?\s*C\.?\b|≜|↦")

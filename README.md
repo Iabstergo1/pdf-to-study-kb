@@ -99,7 +99,7 @@ python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yam
 
 > [!NOTE]
 > 必需依赖只有 **PyMuPDF + PyYAML**（见 [`requirements.txt`](requirements.txt)）。
-> `pymupdf4llm` / `marker-pdf` / `docling` / `pandoc` 是**可选**转换后端；缺失时 `source-convert` 自动降级为 PyMuPDF 文本 + 难页整页 PNG，流程照常跑通。
+> 公式保真走 route B：`source-convert` 用 PyMuPDF 抽文本，公式风险页渲染整页 PNG，由 ingest **读图写 KaTeX** 保真。不依赖任何重型 OCR/ML 后端。
 
 ---
 

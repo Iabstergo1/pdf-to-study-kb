@@ -36,12 +36,12 @@ LLM 能力 = `.claude/skills/{ingest,kb-query,kb-save,kb-review,wiki-lint-semant
 
 - **同一时刻同一 vault 只允许一个 ingest**（`source_locks` 强制）。Claude 与 Codex **不得同时对同一库 ingest**；崩溃残留锁用 `python scripts/pipeline.py unlock` 回收。
 - **共享 CLI 是唯一契约**：两 agent 都只调 `scripts/pipeline.py`，**业务逻辑只改这里**，不在各自 skill 里重复实现；改了 CLI 行为要保证两边 skill 仍一致。
-- **解释器统一用 `study-kb` conda 环境**（`D:\miniconda3\envs\study-kb\python.exe`）：含 marker + CUDA torch；**勿用 `pythonProject`**。
+- **解释器统一用 `study-kb` conda 环境**（`D:\miniconda3\envs\study-kb\python.exe`）：装 `requirements.txt`（PyMuPDF / PyYAML / pytest，route B 无重型 OCR 后端）；**勿用 `pythonProject`**。
 - **生成物非 git**：`wiki/`、`pipeline-workspace/` 已 gitignore，不提交——它们是每机运行时状态。
 
 ## 6. 真实能力边界（开工前知悉）
 
-- **公式保真**：study-kb 已装 marker（surya，GPU）→ 公式可保真为 LaTeX；marker 不可用时降级 pymupdf 纯文本（上/下标/分数会拍平失真）+ 自动渲染公式页 PNG 供 LLM 读图兜底，source-convert 会发降级告警。
+- **公式保真（route B：读图兜底）**：PDF 经 PyMuPDF 抽纯文本，上/下标/分数会拍平失真；`source-convert` 把每个公式风险页（`needs_vision`）渲染为整页 PNG，由 ingest 时 LLM **读图写 KaTeX** 保真（lint 硬规则强制 lesson 内嵌源图）。**不依赖任何重型 OCR/ML 后端**（marker/surya 已评估并移除：4GB 显存下约 4.5 分钟/页太慢）。
 - **格式覆盖**：`pdf`/`md` 已端到端打通；`docx`/`pptx` 适配器为后续期。
 - **每本书是一次 LLM 付费动作**，非导入即用；交付即空库，内容靠跑 ingest 长出。
 - **lint 硬规则**：wikilink 必须全 vault 相对路径（非 Obsidian basename）、必需小节标题逐字、非 source 页（topic/comparison/synthesis/overview）必须进某 window 的 `--writes` 记账——见 ingest skill 阶段 D 速查；不照做会被门禁拦。

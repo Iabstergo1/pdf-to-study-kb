@@ -18,5 +18,5 @@
 
 - `workorder.yaml` 已生成，`write_scope` 覆盖 `domains/<domain>/**` 等。
 - **needs_vision 合理**：`source-convert` 输出的难页数不应为 0（公式书应有若干公式页被标记）；为 0 且源含公式则可疑，复核。
-- **降级告警**：若 `source-convert` 打出 pymupdf 纯文本降级告警（缺 marker），知悉公式可能失真——难页已渲 PNG 供读图兜底；必要时提示用户在 study-kb 装 marker 重跑。
+- **公式风险页（route B）**：`source-convert` 对公式风险页打 `[info]`——纯文本已把上/下标拍平，每页渲整页 PNG 供 ingest 读图写 KaTeX 保真。确认难页 PNG 已生成即可（不依赖任何 OCR/ML 后端）。
 - **windows 覆盖**：`windows.jsonl` 的 char 范围应覆盖 `source.md` 全文（无大段漏读）。

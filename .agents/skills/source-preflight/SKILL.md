@@ -59,7 +59,7 @@ python scripts/pipeline.py status
 | P1 确认来源 | path/domain/src/fmt | 确认后的四要素 | src/domain 明确 | — | 用户未确认 |
 | P2 跑确定性链 | 四要素 | source/profile/windows/workorder | 每步成功或幂等 skip | staging + SQLite | 任一步报错 |
 | P3 验收产物 | staging 产物 | 可进入 ingest 的判断 | workorder.yaml 存在，windows 覆盖 source.md | 报告草稿 | workorder 缺失 |
-| P4 降级检查 | source-convert 输出 | needs_vision/降级告警记录 | 公式源若 marker 缺失则提示风险 | 报告 | 公式页未渲图 |
+| P4 公式页检查 | source-convert 输出 | needs_vision/PNG 记录 | 公式风险页须有整页 PNG（route B）| 报告 | 公式页未渲图 |
 | P5 交接 | workorder + 报告 | 下一步建议 | 明确“可转 ingest”或列阻断项 | report | 用户要求写页则转 ingest |
 
 ## 8. 失败停止点

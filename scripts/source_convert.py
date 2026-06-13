@@ -1,11 +1,10 @@
-"""source-convert：把来源转成 staging/<source>/source.md + 逐页 profile + 难页 PNG（spec §5）。
+"""source-convert：把来源转成 staging/<source>/source.md + 逐页 profile + 难页 PNG。
 
-后端适配器：md 直通 / pdf 文本(PyMuPDF) 默认；marker/docling/pandoc/pymupdf4llm 作可选适配器
-（availability check，不可用就降级或标 needs_vision）。本期不强制安装重后端。
+后端：md 直通；pdf 用 PyMuPDF 抽纯文本 + 逐页 profile。
 
-公式保真：pymupdf 纯文本会把上/下标与分数拍平失真（公式密集书严重）。检测到高保真后端
-（marker/pymupdf4llm）缺席且本源有公式风险页时，convert() 会发醒目降级告警；同时难页（needs_vision）
-始终渲染整页 PNG 供 /ingest 读图兜底。装 marker 建议用独立 venv（避免污染共享环境的 torch/transformers）。
+公式保真走 route B（读图兜底）：PyMuPDF 纯文本会把上/下标与分数拍平失真（公式密集书严重），
+故每个公式风险页（needs_vision）始终渲染整页 PNG，由 ingest 时 LLM 读图写 KaTeX 保真
+（lint 硬规则强制 lesson 内嵌源图）。不依赖任何重型 OCR/ML 后端（marker/surya 已评估，4GB 显存太慢弃用）。
 """
 from __future__ import annotations
 
@@ -17,20 +16,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import source_profile
 
-# 高保真 PDF 后端（公式可保真为 LaTeX / 更好的结构化 markdown）。缺席则降级到 pymupdf 纯文本。
-_HIFI_PDF_BACKENDS = ("marker", "pymupdf4llm")
-
-
 class BackendUnavailable(RuntimeError):
     pass
-
-
-def available_hifi_backend() -> str | None:
-    """返回第一个可用的高保真 PDF 后端名；都不可用返回 None（→ pymupdf 纯文本，公式会失真）。"""
-    for name in _HIFI_PDF_BACKENDS:
-        if _ilu.find_spec(name) is not None:
-            return name
-    return None
 
 
 def _sha256_text(s: str) -> str:
@@ -80,13 +67,13 @@ def _convert_pdf_text(src: Path, assets_dir: Path):
         parts.append(f"\n\n<!-- page {i + 1} -->\n\n{text.strip()}\n")
         if prof["needs_vision"]:
             assets_dir.mkdir(parents=True, exist_ok=True)
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
             pix.save(str(assets_dir / f"p{i + 1:04d}.png"))
     doc.close()
     n_formula = sum(1 for p in pages if p.get("needs_vision"))
-    if n_formula and available_hifi_backend() is None:
-        print(f"[warn] source-convert 使用 pymupdf 纯文本后端：本源约 {n_formula} 个公式风险页的"
-              f"上/下标与分数会被拍平失真（例如 (a−c)q1²−bq1q2 会断行错位）。难页已渲染整页 PNG "
-              f"供 /ingest 读图兜底；如需公式保真为 LaTeX，请在独立 venv 安装 marker-pdf 后重跑。",
+    if n_formula:
+        print(f"[info] source-convert：本源约 {n_formula} 个公式风险页在 PyMuPDF 纯文本抽取中"
+              f"上/下标与分数被拍平失真（例如 (a−c)q1²−bq1q2 会断行错位）。每页已渲染整页 PNG"
+              f"（assets/pXXXX.png），由 ingest 读图写 KaTeX 保真（route B）。",
               file=sys.stderr)
     return "".join(parts).strip() + "\n", pages
