@@ -241,7 +241,9 @@ def cmd_show_window(args):
 
 
 def cmd_ingest_start(args):
-    """/ingest 开工：取 vault 锁 + stale registry 硬校验 + 推进到 ingesting。"""
+    """/ingest 开工：取 vault 锁 + stale registry 硬校验 + 推进到 ingesting。
+    幂等可恢复：source 已处于 ingesting/running（崩溃/空闲后 resume）时，回收同源残留/stale 锁、
+    重取并刷新心跳，跳过阶段转换并报 resumed。锁被**他源**持有才拒（守住跨 agent 互斥）。"""
     import state_store
     import locks
     import ingest_guards
@@ -250,12 +252,23 @@ def cmd_ingest_start(args):
     wo_row = state_store.get_work_order(db, args.source)
     if wo_row is None:
         raise SystemExit("run workorder first")
+    src = state_store.get_source(db, args.source)
+    resuming = (src is not None and src["current_stage"] == "ingesting"
+                and src["current_status"] == "running")
+    held = locks.get(db, scope="vault")
+    if held is not None and held["holder"] != args.source:
+        raise SystemExit(f"vault lock held by {held['holder']} since {held['started_at']}")
+    if held is not None:  # 同源残留/stale 锁 → 回收后重取（resume / 崩溃恢复友好）
+        locks.release(db, scope="vault", holder=args.source)
     if not locks.acquire(db, scope="vault", holder=args.source, pid=os.getpid()):
-        row = locks.get(db, scope="vault")
-        raise SystemExit(f"vault lock held by {row['holder']} since {row['started_at']}")
+        held = locks.get(db, scope="vault")
+        raise SystemExit(f"vault lock held by {held['holder'] if held else '?'}")
     try:
         if not ingest_guards.registry_fresh(_vault_dir(), wo_row["registry_hash"]):
             raise SystemExit("stale registry: disk _registry.yaml != work order hash; re-run workorder")
+        if resuming:
+            print(f"[OK] resumed ingesting '{args.source}'（vault 锁重取）；续 window 循环")
+            return
         ihash = wo_row["registry_hash"]
         state_store.start_stage(db, args.source, "ingest_waiting", input_hash=ihash)
         state_store.complete_stage(db, args.source, "ingest_waiting")
