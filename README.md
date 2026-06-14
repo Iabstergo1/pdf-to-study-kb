@@ -25,6 +25,7 @@
 - [💬 主接口：对话式 skills](#-主接口对话式-skills)
 - [🛠️ 底层：确定性 CLI（手动逃生通道）](#️-底层确定性-cli手动逃生通道)
 - [🔄 状态机与故障恢复](#-状态机与故障恢复)
+- [⏸️ 中断续跑（上下文上限 / 订阅限额）](#-中断续跑上下文上限--订阅限额)
 - [📂 Vault 结构](#-vault-结构输出)
 - [👓 在 Obsidian 中阅读](#-在-obsidian-中阅读)
 - [🧪 开发与测试](#-开发与测试)
@@ -211,6 +212,35 @@ registered → profiled → converted → windowed → workorder_ready
 
 ---
 
+## ⏸️ 中断续跑（上下文上限 / 订阅限额）
+
+长源 ingest 是一次会话里的长任务，可能撞两种"墙"。两者都**不丢进度**——确定性层是耐用底座：`ingest_progress`（窗级记账 SQLite）+ 落盘的 `status: proposed` 页 + `digest.md` 外部记忆 + **幂等 `ingest-start`**（重入报 `resumed`），任意时刻重启都能从下一个未完成 window 接着跑。
+
+### 上下文上限（会话被压缩 / 重开）— 自动续
+
+- 谐架 auto-compact + **SessionStart hook**：`.claude/settings.json` 在 `compact|resume` 时调用 [`scripts/resume_hint.py`](scripts/resume_hint.py)，把 `pipeline.py next`（机器派生的下一步）+ 各 staging digest 顶部的 `## ⏩ RESUME` 块重新注入上下文。
+- `ingest` skill **每窗硬性维护**那个 `## ⏩ RESUME` 块（写页协议 U7），所以续跑锚点对**任意来源**自带，不是某本书的专属。
+
+### 订阅限额（官方 5h 窗口）— 需要一点工程
+
+诚实边界：**限额冻结期间 agent 根本跑不了，本地没有任何东西能在冻结期驱动它**；复位后必须有东西"重新点火"。三种方式按自动化程度递增：
+
+| 方式 | 自动化 | 怎么做 |
+|------|------|------|
+| 手动续 | 人工 | 复位后在会话里发一句"继续"，hook 注入的 RESUME 带它接着跑 |
+| **OS 调度（推荐无人值守）** | 全自动 | Windows 任务计划程序 / cron 按 **> 5h** 间隔调 [`scripts/resume-ingest.ps1`](scripts/resume-ingest.ps1)：仅在有进行中 ingest 时唤起所选 agent 的 headless 续跑（`-Agent claude` → `claude -p … --dangerously-skip-permissions`；`-Agent codex` → `codex exec --full-auto …`），冻结时空转、复位后自然成功。脚本头部含注册命令 |
+| 第三方 API key | 不适用 | 按 token 计费、**没有 5h 窗口**，额度够就一路跑完，无需上面任何东西 |
+
+> 别指望 `ScheduleWakeup` / 会话级 cron 扛 5h：前者上限 1h，后者要 REPL 常开、且冻结期自身也被限流而续不上。只有 `scripts/resume-ingest.ps1` 这种 **OS 级、独立进程**的调度才真正跨得过复位窗口。
+
+它给的**不是"一次跑完"的硬保证，而是收敛重试**：每次 `claude -p` 都是无记忆新会话，但进度落在磁盘（`ingest_progress` + proposed 页 + digest），新会话靠 `pipeline.py next` + RESUME 块重新定位到下一个未完成 window。**没有任何一次 fire 会丢进度**；`6h > 5h` 保证不会连续两次都落在同一冻结里，落在冻结期的那次空转退出、下一次成功——单调收敛到 `ingest + lint` 全完成。前提（缺一则"自动"会断，脚本头部有详述）：① 所选 agent（`claude` 或 `codex`）已登录且在 PATH；② **非交互权限**——Claude headless 的 Bash 不会自动放行，脚本默认用 `--dangerously-skip-permissions`（仅触及本仓库 + gitignored 的 `wiki/` 运行时），或改 `acceptEdits` 但须在 `permissions.allow` 放行 `Bash(python scripts/pipeline.py:*)`；Codex 默认用 `codex exec --full-auto`（沙箱 + 不弹批准）；③ fire 时机器醒着（睡眠需唤醒定时器、笔记本需允许电池下运行——注册命令已带这些设置）。**同一 vault 同刻只许一个 ingest，别同时给两个 agent 各注册指向同库的任务。** 每次 fire 的结果会追加到 `tmp/resume.log` 供你核对。
+
+### 克隆后能直接套用吗
+
+能——以上对**任意领域 / 任意文档**生效，不是示例 PDF 专属：状态机、digest、`## ⏩ RESUME` 块、两个续跑脚本都随仓库分发且文档无关。个人偏好（如自动接受编辑的 `defaultMode`）放在 gitignored 的 `.claude/settings.local.json`，不强加给克隆者；想要无人值守，自己注册一次 `scripts/resume-ingest.ps1` 即可。
+
+---
+
 ## 📂 Vault 结构（输出）
 
 ```text
@@ -241,6 +271,10 @@ wiki/
 2. 从 `overview.md` 开始
 
 所有生成笔记的 frontmatter 都是 **Dataview 友好**的（`type` / `canonical_id` / `domain` / `status` / `source_refs` …），可用 Dataview 自定义检索视图。
+
+> [!TIP]
+> **frontmatter 是承重的**（Dataview 字段 + lint 全靠它），不能删。若觉得它显示在正文开头影响阅读：Obsidian → **Settings → Editor → "Properties in document" 选 "Hidden"**——文件照旧、阅读时不显示。
+> **关系图（Graph）太密**多半是"汇总页把每个概念都 wikilink"造成的中心化 hub；写页纪律已要求只连真实强关系（见 ingest skill 阶段 D），汇总页只挑核心几个链、其余用普通文本。
 
 ---
 

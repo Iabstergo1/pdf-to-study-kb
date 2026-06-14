@@ -24,6 +24,18 @@ GOOD_LESSON = ("# 5.2 信号博弈\n\n这一节讲分离均衡的识别条件，
                "[^e1]: 证据：wp §5.2\n")
 
 
+def test_concepts_without_synthesis_warns():
+    # 产出 concept 但无综合层页 → 返回 concept 数（cmd_lint 据此打非阻断 [warn]）
+    pages = [{"meta": {"type": "concept"}}, {"meta": {"type": "concept"}},
+             {"meta": {"type": "lesson"}}]
+    assert wiki_gate.concepts_without_synthesis(pages) == 2
+    # 有任一综合层页 → 不提醒
+    for t in ("overview", "topic", "comparison", "synthesis"):
+        assert wiki_gate.concepts_without_synthesis(pages + [{"meta": {"type": t}}]) == 0
+    # 没产出 concept（纯 lesson 小源）→ 不提醒
+    assert wiki_gate.concepts_without_synthesis([{"meta": {"type": "lesson"}}]) == 0
+
+
 def test_collect_proposed_filters_correctly(tmp_path):
     _page(tmp_path, "domains/d/lessons/a.md",
           {"type": "lesson", "status": "proposed", "managed_by": "pipeline"}, GOOD_LESSON)

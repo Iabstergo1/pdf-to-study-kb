@@ -38,6 +38,9 @@ tmp/
 *.tmp
 *.log
 
+# Claude Code per-machine local overrides (personal defaultMode/permissions; not shared)
+.claude/settings.local.json
+
 # OS/editor
 .DS_Store
 Thumbs.db

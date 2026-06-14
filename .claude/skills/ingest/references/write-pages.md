@@ -17,7 +17,7 @@
 | **U4 起草** | 归一结果 + 本窗文本 | `status: proposed` 页（模板必需小节齐） | frontmatter 合规、小节不缺 | vault（proposed） | check-write DENY |
 | **U5 自检** | 起草页 | page_rules 自检结果 | **0 违规**才进 U6 | — | 自检不过→修，不记账 |
 | **U6 记账** | 写过的页 | `window-done --writes '[...]'` | 非 source 页**全部**在 --writes | `ingest_progress` | 漏记→孤儿页 |
-| **U7 digest** | 本窗要点 | 追加 `digest.md`（≤约50行） | 含新概念/未决线索 | `staging/<src>/digest.md` | — |
+| **U7 digest** | 本窗要点 | 追加 `digest.md` + 刷新顶部 `## ⏩ RESUME` 块 | 含新概念/未决线索；RESUME 指向下一窗 | `staging/<src>/digest.md` | — |
 
 子单元命令细节：
 - U1：`python scripts/pipeline.py window-start --source <src> --window <id> --hash <窗 sha 或 char 范围串>`；
@@ -26,6 +26,7 @@
 - U3：`python scripts/pipeline.py resolve-concept --mention "<提及>" --domain <domain> [--alias "<英文名>"] --ref-source <src> --ref-sections "<5.2>"`，编辑它返回的页填充正文。
 - U5：自检原语 `scripts/page_rules.py`（见下「lint 硬规则」）。
 - U6：`python scripts/pipeline.py window-done --source <src> --window <id> --writes '["<写过的页>"]'`（失败改 `window-fail --error "<原因>"`）。
+- U7：每窗收尾把 `digest.md` **顶部**的 `## ⏩ RESUME` 块刷新（断点续跑锚点；SessionStart hook `scripts/resume_hint.py` 会在 compact/resume 时自动注入它，让上下文上限或订阅限额中断后能续）。该块以 `## ⏩ RESUME` 开头、到下一个 `## ` 结束，至少含：**进度**（已完成窗 + 下一个窗 id 及其 `--hash`）、**续跑步骤**（`ingest-start` 幂等会报 resumed → 逐窗 `window-start → show-window → 写页 → window-done`）、**写页纪律一行**（概念走 resolve-concept、wikilink 全路径、解释器与 `PYTHONUTF8=1`）。全源完成后把标题改成 `## ✅ 已完成` 以免误导续跑。这是让"中断后可续"对任意来源都生效的关键，别省。
 
 ## 阶段 D：写页纪律（每一笔写入都适用）
 
@@ -34,6 +35,9 @@
 - **所有新建/修改页 frontmatter 一律 `status: proposed` + `managed_by: pipeline`**；模板见 `templates/`，必需小节不可缺。
 - **概念只走 resolve-concept**（命中合并、绝不新建重复页）；别名只写概念页 frontmatter `aliases:`。
 - **派生文件绝不手写**：`concepts/_registry.yaml`、`aliases.md`、`index.generated.md` 由收尾 CLI 重建。
+- **公式保真（route B 必走）**：凡内容来自 `needs_vision` 公式风险页，无论写进 concept 还是 lesson，都必须在公式旁内嵌该页源图 `![[assets/<src>/pXXXX.png]]`——PyMuPDF 抽的公式文本会失真，源图是唯一保真背书。（lesson 含 `$$` 缺图由 lint 硬拦；concept 同样别省，把源图放进「形式化」节。）
+- **链接克制（防关系图噪声）**：wikilink 只连"真实强关系"（谁依赖/推广/对比/特例化谁），别建"什么都链"的中心化 hub——`sources/<src>.md`、`overview.md` 等汇总页只挑核心几个概念做 wikilink、其余用普通文本带过；概念页「与其他概念的关系」只列确有逻辑关联的，不为凑数互链。
+- **深度（别退化成摘要）**：每个 concept 至少含一个 worked example 或关键推导步骤（不止下定义）；lesson 给可操作细节、worked example 而非章节复述。空泛摘要式页面视作未完成。
 - 追加 `log.md`：`## [YYYY-MM-DD] ingest | <src> | <created/updated 页列表>`（append-only）。
 
 ## 收尾 lint 硬规则速查（违反任一即阻断发布；写每页前默念）

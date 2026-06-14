@@ -33,6 +33,16 @@ def collect_proposed(vault) -> list[dict]:
     return out
 
 
+def concepts_without_synthesis(pages: list[dict]) -> int:
+    """软提醒原语（非阻断）：本批 proposed 里产出了 concept 却没有任何综合层页
+    （overview/topic/comparison/synthesis）时，返回 concept 数；否则 0。阶段 E（综合层）是
+    一等产物，跳过它多半是漏做；但纯 lesson 的小源（如几行笔记）无综合层属正常，故只提醒不阻断。"""
+    types = [p.get("meta", {}).get("type") for p in pages]
+    n_concept = sum(t == "concept" for t in types)
+    has_synth = any(t in ("overview", "topic", "comparison", "synthesis") for t in types)
+    return n_concept if (n_concept and not has_synth) else 0
+
+
 def belongs_to_source(rel_path: str, meta: dict, source_id: str, written: set[str]) -> bool:
     """页面归属判定（lint/promote 范围隔离）：本 source 的 window write_set 优先（覆盖
     topic/synthesis/overview 等无归属字段的页），其次 frontmatter 归属。"""

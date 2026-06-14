@@ -1,3 +1,17 @@
 {
-  "defaultMode": "acceptEdits"
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "compact|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python scripts/resume_hint.py",
+            "timeout": 30,
+            "statusMessage": "重载 ingest 续跑指引"
+          }
+        ]
+      }
+    ]
+  }
 }
