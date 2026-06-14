@@ -97,6 +97,18 @@ def test_lint_broken_link_and_l6(tmp_path):
     assert any(v["rule"] == "broken-link" for v in vs)
 
 
+def test_lint_ignores_markup_inside_code_blocks(tmp_path):
+    # 通用回归：编程页代码示例里的正则 [^...]、[E.. 字面量、[[ 不应被当成
+    # 脚注引用/裸 E-ID/wikilink 而误拦 lint（剔除代码块后检查）。
+    _page(tmp_path, "domains/d/lessons/code.md",
+          {"type": "lesson", "status": "proposed"},
+          "这一节讲文本清洗，足够长的干净散文正文用来绕过空课检查再多写一些字。[^e1]\n\n"
+          "```python\nimport re\nh = re.sub('[^a-zA-Z_]', '_', name)   # [E-x] 不是证据\n"
+          "link = '[[not a wikilink]]'\n```\n\n行内 `[^0-9]+` 同理。\n\n[^e1]: 证据：cookbook §6.1\n")
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert vs == [], f"代码块内标记不应触发 lint，实得 {vs}"
+
+
 def test_build_index_only_published(tmp_path):
     _page(tmp_path, "domains/d/lessons/a.md",
           {"type": "lesson", "status": "published", "title": "A 课"}, GOOD_LESSON)

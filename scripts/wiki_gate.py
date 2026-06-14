@@ -70,11 +70,13 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
     for p in pages:
         rel, meta, body = p["rel_path"], p["meta"], p["body"]
         ptype = meta.get("type", "")
+        # prose-markup 检查剔除代码块：编程页代码里的 [^...]/[E../[[ 是代码非 wiki 标记
+        prose = page_rules.strip_code_blocks(body)
         # L1：任何页正文不得有裸 E-ID
-        for bare in page_rules.find_bare_evidence_ids(body):
+        for bare in page_rules.find_bare_evidence_ids(prose):
             hit(rel, "L1", f"bare evidence id {bare}")
-        # 证据脚注：引用必须有定义
-        for fn in sorted(page_rules.missing_footnote_defs(body)):
+        # 证据脚注：引用必须有定义（引用从散文取，定义仍从全文取——定义行不在代码块）
+        for fn in sorted(page_rules.footnote_refs(prose) - page_rules.footnote_defs(body)):
             hit(rel, "evidence-footnote", f"footnote [^{fn}] has no definition")
         # 必需小节（concept=L2 / topic=L3 / overview=L5 / 其余统称 sections）
         if ptype in page_rules.REQUIRED_SECTIONS:
@@ -86,8 +88,8 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
         # L6 代理：lesson 去占位后过短 = 疑似空课/封面页产物（精确 L6 需源页映射，见 plan 取舍）
         if ptype == "lesson" and len(_PLACEHOLDER.sub("", body).strip()) < 80:
             hit(rel, "L6-empty-lesson", "lesson body too short (proxy for cover/blank/toc)")
-        # 断链
-        for target in _WIKILINK.findall(body):
+        # 断链（从散文取——代码里的 [[ 不是 wikilink）
+        for target in _WIKILINK.findall(prose):
             if target.startswith(("http://", "https://")):
                 continue
             if not _link_exists(vault, target):

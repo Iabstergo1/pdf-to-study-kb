@@ -127,6 +127,43 @@ def get_source(db_path, source_id: str):
         con.close()
 
 
+# 可重开的"已收尾"态：跑完至少一轮（lint 终态或 ingested/proposed）才有发布物可增量补充。
+# ingesting/running 应 resume 而非 reopen；预处理中的源（registered..workorder_ready）无发布物。
+REOPENABLE = {("lint", "published"), ("lint", "done"), ("lint", "failed"),
+              ("ingested", "proposed"), ("ingested", "done")}
+
+
+def reopen_source(db_path, source_id: str) -> None:
+    """把一个已收尾来源重置回 workorder_ready/done，允许"重开做增量补充"。
+    通用入口：之后照常 ingest-start → 逐窗写页 → ingest-done → lint，lint 只 promote 新增/改写的
+    proposed 页，既有 published 页不受影响（增量发布）。审计：插一条 reopened 标记 run。"""
+    con = connect(db_path)
+    try:
+        row = con.execute("SELECT current_stage,current_status FROM sources WHERE source_id=?",
+                          (source_id,)).fetchone()
+        if row is None:
+            raise InvalidTransition(f"unknown source: {source_id}")
+        key = (row["current_stage"], row["current_status"])
+        if key not in REOPENABLE:
+            raise InvalidTransition(
+                f"cannot reopen {source_id} at {key[0]}/{key[1]}; "
+                "只有已收尾的来源（lint 终态 / ingested-proposed）可重开做增量补充"
+                "（ingesting 请 resume，预处理中请直接续跑预处理链）")
+        con.execute(
+            "INSERT INTO source_stage_runs(source_id,stage,status,started_at,finished_at,input_hash)"
+            " VALUES (?,?,?,?,?,?)",
+            (source_id, "reopened", "done", _now(), _now(), f"from:{key[0]}/{key[1]}"))
+        con.execute(
+            "UPDATE sources SET current_stage='workorder_ready', current_status='done'"
+            " WHERE source_id=?", (source_id,))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
 def start_stage(db_path, source_id: str, stage: str, *, input_hash: str | None = None) -> int:
     if stage not in STAGES:
         raise InvalidTransition(f"unknown stage: {stage}")

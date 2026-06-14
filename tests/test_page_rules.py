@@ -30,6 +30,20 @@ def test_footnote_def_line_not_counted_as_ref():
     assert page_rules.missing_footnote_defs(body) == set()
 
 
+def test_strip_code_blocks_removes_fenced_and_inline():
+    body = ("散文 [^e1] 论断。\n\n```python\nre.sub('[^a-zA-Z_]', '_', h)  # [E-x] 字面量\n```\n\n"
+            "行内 `[^0-9]` 也要剔除。\n\n[^e1]: 证据\n")
+    prose = page_rules.strip_code_blocks(body)
+    # 代码块里的负字符类与 E-ID 字面量都被剔除，不再污染 prose-markup 检查
+    assert "[^a-zA-Z_]" not in prose and "[E-x]" not in prose and "[^0-9]" not in prose
+    # 真正的散文脚注引用与定义仍保留
+    assert "[^e1]" in prose
+    # 经剔除后：无裸 E-ID、无悬空脚注
+    assert page_rules.find_bare_evidence_ids(prose) == []
+    refs = page_rules.footnote_refs(prose)
+    assert refs == {"e1"} and (refs - page_rules.footnote_defs(body)) == set()
+
+
 def test_required_sections_for_concept_matches_spec8():
     secs = page_rules.required_sections_for("concept")
     assert "## 直觉" in secs and "## 形式化" in secs and "## 各章如何处理" in secs

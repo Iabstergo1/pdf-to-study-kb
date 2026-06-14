@@ -4,6 +4,7 @@
 预处理：add-source → profile → source-convert → windows → workorder
 /ingest 会话支撑：ingest-start/done、window-start/done/fail、show-window、
                 resolve-concept、check-write、snapshot-page
+增量重开：reopen（已收尾来源重建 workorder + 状态机回 workorder_ready 做增量补充）
 收尾：lint（promote 或 回滚+Review-Queue）、rebuild-registry
 vault 与维护：init-vault、status、next、fail、promotion-candidates、
               promote-concept、check-session
@@ -65,7 +66,8 @@ def cmd_profile(args):
     db = _vault_state_db()
     raw = _raw_path(db, state_store, args.source)
     src_row = state_store.get_source(db, args.source)
-    ihash = hashlib.sha256(raw.read_bytes()).hexdigest()
+    # 混入 profiler 版本：确定性启发式升级即失效缓存（对任意来源通用）。
+    ihash = hashlib.sha256(raw.read_bytes()).hexdigest() + ":" + source_profile.PROFILER_VERSION
     if not state_store.should_run_stage(db, args.source, "profiled", input_hash=ihash):
         print("[skip] profiled up-to-date")
         return
@@ -91,11 +93,13 @@ def cmd_source_convert(args):
     """source-convert：raw → staging/<source>/source.md + 难页 PNG。"""
     import state_store
     import source_convert
+    import source_profile
     import hashlib
     db = _vault_state_db()
     raw = _raw_path(db, state_store, args.source)
     src_row = state_store.get_source(db, args.source)
-    ihash = hashlib.sha256(raw.read_bytes()).hexdigest()
+    # 同 profile：混入 profiler 版本，启发式升级时连带重渲难页 PNG。
+    ihash = hashlib.sha256(raw.read_bytes()).hexdigest() + ":" + source_profile.PROFILER_VERSION
     if not state_store.should_run_stage(db, args.source, "converted", input_hash=ihash):
         print("[skip] converted up-to-date")
         return
@@ -105,11 +109,40 @@ def cmd_source_convert(args):
         res = source_convert.convert(raw, out_dir=out, fmt=src_row["format"])
         # pages.jsonl 已由 profile 阶段产出；convert 内部用同一批纯函数复算 needs_vision，结果一致
         state_store.record_artifact(db, args.source, kind="source_md", path=res["source_md"], sha256=res["sha256"])
+        n_assets = _sync_assets(args.source)  # 难页 PNG 入 vault（公式嵌图依赖；任意源通用）
         state_store.complete_stage(db, args.source, "converted", output_hash=res["sha256"])
-        print(f"[OK] converted → {res['source_md']} (needs_vision pages: {res['needs_vision_pages']})")
+        print(f"[OK] converted → {res['source_md']} (needs_vision pages: {res['needs_vision_pages']}; "
+              f"synced {n_assets} PNG → vault assets)")
     except Exception as e:
         state_store.fail_stage(db, args.source, "converted", error=str(e))
         raise
+
+
+def _sync_assets(source_id: str) -> int:
+    """把 staging/<src>/assets 下的难页 PNG 复制进 wiki/assets/<src>/（确定性、幂等）。
+    公式 lesson/concept 嵌入 `![[assets/<src>/pXXXX.png]]` 需图在 vault 内才不断链——
+    对任意有 needs_vision 页的来源通用（不止某本书）。返回本次复制/更新的文件数。"""
+    import shutil
+    import hashlib
+    staging_assets = _staging_dir(source_id) / "assets"
+    if not staging_assets.exists():
+        return 0
+    dst_dir = _vault_dir() / "assets" / source_id
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for png in sorted(staging_assets.glob("*.png")):
+        dst = dst_dir / png.name
+        if (not dst.exists()) or (hashlib.sha256(dst.read_bytes()).hexdigest()
+                                  != hashlib.sha256(png.read_bytes()).hexdigest()):
+            shutil.copy2(png, dst)
+            n += 1
+    return n
+
+
+def cmd_sync_assets(args):
+    """把本源 staging 难页 PNG 同步进 vault（供公式页嵌图）。预处理/重开会自动调用，亦可单独跑。"""
+    n = _sync_assets(args.source)
+    print(f"[OK] synced {n} source-page PNG(s) -> wiki/assets/{args.source}/")
 
 
 def cmd_windows(args):
@@ -124,7 +157,8 @@ def cmd_windows(args):
     if not source_md.exists():
         raise SystemExit("run source-convert first")
     md = source_md.read_text(encoding="utf-8")
-    ihash = hashlib.sha256(md.encode("utf-8")).hexdigest()
+    # 混入窗口算法版本：切分逻辑升级即失效缓存（对任意来源通用）。
+    ihash = hashlib.sha256(md.encode("utf-8")).hexdigest() + ":" + windowing.WINDOWING_VERSION
     if not state_store.should_run_stage(db, args.source, "windowed", input_hash=ihash):
         print("[skip] windowed up-to-date")
         return
@@ -192,11 +226,28 @@ def cmd_rebuild_registry(args):
     print(f"[OK] registry: {len(registry)} concepts ({shared} shared), sha256={sha[:12]}")
 
 
-def cmd_workorder(args):
-    """生成 source 级 ingest work order（spec §9）：windowed → workorder_ready。"""
+def _record_workorder(db, source_id, src_row, staging):
+    """据当前 vault 构建 + 落盘 + 记账 work order，返回 (path, wo, output_hash)。
+    单一真值，供 workorder（首次）与 reopen（增量重开）共用——保证 reopen 的 registry hash /
+    页快照与正常 workorder 完全一致，不漂移。"""
     import state_store
     import workorder
     import json
+    import hashlib
+    wo = workorder.build_workorder(_vault_dir(), source_id=source_id,
+                                   domain=src_row["domain"], staging_dir=staging)
+    path = workorder.write_workorder(staging, wo)
+    ohash = hashlib.sha256(path.read_bytes()).hexdigest()
+    state_store.record_work_order(db, source_id, path=str(path),
+                                  registry_hash=wo["registry"]["hash"],
+                                  write_scope_json=json.dumps(wo["write_scope"]))
+    state_store.record_artifact(db, source_id, kind="workorder", path=str(path), sha256=ohash)
+    return path, wo, ohash
+
+
+def cmd_workorder(args):
+    """生成 source 级 ingest work order（spec §9）：windowed → workorder_ready。"""
+    import state_store
     import hashlib
     db = _vault_state_db()
     src_row = state_store.get_source(db, args.source)
@@ -212,19 +263,38 @@ def cmd_workorder(args):
         return
     state_store.start_stage(db, args.source, "workorder_ready", input_hash=ihash)
     try:
-        wo = workorder.build_workorder(_vault_dir(), source_id=args.source,
-                                       domain=src_row["domain"], staging_dir=staging)
-        path = workorder.write_workorder(staging, wo)
-        ohash = hashlib.sha256(path.read_bytes()).hexdigest()
-        state_store.record_work_order(db, args.source, path=str(path),
-                                      registry_hash=wo["registry"]["hash"],
-                                      write_scope_json=json.dumps(wo["write_scope"]))
-        state_store.record_artifact(db, args.source, kind="workorder", path=str(path), sha256=ohash)
+        path, wo, ohash = _record_workorder(db, args.source, src_row, staging)
         state_store.complete_stage(db, args.source, "workorder_ready", output_hash=ohash)
         print(f"[OK] workorder → {path} (registry {wo['registry']['hash'][:12]})")
     except Exception as e:
         state_store.fail_stage(db, args.source, "workorder_ready", error=str(e))
         raise
+
+
+def cmd_reopen(args):
+    """重开一个已收尾来源做增量补充（通用增量发布入口，对任意来源/领域适用）。
+    据当前 vault 重建 work order（刷新 registry hash + 页快照，使覆盖保护/registry 校验对当前
+    published 状态成立）+ 把状态机从 lint/ingested 重置回 workorder_ready/done。之后照常
+    ingest-start → window-start/写页/window-done → ingest-done → lint：lint 只 promote 本轮
+    新增/改写的 proposed 页，既有 published 页原样保留（不回滚）。"""
+    import state_store
+    db = _vault_state_db()
+    src_row = state_store.get_source(db, args.source)
+    if src_row is None:
+        raise SystemExit(f"unknown source: {args.source}; run add-source first")
+    staging = _staging_dir(args.source)
+    if not (staging / "windows.jsonl").exists():
+        raise SystemExit(f"staging 缺 windows.jsonl（{staging}）；预处理产物已清理，"
+                         "无法 reopen——先重跑 windows/workorder 再增量")
+    try:
+        state_store.reopen_source(db, args.source)
+    except state_store.InvalidTransition as e:
+        raise SystemExit(str(e))
+    path, wo, _ohash = _record_workorder(db, args.source, src_row, staging)
+    n_assets = _sync_assets(args.source)  # 幂等：确保公式页源图已在 vault，供增量嵌图
+    print(f"[OK] reopened '{args.source}' for incremental ingest "
+          f"(workorder 重建 → {path}, registry {wo['registry']['hash'][:12]}, synced {n_assets} PNG); "
+          "next: ingest-start → window-start/写页/window-done → ingest-done → lint（增量 promote）")
 
 
 def cmd_show_window(args):
@@ -604,6 +674,10 @@ def main():
     subparsers.add_parser("rebuild-registry", help="从概念页 frontmatter 重建 _registry.yaml + aliases.md")
     wop = subparsers.add_parser("workorder", help="生成 source 级 ingest work order")
     wop.add_argument("--source", required=True)
+    rop = subparsers.add_parser("reopen", help="重开已收尾来源做增量补充（重建 workorder + 状态机回 workorder_ready）")
+    rop.add_argument("--source", required=True)
+    sap = subparsers.add_parser("sync-assets", help="把本源 staging 难页 PNG 同步进 wiki/assets/<src>/")
+    sap.add_argument("--source", required=True)
     swp = subparsers.add_parser("show-window", help="打印指定 window 的源文本")
     swp.add_argument("--source", required=True)
     swp.add_argument("--window", required=True)
@@ -668,6 +742,8 @@ def main():
         'init-vault': cmd_init_vault,
         'rebuild-registry': cmd_rebuild_registry,
         'workorder': cmd_workorder,
+        'reopen': cmd_reopen,
+        'sync-assets': cmd_sync_assets,
         'show-window': cmd_show_window,
         'ingest-start': cmd_ingest_start,
         'ingest-done': cmd_ingest_done,

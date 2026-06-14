@@ -134,6 +134,79 @@ def test_lint_blocks_on_unattributed_proposed(tmp_path):
     assert state_store.get_source(db, "note")["current_status"] == "published"
 
 
+COMPARISON_BODY = ("## 结论\n\n两种做法各有取舍，按场景选型。\n\n## 对比维度\n\n"
+                   "| 维度 | A | B |\n|---|---|---|\n| 速度 | 快 | 慢 |\n\n"
+                   "## 适用场景\n\nA 适合高频小数据，B 适合一次性大批量。\n\n"
+                   "## 相关概念\n\n见上文两条路径。\n")
+
+
+def test_reopen_enables_incremental_publish(tmp_path):
+    # 通用"重开来源做增量补充"端到端：已发布源经 reopen 后再入库新综合页，
+    # 旧 published 页不受影响、不被回滚；reopen 刷新 workorder 使 ingest-start registry 校验通过。
+    db = _ingest_ready(tmp_path)
+    mdpage.write_page(tmp_path / "wiki/domains/misc/lessons/a.md",
+                      {"type": "lesson", "status": "proposed", "managed_by": "pipeline",
+                       "title": "A 课", "source": "note"}, GOOD_LESSON)
+    assert _run(["ingest-done", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["lint", "--source", "note"], tmp_path).returncode == 0
+    assert state_store.get_source(db, "note")["current_status"] == "published"
+
+    # reopen：状态机重置 + workorder 刷新
+    r = _run(["reopen", "--source", "note"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    src = state_store.get_source(db, "note")
+    assert (src["current_stage"], src["current_status"]) == ("workorder_ready", "done")
+
+    # 增量开工：registry 校验通过证明 workorder 已据当前 vault 重建
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["window-start", "--source", "note", "--window", "w-reopen-0", "--hash", "h"],
+                tmp_path).returncode == 0
+    # 新增综合页（无 source frontmatter，靠 --writes 归属，避免判孤儿）
+    mdpage.write_page(tmp_path / "wiki/comparisons/x.md",
+                      {"type": "comparison", "status": "proposed", "managed_by": "pipeline",
+                       "title": "X 对比"}, COMPARISON_BODY)
+    assert _run(["window-done", "--source", "note", "--window", "w-reopen-0",
+                 "--writes", '["comparisons/x.md"]'], tmp_path).returncode == 0
+    assert _run(["ingest-done", "--source", "note"], tmp_path).returncode == 0
+    r2 = _run(["lint", "--source", "note"], tmp_path)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    # 新页发布；旧页仍 published（增量、不回滚）
+    assert mdpage.read_page(tmp_path / "wiki/comparisons/x.md")[0]["status"] == "published"
+    assert mdpage.read_page(tmp_path / "wiki/domains/misc/lessons/a.md")[0]["status"] == "published"
+    idx = (tmp_path / "wiki/index.generated.md").read_text(encoding="utf-8")
+    assert "comparisons/x.md" in idx and "domains/misc/lessons/a.md" in idx
+
+
+def test_sync_assets_copies_pngs_to_vault(tmp_path):
+    # 通用：把 staging/<src>/assets 难页 PNG 复制进 wiki/assets/<src>/，公式嵌图才不断链。
+    assert _run(["init-vault"], tmp_path).returncode == 0
+    staging = tmp_path / "pipeline-workspace/staging/src1/assets"
+    staging.mkdir(parents=True)
+    (staging / "p0001.png").write_bytes(b"\x89PNG\r\n fakeimg 1")
+    (staging / "p0002.png").write_bytes(b"\x89PNG\r\n fakeimg 2")
+    r = _run(["sync-assets", "--source", "src1"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "wiki/assets/src1/p0001.png").read_bytes() == b"\x89PNG\r\n fakeimg 1"
+    assert (tmp_path / "wiki/assets/src1/p0002.png").exists()
+    # 幂等：已存在同 hash 不再复制
+    r2 = _run(["sync-assets", "--source", "src1"], tmp_path)
+    assert r2.returncode == 0 and "synced 0" in r2.stdout
+
+
+def test_reopen_rejected_before_first_ingest_cli(tmp_path):
+    # 还没第一次入库完成（停在 workorder_ready）reopen 必须报错退出
+    _ingest_ready(tmp_path)  # 已推进到 ingesting
+    # 直接对一个仅预处理完的新源 reopen
+    note = tmp_path / "raw" / "n2.md"
+    note.write_text("# B\n\nbbb\n", encoding="utf-8")
+    for cmd in (["add-source", "--source", "n2", "--domain", "misc", "--path", str(note), "--fmt", "md"],
+                ["profile", "--source", "n2"], ["source-convert", "--source", "n2"],
+                ["windows", "--source", "n2"], ["workorder", "--source", "n2"]):
+        assert _run(cmd, tmp_path).returncode == 0
+    r = _run(["reopen", "--source", "n2"], tmp_path)
+    assert r.returncode != 0, "未完成首轮入库的源不可 reopen"
+
+
 def test_lint_fail_blocks_rolls_back_and_queues(tmp_path):
     db = _ingest_ready(tmp_path)
     vault = tmp_path / "wiki"

@@ -39,6 +39,16 @@ def test_deterministic_same_input_same_output():
     assert a == b
 
 
+def test_page_marker_disables_heading_split_for_code_comments():
+    # 通用回归：PDF 抽取文本（有 <!-- page N --> 页标记）里的 `#` 多为代码注释，
+    # 绝不能当 markdown 标题切，否则代码密集书会碎成数百微窗。
+    md = ("<!-- page 1 -->\n\n这一节讲解。\n# Example use on a file\ncode_line_1\n"
+          "# Find keys in common\ncode_line_2\n\n<!-- page 2 -->\n\n更多正文内容。\n")
+    ws = windowing.build_windows(md, target_tokens=1000, max_tokens=2000, overlap_tokens=0)
+    assert all(w["heading_path"] == "" for w in ws), "页标记源不得按 # 切段"
+    assert len(ws) == 1, f"短文本应整体成一窗而非按代码注释碎片化，实得 {len(ws)}"
+
+
 def test_window_ids_stable_and_unique():
     md = "# A\n\naaa\n\n# B\n\nbbb\n"
     ws = windowing.build_windows(md)

@@ -127,6 +127,78 @@ def test_lint_pass_sets_published(tmp_path):
     assert state_store.get_source(db, "s1")["current_status"] == "published"
 
 
+def test_reopen_published_source_resets_to_workorder_ready(tmp_path):
+    # 通用"重开来源做增量补充"：已发布源经 reopen 回到 workorder_ready/done，可再入库。
+    db = tmp_path / "study-kb.sqlite"
+    state_store.init_db(db)
+    state_store.register_source(db, "s1", domain="d", fmt="pdf")
+    _advance(db, "s1", ["profiled", "converted", "windowed", "workorder_ready",
+                        "ingest_waiting", "ingesting", "ingested", "lint"])
+    assert state_store.get_source(db, "s1")["current_status"] == "published"
+    state_store.reopen_source(db, "s1")
+    src = state_store.get_source(db, "s1")
+    assert (src["current_stage"], src["current_status"]) == ("workorder_ready", "done")
+    # 重开后照常推进回 ingesting（增量再入库）
+    state_store.start_stage(db, "s1", "ingest_waiting", input_hash="r1")
+    assert state_store.get_source(db, "s1")["current_stage"] == "ingest_waiting"
+    # 审计：留下一条 reopened 标记
+    con = state_store.connect(db)
+    n = con.execute("SELECT COUNT(*) FROM source_stage_runs WHERE source_id='s1' AND stage='reopened'").fetchone()[0]
+    con.close()
+    assert n == 1
+
+
+def test_reopen_from_lint_failed_allowed(tmp_path):
+    db = tmp_path / "study-kb.sqlite"
+    state_store.init_db(db)
+    state_store.register_source(db, "s1", domain="d", fmt="pdf")
+    _advance(db, "s1", ["profiled", "converted", "windowed", "workorder_ready",
+                        "ingest_waiting", "ingesting", "ingested"])
+    state_store.start_stage(db, "s1", "lint", input_hash="l1")
+    state_store.fail_stage(db, "s1", "lint", error="x")
+    state_store.reopen_source(db, "s1")
+    assert state_store.get_source(db, "s1")["current_stage"] == "workorder_ready"
+
+
+def test_reopen_from_ingested_proposed_allowed(tmp_path):
+    db = tmp_path / "study-kb.sqlite"
+    state_store.init_db(db)
+    state_store.register_source(db, "s1", domain="d", fmt="pdf")
+    _advance(db, "s1", ["profiled", "converted", "windowed", "workorder_ready",
+                        "ingest_waiting", "ingesting", "ingested"])
+    assert state_store.get_source(db, "s1")["current_status"] == "proposed"
+    state_store.reopen_source(db, "s1")
+    assert state_store.get_source(db, "s1")["current_stage"] == "workorder_ready"
+
+
+def test_reopen_rejected_before_first_ingest(tmp_path):
+    # 还没第一次入库完成（停在 workorder_ready）不允许 reopen——无可增量的发布物
+    db = tmp_path / "study-kb.sqlite"
+    state_store.init_db(db)
+    state_store.register_source(db, "s1", domain="d", fmt="pdf")
+    _advance(db, "s1", ["profiled", "converted", "windowed", "workorder_ready"])
+    with pytest.raises(state_store.InvalidTransition):
+        state_store.reopen_source(db, "s1")
+
+
+def test_reopen_rejected_during_active_ingest(tmp_path):
+    # 正在 ingesting/running 的源应 resume 而非 reopen（守住跨 agent 互斥语义）
+    db = tmp_path / "study-kb.sqlite"
+    state_store.init_db(db)
+    state_store.register_source(db, "s1", domain="d", fmt="pdf")
+    _advance(db, "s1", ["profiled", "converted", "windowed", "workorder_ready", "ingest_waiting"])
+    state_store.start_stage(db, "s1", "ingesting", input_hash="x")  # running
+    with pytest.raises(state_store.InvalidTransition):
+        state_store.reopen_source(db, "s1")
+
+
+def test_reopen_unknown_source_rejected(tmp_path):
+    db = tmp_path / "study-kb.sqlite"
+    state_store.init_db(db)
+    with pytest.raises(state_store.InvalidTransition):
+        state_store.reopen_source(db, "nope")
+
+
 def test_should_run_stage_idempotent_skip(tmp_path):
     db = tmp_path / "study-kb.sqlite"
     state_store.init_db(db)

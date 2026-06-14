@@ -5,6 +5,17 @@ import re
 
 # 裸 E-ID：旧管线的内联证据标记，正文里一律不许出现（L1）
 _BARE_EVIDENCE = re.compile(r"\[E-[A-Za-z0-9_.\-]+\]")
+# 围栏代码块 ```...``` 与行内代码 `...`
+_FENCED_CODE = re.compile(r"```.*?```", re.DOTALL)
+_INLINE_CODE = re.compile(r"`[^`\n]+`")
+
+
+def strip_code_blocks(text: str) -> str:
+    """剔除围栏代码块与行内代码，返回仅含散文/标记的文本。
+    用于 prose-markup 检查（裸 E-ID / 脚注引用 / wikilink）——编程类页面的代码示例里常含
+    正则负字符类 `[^a-z]`（会被脚注引用正则 `[^...]` 误判）、`[E.. ` 字面量、`[[ ` 等，
+    它们是代码而非 wiki 标记，须先剔除避免 fail-closed 误拦（对任意含代码的来源通用）。"""
+    return _INLINE_CODE.sub(" ", _FENCED_CODE.sub("\n", text))
 # 脚注引用 [^e1]（行内）；(?!:) 排除定义行
 _FOOTNOTE_REF = re.compile(r"\[\^([A-Za-z0-9_\-]+)\](?!:)")
 # 脚注定义行 [^e1]: …

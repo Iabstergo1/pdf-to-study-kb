@@ -1,24 +1,56 @@
-"""逐页 profile：文本长度、公式符号密度、needs_vision 判定（确定性，零 LLM）。"""
+r"""逐页 profile：文本长度、公式符号密度、needs_vision 判定（确定性，零 LLM）。
+
+公式信号分两层，对"任意来源"（公式书 / 代码书 / 散文书）都稳健：
+- **强信号**：PyMuPDF 把数学 PDF 拍平后仍保留、而代码/散文里几乎不出现的非 ASCII 数学字符
+  （∑∫∂√≤≥≠、希腊字母、上/下标 ²₁、真减号 −）。这些是判公式页的可靠依据。
+- **ASCII 弱信号**：行内 `$…$`、裸 `^`、LaTeX 风格 `\cmd`、字母+数字下标 `q1`/`R1`。它们在
+  **代码**里同样高频（正则锚点 `^`/`$`、转义 `\x`/`\n`、变量名 `s1`/`t2`），易误判。故弱信号
+  **仅在"非代码页"计入**；代码页指纹（REPL `>>>`、转义序列、Python 关键字）命中≥3 即抑制弱信号，
+  使代码密集的书（如 Python Cookbook）不再把成片代码页误渲为公式 PNG（route B）。
+"""
 from __future__ import annotations
 
 import re
 
-_FORMULA = re.compile(r"[\\∑∫∂∇√±×÷≤≥≠≈→←↔∈∉⊂⊆∀∃αβγδεθλμπσφψωΩ]|\$[^$]+\$|\^|_\{")
-# 文本层被拍平的公式信号：pymupdf 抽取会把上标/下标/分数拍成纯文本，结构符号消失，
-# 但留下普通中文散文极少出现的特征——下标变量(q1/R1/π1)、真减号 U+2212、arg max / F.O.C.。
-# 这些信号让纯文本路径把公式页判为 needs_vision（route B：难页渲整页 PNG 供 ingest 读图写 KaTeX）。
-_FLAT_SUBVAR = re.compile(r"[A-Za-zα-ωΑ-Ω][₀-₉0-9](?![0-9A-Za-z])")
-_FLAT_MINUS = re.compile("−")  # 数学减号 −（区别于 hyphen-minus '-'）
-_FLAT_OPS = re.compile(r"arg\s*max|arg\s*min|\bF\.?\s*O\.?\s*C\.?\b|≜|↦")
+# 确定性 profiler 版本：needs_vision/公式信号启发式每次实质改动就 +1。
+# 折进 profile/convert 阶段的 input_hash，使启发式升级自动失效缓存、强制对任意来源重算
+# （否则 should_run_stage 只看 PDF sha，改了启发式也会 [skip]）。v2: 强/弱信号分层 + 代码页抑制。
+PROFILER_VERSION = "2"
+
+# 强信号：非 ASCII 数学符号 + 希腊字母 + Unicode 上/下标 + 真减号（U+2212）。
+_MATH_STRONG = re.compile(
+    r"[∑∏∫∬∮∂∇√∛∜±∓×÷⋅≤≥≠≈≡≅≜∝∞∈∉∋∌⊂⊆⊃⊇⊄⊊∪∩∧∨¬∀∃∄∅≪≫⌊⌋⌈⌉⟨⟩↦⇒⇔→←↔"
+    r"αβγδεζηθικλμνξοπρςστυφχψωΓΔΘΛΞΠΣΦΨΩ"
+    r"⁰¹²³⁴⁵⁶⁷⁸⁹₀₁₂₃₄₅₆₇₈₉−]")
+# 词级强信号：arg max / arg min / F.O.C.（一阶条件），权重×2。
+_MATH_OPS = re.compile(r"arg\s*max|arg\s*min|\bF\.?\s*O\.?\s*C\.?\b")
+
+# ASCII 弱信号（各自独立计数后求和；与强信号叠加）。
+_W_DOLLAR = re.compile(r"\$[^$\n]{1,60}\$")     # 行内 $…$
+_W_CARET = re.compile(r"\^")                    # 裸上标符
+_W_LATEX = re.compile(r"\\[A-Za-z]{2,}")        # \alpha \frac \sum
+_W_SUBVAR = re.compile(r"[A-Za-zα-ωΑ-Ω][0-9](?![0-9A-Za-z])")  # 下标变量 q1 R1 π1
+
+# 代码页指纹：REPL 提示符、转义序列、十六进制字面量、Python 关键字/内建常量。
+_CODE_HINT = re.compile(
+    r">>>|\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\[ntr]|0x[0-9a-fA-F]+|"
+    r"\b(?:def|class|import|from|return|lambda|self|None|True|False|print|yield|"
+    r"except|finally|async|await|elif|assert)\b")
+
+
+def looks_like_code(text: str) -> bool:
+    """代码页判定：REPL/转义/关键字等代码指纹命中≥3，则页面以代码为主而非公式。"""
+    return len(_CODE_HINT.findall(text)) >= 3
 
 
 def count_formula_symbols(text: str) -> int:
-    """结构化数学符号 + 文本层被拍平的公式信号的加权计数（越高越像公式页）。"""
-    base = len(_FORMULA.findall(text))
-    flat = (len(_FLAT_SUBVAR.findall(text))
-            + len(_FLAT_MINUS.findall(text))
-            + 2 * len(_FLAT_OPS.findall(text)))
-    return base + flat
+    """公式信号加权计数（越高越像公式页）：强信号恒计；ASCII 弱信号仅在非代码页计入。"""
+    strong = len(_MATH_STRONG.findall(text)) + 2 * len(_MATH_OPS.findall(text))
+    weak = (len(_W_DOLLAR.findall(text)) + len(_W_CARET.findall(text))
+            + len(_W_LATEX.findall(text)) + len(_W_SUBVAR.findall(text)))
+    if looks_like_code(text):
+        weak = 0
+    return strong + weak
 
 
 def needs_vision(page: dict) -> bool:

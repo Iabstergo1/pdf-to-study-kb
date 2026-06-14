@@ -34,6 +34,30 @@ def test_formula_symbol_count_detects_latex_and_greek():
     assert n >= 4
 
 
+def test_code_page_not_flagged_as_formula():
+    # 通用回归：Python 代码页（REPL >>>、转义 \x \u、变量名 s1/t2、^ 位运算）不得误判为公式页，
+    # 否则代码密集书（Python Cookbook）会把成片代码页误渲为 route B 公式 PNG。
+    code = (">>> s1 = 'Spicy Jalape\\u00f1o'\n>>> s2 = 'Spicy Jalapen\\u0303o'\n"
+            ">>> data = b'\\x00\\x12V'\n>>> int.from_bytes(data, 'little')\n"
+            "def f(x1, x2):\n    return x1 ^ x2\n")
+    assert source_profile.looks_like_code(code) is True
+    n = source_profile.count_formula_symbols(code)
+    assert n < 12, f"code page formula score too high: {n}"
+    assert source_profile.needs_vision(
+        {"text_len": len(code), "formula_symbols": n, "image_count": 0}) is False
+
+
+def test_real_math_page_still_flagged():
+    # 真公式页（希腊字母 / 真减号 − / 上下标 / ∑∫≥≤√∇±）仍须判 needs_vision（不被代码抑制误伤）。
+    math = ("一阶条件 π1 = (a−c)q1 − b q1² − b q1 q2，∂π/∂q1 = 0，求得 q* = (a−c)/3b；"
+            "∑ x_i ≥ 0，∫ f dx，α β γ δ ≤ ≥ ≠ ∇ √ ± ∞ ∈")
+    assert source_profile.looks_like_code(math) is False
+    n = source_profile.count_formula_symbols(math)
+    assert n >= 12, f"real math score too low: {n}"
+    assert source_profile.needs_vision(
+        {"text_len": 400, "formula_symbols": n, "image_count": 0}) is True
+
+
 def test_profile_source_md_single_page(tmp_path):
     src = tmp_path / "n.md"
     src.write_text("# T\n\nbody\n", encoding="utf-8")
