@@ -120,18 +120,20 @@ python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yam
 > [!IMPORTANT]
 > “总结这篇 / 解释这段 / 翻译一下 / 问个常识”这类只读请求**不会**触发写库——skill 的描述里写了负样本，模型会当普通问题回答。
 
-**端到端示例（仓库内置了一本测试源可直接试）：**
+**端到端示例（仓库内置一个几行的样例源 [`books/sample-binary-search/`](books/sample-binary-search/input/binary-search.md)，克隆后可直接试）：**
 
 ```text
-你：把 books/game-theory-whitepaper/input/ 里那本博弈论白皮书加进知识库，领域 game-theory
+你：把 books/sample-binary-search/input/binary-search.md 加进知识库，领域 algorithms
 
 Claude（ingest skill）：
-  → 确认 source_id = game-theory-whitepaper、domain = game-theory
+  → 确认 source_id = sample-binary-search、domain = algorithms
   → 跑预处理：add-source → profile → source-convert → windows → workorder
-  → 逐窗读源、写 lessons/concepts/topics（status: proposed）、归一“信号博弈/Signaling Game”
+  → 读源、写 concepts/lessons（status: proposed）、归一“二分查找 / Binary Search”
   → 跑收尾 lint：通过则 promote 进 index；失败则回滚 + 写 Review-Queue 并告诉你怎么修
   → 汇报：发布了哪些页 / 哪些进了复核队列
 ```
+
+> 想试自己的书？把 **PDF / DOCX / PPTX / Markdown** 放进 `books/<name>/input/`，同样一句“把这个加进知识库，领域 X”即可（样例源可随时删除或替换；`books/` 下除样例外都不入版本控制）。
 
 你**不需要**手动敲任何命令，也**不需要**自己写笔记内容——内容由模型在对话中生成。
 
