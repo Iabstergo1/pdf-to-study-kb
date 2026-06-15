@@ -36,6 +36,25 @@ def _staging_dir(source_id: str) -> Path:
     return _workspace_root() / "pipeline-workspace/staging" / source_id
 
 
+def _require_vault_lock(db, source_id: str):
+    """写 ingest 进度/收工前必须确认当前 source 仍持有 vault 锁。"""
+    import locks
+    row = locks.get(db, scope="vault")
+    if row is None:
+        raise SystemExit(f"vault lock not held; run ingest-start --source {source_id} first")
+    if row["holder"] != source_id:
+        raise SystemExit(f"vault lock held by {row['holder']} since {row['started_at']}; "
+                         f"cannot proceed for {source_id}")
+    return row
+
+
+def _source_is_running_ingest(db, source_id: str) -> bool:
+    import state_store
+    src = state_store.get_source(db, source_id)
+    return (src is not None and src["current_stage"] == "ingesting"
+            and src["current_status"] == "running")
+
+
 def cmd_add_source(args):
     """注册一个来源到状态库（记 raw 路径为 artifact）。"""
     import state_store
@@ -312,8 +331,8 @@ def cmd_show_window(args):
 
 def cmd_ingest_start(args):
     """/ingest 开工：取 vault 锁 + stale registry 硬校验 + 推进到 ingesting。
-    幂等可恢复：source 已处于 ingesting/running（崩溃/空闲后 resume）时，回收同源残留/stale 锁、
-    重取并刷新心跳，跳过阶段转换并报 resumed。锁被**他源**持有才拒（守住跨 agent 互斥）。"""
+    幂等可恢复：source 已处于 ingesting/running（崩溃/空闲后 resume）时，校验 registry 后
+    刷新同源锁；若锁已 stale 则回收重取。锁被**他源**持有才拒（守住跨 agent 互斥）。"""
     import state_store
     import locks
     import ingest_guards
@@ -328,13 +347,32 @@ def cmd_ingest_start(args):
     held = locks.get(db, scope="vault")
     if held is not None and held["holder"] != args.source:
         raise SystemExit(f"vault lock held by {held['holder']} since {held['started_at']}")
-    if held is not None:  # 同源残留/stale 锁 → 回收后重取（resume / 崩溃恢复友好）
-        locks.release(db, scope="vault", holder=args.source)
+
+    registry_ok = ingest_guards.registry_fresh(_vault_dir(), wo_row["registry_hash"])
+    if held is not None:
+        if not registry_ok:
+            raise SystemExit("stale registry: disk _registry.yaml != work order hash; re-run workorder")
+        if resuming:
+            if locks.is_stale(db, scope="vault", ttl_seconds=LOCK_TTL_SECONDS):
+                locks.release(db, scope="vault", holder=args.source)
+                if not locks.acquire(db, scope="vault", holder=args.source, pid=os.getpid()):
+                    held = locks.get(db, scope="vault")
+                    raise SystemExit(f"vault lock held by {held['holder'] if held else '?'}")
+            else:
+                locks.heartbeat(db, scope="vault", holder=args.source)
+            print(f"[OK] resumed ingesting '{args.source}'（vault 锁有效）；续 window 循环")
+            return
+        if locks.is_stale(db, scope="vault", ttl_seconds=LOCK_TTL_SECONDS):
+            locks.release(db, scope="vault", holder=args.source)
+        else:
+            state = f"{src['current_stage']}/{src['current_status']}" if src else "unknown"
+            raise SystemExit(f"vault lock held by {args.source}, but source state is {state}")
+
     if not locks.acquire(db, scope="vault", holder=args.source, pid=os.getpid()):
         held = locks.get(db, scope="vault")
         raise SystemExit(f"vault lock held by {held['holder'] if held else '?'}")
     try:
-        if not ingest_guards.registry_fresh(_vault_dir(), wo_row["registry_hash"]):
+        if not registry_ok:
             raise SystemExit("stale registry: disk _registry.yaml != work order hash; re-run workorder")
         if resuming:
             print(f"[OK] resumed ingesting '{args.source}'（vault 锁重取）；续 window 循环")
@@ -354,6 +392,7 @@ def cmd_ingest_done(args):
     import state_store
     import locks
     db = _vault_state_db()
+    _require_vault_lock(db, args.source)
     state_store.complete_stage(db, args.source, "ingesting")
     state_store.start_stage(db, args.source, "ingested")
     state_store.complete_stage(db, args.source, "ingested")
@@ -365,6 +404,7 @@ def cmd_window_start(args):
     import state_store
     import locks
     db = _vault_state_db()
+    _require_vault_lock(db, args.source)
     state_store.start_window(db, args.source, args.window, input_hash=args.hash)
     locks.heartbeat(db, scope="vault", holder=args.source)
     print(f"[OK] window {args.window} running")
@@ -374,6 +414,7 @@ def cmd_window_done(args):
     import state_store
     import locks
     db = _vault_state_db()
+    _require_vault_lock(db, args.source)
     state_store.finish_window(db, args.source, args.window,
                               write_set_json=args.writes, proposal_set_json=args.proposals)
     locks.heartbeat(db, scope="vault", holder=args.source)
@@ -382,13 +423,20 @@ def cmd_window_done(args):
 
 def cmd_window_fail(args):
     import state_store
-    state_store.fail_window(_vault_state_db(), args.source, args.window, error=args.error)
+    db = _vault_state_db()
+    _require_vault_lock(db, args.source)
+    state_store.fail_window(db, args.source, args.window, error=args.error)
     print(f"[OK] window {args.window} failed: {args.error}")
 
 
 def cmd_resolve_concept(args):
     """概念归一唯一入口（spec §6）：实时扫描概念页构建 registry，命中合并、未命中新建。不写派生文件。"""
     import concept_store
+    db = _vault_state_db()
+    # ingest 期建/并概念页是真实 vault 写，与 check-write/snapshot-page 同构：
+    # 仅当 --ref-source 正在 ingest 时强制持锁（kb-save 等非 ingest 调用 ref_source 为空，跳过）。
+    if args.ref_source and _source_is_running_ingest(db, args.ref_source):
+        _require_vault_lock(db, args.ref_source)
     vault = _vault_dir()
     metas = concept_store.scan_concept_pages(vault) if vault.exists() else []
     registry, errors, _w = concept_store.build_registry(metas)
@@ -410,6 +458,8 @@ def cmd_check_write(args):
     import ingest_guards
     import yaml as _yaml
     db = _vault_state_db()
+    if _source_is_running_ingest(db, args.source):
+        _require_vault_lock(db, args.source)
     wo_row = state_store.get_work_order(db, args.source)
     if wo_row is None:
         raise SystemExit("run workorder first")
@@ -431,6 +481,8 @@ def cmd_snapshot_page(args):
     import state_store
     import snapshots
     db = _vault_state_db()
+    if _source_is_running_ingest(db, args.source):
+        _require_vault_lock(db, args.source)
     rid = state_store.latest_run_id(db, args.source, "ingesting")
     run_id = f"r{rid}" if rid else "manual"
     manifest = snapshots.take_snapshot(

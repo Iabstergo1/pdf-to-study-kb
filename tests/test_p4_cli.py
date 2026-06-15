@@ -83,6 +83,57 @@ def test_ingest_start_done_lifecycle_with_lock(tmp_path):
     assert _run(["ingest-start", "--source", "note2"], tmp_path).returncode == 0
 
 
+def test_ingest_start_resumes_after_same_source_stale_lock(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    db = _prep_source(tmp_path)
+    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+
+    old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+    locks.force_set_heartbeat(db, scope="vault", iso=old)
+    r = _run(["ingest-start", "--source", "note"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "resumed" in r.stdout
+    assert locks.get(db, scope="vault") is not None
+    src = state_store.get_source(db, "note")
+    assert (src["current_stage"], src["current_status"]) == ("ingesting", "running")
+
+
+def test_ingest_start_stale_registry_keeps_same_source_lock(tmp_path):
+    db = _prep_source(tmp_path)
+    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+
+    reg = tmp_path / "wiki" / "concepts" / "_registry.yaml"
+    reg.write_text(reg.read_text(encoding="utf-8") + "\n# tampered\n", encoding="utf-8")
+    r = _run(["ingest-start", "--source", "note"], tmp_path)
+    assert r.returncode != 0 and "stale" in (r.stdout + r.stderr).lower()
+    assert locks.get(db, scope="vault") is not None
+
+
+def test_window_commands_require_current_vault_lock(tmp_path):
+    db = _prep_source(tmp_path)
+    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["window-start", "--source", "note", "--window", "w0000", "--hash", "h1"],
+                tmp_path).returncode == 0
+
+    assert _run(["unlock", "--ttl", "0"], tmp_path).returncode == 0
+    assert locks.get(db, scope="vault") is None
+
+    r_done = _run(["window-done", "--source", "note", "--window", "w0000"], tmp_path)
+    assert r_done.returncode != 0
+    assert "vault lock" in (r_done.stdout + r_done.stderr).lower()
+    r_start = _run(["window-start", "--source", "note", "--window", "w0001", "--hash", "h2"],
+                   tmp_path)
+    assert r_start.returncode != 0
+    assert "vault lock" in (r_start.stdout + r_start.stderr).lower()
+    r_check = _run(["check-write", "--source", "note", "--path", "domains/misc/lessons/a.md"],
+                   tmp_path)
+    assert r_check.returncode != 0
+    assert "vault lock" in (r_check.stdout + r_check.stderr).lower()
+
+
 def test_stale_lock_visible_and_recoverable(tmp_path):
     # P1 回归（spec §3.3 / 2026-06-11 P9 code review）：
     # status 显示锁持有者；window 记账刷新 heartbeat；next 对 stale 锁给清理建议；
@@ -136,9 +187,30 @@ def test_resolve_concept_cli_creates_then_merges(tmp_path):
     assert len(pages) == 1  # 绝不重复建页
 
 
+def test_resolve_concept_requires_lock_during_ingest(tmp_path):
+    # ingest 中途丢锁后，建/并概念页（resolve-concept --ref-source）应被拒——
+    # 守住约束 3「概念去重」不被无锁僵尸 agent 破坏；非 ingest（ref_source 为空）不受约束。
+    db = _prep_source(tmp_path)
+    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["resolve-concept", "--mention", "甲", "--domain", "misc",
+                 "--ref-source", "note", "--ref-sections", "1"], tmp_path).returncode == 0
+    assert _run(["unlock", "--ttl", "0"], tmp_path).returncode == 0
+    assert locks.get(db, scope="vault") is None
+    # 无 ref-source（kb-save 式）不受锁约束
+    assert _run(["resolve-concept", "--mention", "乙", "--domain", "misc"],
+                tmp_path).returncode == 0
+    # 带 ref-source 且该 source 仍处 ingesting/running → 拒
+    r = _run(["resolve-concept", "--mention", "丙", "--domain", "misc",
+              "--ref-source", "note"], tmp_path)
+    assert r.returncode != 0
+    assert "vault lock" in (r.stdout + r.stderr).lower()
+
+
 def test_check_write_allow_and_deny(tmp_path):
     _prep_source(tmp_path)
     assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
     ok = _run(["check-write", "--source", "note", "--path", "domains/misc/lessons/a.md"], tmp_path)
     assert ok.returncode == 0 and "ALLOW" in ok.stdout
     deny = _run(["check-write", "--source", "note", "--path", "index.generated.md"], tmp_path)

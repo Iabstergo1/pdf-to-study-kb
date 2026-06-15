@@ -230,12 +230,12 @@ registered → profiled → converted → windowed → workorder_ready
 | 方式 | 自动化 | 怎么做 |
 |------|------|------|
 | 手动续 | 人工 | 复位后在会话里发一句"继续"，hook 注入的 RESUME 带它接着跑 |
-| **OS 调度（推荐无人值守）** | 全自动 | Windows 任务计划程序 / cron 按 **> 5h** 间隔调 [`scripts/resume-ingest.ps1`](scripts/resume-ingest.ps1)：仅在有进行中 ingest 时唤起所选 agent 的 headless 续跑（`-Agent claude` → `claude -p … --dangerously-skip-permissions`；`-Agent codex` → `codex exec --full-auto …`），冻结时空转、复位后自然成功。脚本头部含注册命令 |
+| **OS 调度（推荐无人值守）** | 全自动 | Windows 任务计划程序 / cron 按 **> 5h** 间隔调 [`scripts/resume-ingest.ps1`](scripts/resume-ingest.ps1)：仅在有进行中 ingest 时唤起所选 agent 的 headless 续跑（`-Agent claude` → `claude -p … --dangerously-skip-permissions`；`-Agent codex` → `codex exec --sandbox workspace-write …`；该机沙箱挡路写不动库时加 `-Bypass` 改用 `codex exec --dangerously-bypass-approvals-and-sandbox …`），冻结时空转、复位后自然成功。脚本头部含注册命令 |
 | 第三方 API key | 不适用 | 按 token 计费、**没有 5h 窗口**，额度够就一路跑完，无需上面任何东西 |
 
 > 别指望 `ScheduleWakeup` / 会话级 cron 扛 5h：前者上限 1h，后者要 REPL 常开、且冻结期自身也被限流而续不上。只有 `scripts/resume-ingest.ps1` 这种 **OS 级、独立进程**的调度才真正跨得过复位窗口。
 
-它给的**不是"一次跑完"的硬保证，而是收敛重试**：每次 `claude -p` 都是无记忆新会话，但进度落在磁盘（`ingest_progress` + proposed 页 + digest），新会话靠 `pipeline.py next` + RESUME 块重新定位到下一个未完成 window。**没有任何一次 fire 会丢进度**；`6h > 5h` 保证不会连续两次都落在同一冻结里，落在冻结期的那次空转退出、下一次成功——单调收敛到 `ingest + lint` 全完成。前提（缺一则"自动"会断，脚本头部有详述）：① 所选 agent（`claude` 或 `codex`）已登录且在 PATH；② **非交互权限**——Claude headless 的 Bash 不会自动放行，脚本默认用 `--dangerously-skip-permissions`（仅触及本仓库 + gitignored 的 `wiki/` 运行时），或改 `acceptEdits` 但须在 `permissions.allow` 放行 `Bash(python scripts/pipeline.py:*)`；Codex 默认用 `codex exec --full-auto`（沙箱 + 不弹批准）；③ fire 时机器醒着（睡眠需唤醒定时器、笔记本需允许电池下运行——注册命令已带这些设置）。**同一 vault 同刻只许一个 ingest，别同时给两个 agent 各注册指向同库的任务。** 每次 fire 的结果会追加到 `tmp/resume.log` 供你核对。
+它给的**不是"一次跑完"的硬保证，而是收敛重试**：每次 `claude -p` / `codex exec` 都是无记忆新会话，但进度落在磁盘（`ingest_progress` + proposed 页 + digest），新会话靠 `pipeline.py next` + RESUME 块重新定位到下一个未完成 window。**没有任何一次 fire 会丢进度**；`6h > 5h` 保证不会连续两次都落在同一冻结里，落在冻结期的那次空转退出、下一次成功——单调收敛到 `ingest + lint` 全完成。前提（缺一则"自动"会断，脚本头部有详述）：① 所选 agent（`claude` 或 `codex`）已登录且在 PATH；② **非交互权限**——Claude headless 的 Bash 不会自动放行，脚本默认用 `--dangerously-skip-permissions`（仅触及本仓库 + gitignored 的 `wiki/` 运行时），或改 `acceptEdits` 但须在 `permissions.allow` 放行 `Bash(python scripts/pipeline.py:*)`；Codex 默认用 `--sandbox workspace-write`（最小权限、仅写 workspace），若该机沙箱挡路写不动库，注册时加 `-Bypass` 改用 `--dangerously-bypass-approvals-and-sandbox`；③ fire 时机器醒着（睡眠需唤醒定时器、笔记本需允许电池下运行——注册命令已带这些设置）。**同一 vault 同刻只许一个 ingest，别同时给两个 agent 各注册指向同库的任务。** 每次 fire 的结果会追加到 `tmp/resume.log` 供你核对。
 
 ### 克隆后能直接套用吗
 

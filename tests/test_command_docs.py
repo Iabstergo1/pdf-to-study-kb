@@ -1,4 +1,9 @@
+import os
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / ".claude/skills"
@@ -108,3 +113,62 @@ def test_save_back_policy_doc():
     for must in ["准入门槛", "至少满足一项", "默认不保存", "一次性事实查询",
                  "managed_by: human", "resolve_or_create_concept"]:
         assert must in text, f"save-back-policy.md 缺: {must}"
+
+
+def test_resume_ingest_codex_automation_uses_supported_writable_flags():
+    script = (ROOT / "scripts" / "resume-ingest.ps1").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    combined = script + "\n" + readme
+    assert "--full-auto" not in combined
+    assert "--dangerously-bypass-approvals-and-sandbox" in script
+    assert "--sandbox" in script and "workspace-write" in script
+    # 交付默认 = 最小权限 workspace-write；bypass 降为 -Bypass 逃生开关
+    assert "默认用 `--sandbox workspace-write`" in readme
+
+
+def test_resume_ingest_detects_active_ingest_with_lock_status_line(tmp_path):
+    if os.name != "nt":
+        pytest.skip("resume-ingest.ps1 smoke uses Windows .cmd shims")
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("pwsh is required for resume-ingest.ps1 smoke")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_python = bin_dir / "python.cmd"
+    fake_python.write_text(
+        "@echo off\r\n"
+        "echo note                         misc           ingesting        running\r\n"
+        "echo [lock] vault held by note since 2026-06-15T00:00:00+00:00\r\n"
+        "exit /b 0\r\n",
+        encoding="ascii",
+    )
+    arg_log = tmp_path / "codex.args.txt"
+    fake_codex = bin_dir / "codex.cmd"
+    fake_codex.write_text(
+        "@echo off\r\n"
+        "echo %*>>\"%CODEX_ARG_LOG%\"\r\n"
+        "exit /b 0\r\n",
+        encoding="ascii",
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+        "CODEX_ARG_LOG": str(arg_log),
+        "TEMP": str(tmp_path),
+        "TMP": str(tmp_path),
+    }
+
+    r = subprocess.run(
+        [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "resume-ingest.ps1"),
+         "-Agent", "codex", "-Python", str(fake_python)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    args = arg_log.read_text(encoding="utf-8")
+    assert "exec --sandbox workspace-write" in args
+    assert "dangerously-bypass" not in args
