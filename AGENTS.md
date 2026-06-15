@@ -36,19 +36,21 @@ LLM 能力 = `.agents/skills/{ingest,kb-query,kb-save,kb-review,kb-qa,wiki-lint-
 
 - **同一时刻同一 vault 只允许一个 ingest**（`source_locks` 强制）。Codex 与 Claude Code **不得同时对同一库 ingest**；崩溃残留锁用 `python scripts/pipeline.py unlock` 回收。
 - **共享 CLI 是唯一契约**：两 agent 都只调 `scripts/pipeline.py`，**业务逻辑只改这里**，不在各自 skill 里重复实现；改了 CLI 行为要保证两边 skill 仍一致。
-- **解释器统一用 `study-kb` conda 环境**（`D:\miniconda3\envs\study-kb\python.exe`）：装 `requirements.txt`（PyMuPDF / PyYAML / pytest，route B 无重型 OCR 后端）；**请勿改用其他解释器**。
+- **解释器统一用项目指定的 `study-kb` conda 环境**（`conda create -n study-kb python=3.12` 后安装 `requirements.txt`：PyMuPDF / PyYAML / pytest，route B 无重型 OCR 后端）；**请勿改用其他解释器**。
 - **生成物非 git**：`wiki/`、`pipeline-workspace/` 已 gitignore，不提交——它们是每机运行时状态。
 
 ## 6. 真实能力边界（开工前知悉）
 
-- **公式保真（route B：读图兜底）**：PDF 经 PyMuPDF 抽纯文本，上/下标/分数会拍平失真；`source-convert` 把每个公式风险页（`needs_vision`）渲染为整页 PNG，由 ingest 时 LLM **读图写 KaTeX** 保真（lint 硬规则强制 lesson 内嵌源图）。**不依赖任何重型 OCR/ML 后端**（marker/surya 已评估并移除：4GB 显存下约 4.5 分钟/页，速度过慢）。
+- **公式保真（route B：读图兜底）**：PDF 经 PyMuPDF 抽纯文本，上/下标/分数会拍平失真；`source-convert` 把每个公式风险页（`needs_vision`）渲染为整页 PNG，由 ingest 时 LLM **读图写 KaTeX** 保真（lint 硬规则强制 lesson 内嵌源图）。**不依赖任何重型 OCR/ML 后端**（marker/surya 已评估并移除：在约 4GB 显存的 GPU 上约 4.5 分钟/页，速度过慢；大显存机器可另行接入）。
 - **格式覆盖**：`pdf`/`md` 已端到端打通；`docx`/`pptx` 适配器为后续期。
 - **每本书的入库都是一次需付费的 LLM 操作**，并非导入即用；项目交付时为空库，内容通过运行 ingest 逐步生成。
 - **lint 硬规则**：wikilink 必须全 vault 相对路径（非 Obsidian basename）、必需小节标题逐字、非 source 页（topic/comparison/synthesis/overview）必须进某 window 的 `--writes` 记账——见 ingest skill 阶段 D 速查；未遵守将被门禁拦截。
 
 ## 7. Windows / PowerShell 工具约定
 
-Codex 的 Bash 工具底层是 Git Bash (MSYS2)，处理含中文的 Windows 路径会崩溃。
+> 本项目在 Windows + PowerShell 7 环境下开发，本节面向 Windows 贡献者；在 macOS / Linux 上，agent 的原生 shell 即标准 Bash，以下 Git Bash 相关事项通常不适用。
+
+在 Windows 上，Codex 的 Bash 工具底层是 Git Bash (MSYS2)，处理含中文的 Windows 路径可能出错。
 
 1. **优先用原生工具**：Glob、Grep、Read、Edit —— 不经过 Bash，无路径问题。
 2. **要执行命令时**：直接调 `pwsh`（PowerShell 7）+ study-kb 解释器，不要用 Git Bash 调 PowerShell。
