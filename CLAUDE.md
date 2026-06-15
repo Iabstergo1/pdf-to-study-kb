@@ -30,7 +30,7 @@ ingest skill 编排预处理（零 LLM）：add-source → profile → source-co
 
 ## 4. 命令层（skills 驱动，可自动触发）
 
-LLM 能力 = `.claude/skills/{ingest,kb-query,kb-save,kb-review,wiki-lint-semantic}/SKILL.md`，**全部允许模型按 `description` 自动触发**（无 `disable-model-invocation`）。误触发靠 description 负样本压制（"总结这篇/解释/翻译"不进 wiki 流程）；数据安全由 CLI 守卫强制，与是否自动触发正交。详细协议：`docs/skill-runtime/{routing,schema,concept-resolution,save-back-policy}.md`（skill 按需加载）。
+LLM 能力 = `.claude/skills/{ingest,kb-query,kb-save,kb-review,kb-qa,wiki-lint-semantic,source-preflight,source-xray,skill-evolve}/SKILL.md`，**全部允许模型按 `description` 自动触发**（无 `disable-model-invocation`）。误触发靠 description 负样本压制（"总结这篇/解释/翻译"不进 wiki 流程）；数据安全由 CLI 守卫强制，与是否自动触发正交。其中 `skill-evolve` 是 **skill 自进化**：把反复出现的 lint 失败（`skill-mine` 在 lint 失败时自动聚成 `backlog.yaml`）沉淀成对某 skill 的有界改进，受 `skill-gate`（pytest+双树对等+gate-integrity，候选只许动 skill 两树）守门、人 `skill-adopt` 才合并进双树。详细协议：`docs/skill-runtime/{routing,schema,concept-resolution,save-back-policy}.md`（skill 按需加载）。
 
 ## 5. 双 agent 协作约定（Claude + Codex）
 

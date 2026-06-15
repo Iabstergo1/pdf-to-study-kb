@@ -146,7 +146,7 @@ Claude（ingest skill）：
 ## 🛠️ 底层：确定性 CLI（手动逃生通道）
 
 skills 背后调用的是 `python scripts/pipeline.py <command>`（零 LLM、可独立运行）。
-平时不用手敲；**排查问题、手动重跑某一步**时才需要。共 24 个子命令，按阶段分组：
+平时不用手敲；**排查问题、手动重跑某一步**时才需要。共 28 个子命令，按阶段分组：
 
 <details>
 <summary><b>展开：完整 CLI 命令参考</b></summary>
@@ -191,6 +191,15 @@ skills 背后调用的是 `python scripts/pipeline.py <command>`（零 LLM、可
 | `promotion-candidates` | 检测跨域提升候选（人工确认） | `--propose` |
 | `promote-concept` | 机械提升一个概念为 shared | `--id concept.<domain>.<slug>` |
 | `check-session` | query-session 目录契约检查（Q1） | `--id <run_id> [--saved]` |
+
+### skill 自进化（零 LLM 命令；唯一 LLM 是人触发的 `skill-evolve` skill）
+
+| 命令 | 作用 | 关键参数 |
+|------|------|------|
+| `skill-mine` | 扫 `review_proposals` 失败信号 → 按规则聚类成 `backlog.yaml`（**`lint` 失败时自动刷新**，也可手动重扫） | — |
+| `skill-gate` | 候选门：gate-integrity（只许动 skill 两树，挡 `tests/` 越权）+ `pytest`（含双树对等） | `--candidate [--base]` |
+| `skill-stage` | gate 绿后登记候选提案（diff + audit），线上不动 | `--candidate [--base]` |
+| `skill-adopt` | **人触发**：重跑 gate 兜底后把候选合并进双树（commit） | `--candidate [--base]` |
 
 > 状态库默认锚定仓库根：`pipeline-workspace/state/study-kb.sqlite`。设环境变量 `STUDY_KB_ROOT` 可整体重定向（测试隔离 / 多库场景）。
 
