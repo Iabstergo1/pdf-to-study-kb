@@ -106,7 +106,7 @@ python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yam
 
 ## 💬 主接口：对话式 skills
 
-在 Claude Code 或 Codex 里，**直接说人话即可**——模型会按意图自动调用对应 skill（也可手敲 `/<skill>`）。两套 agent 各读自己的 skill 树（`.claude/skills/` 与 `.agents/skills/`），但**字节对等、调同一套 CLI**，所以行为一致。
+在 Claude Code 或 Codex 中，**直接用自然语言描述即可**——模型会按意图自动调用对应 skill（也可手动输入 `/<skill>`）。两套 agent 各读自己的 skill 树（`.claude/skills/` 与 `.agents/skills/`），但**字节对等、调用同一套 CLI**，因此行为一致。
 所有写库 skill 全程受确定性 CLI 守卫保护，只写 `status: proposed`。
 
 | skill | 一句话说什么就触发 | 它做什么 |
@@ -139,14 +139,14 @@ Claude（ingest skill）：
 
 > 想试自己的书？把 **PDF / DOCX / PPTX / Markdown** 放进 `books/<name>/input/`，同样一句“把这个加进知识库，领域 X”即可（样例源可随时删除或替换；`books/` 下除样例外都不入版本控制）。
 
-你**不需要**手动敲任何命令，也**不需要**自己写笔记内容——内容由模型在对话中生成。
+你**无需**手动输入任何命令，也**无需**自行撰写笔记内容——内容由模型在对话中生成。
 
 ---
 
 ## 🛠️ 底层：确定性 CLI（手动逃生通道）
 
 skills 背后调用的是 `python scripts/pipeline.py <command>`（零 LLM、可独立运行）。
-平时不用手敲；**排查问题、手动重跑某一步**时才需要。共 28 个子命令，按阶段分组：
+日常无需手动输入；仅在**排查问题、手动重跑某一步骤**时使用。共 28 个子命令，按阶段分组：
 
 <details>
 <summary><b>展开：完整 CLI 命令参考</b></summary>
@@ -229,30 +229,37 @@ registered → profiled → converted → windowed → workorder_ready
 
 ## ⏸️ 中断续跑（上下文上限 / 订阅限额）
 
-长源 ingest 是一次会话里的长任务，可能撞两种"墙"。两者都**不丢进度**——确定性层是耐用底座：`ingest_progress`（窗级记账 SQLite）+ 落盘的 `status: proposed` 页 + `digest.md` 外部记忆 + **幂等 `ingest-start`**（重入报 `resumed`），任意时刻重启都能从下一个未完成 window 接着跑。
+长文档的 ingest 是单次会话内的长任务，可能遇到两类中断：上下文窗口被压缩，或订阅用量达到限额。两类中断均不会丢失进度——确定性层提供持久化底座：窗级记账（`ingest_progress`，SQLite）、已落盘的 `status: proposed` 页、`digest.md` 外部记忆，以及幂等的 `ingest-start`（重入时返回 `resumed`）。从任意中断点重启，都会从下一个未完成的 processing window 继续。
 
-### 上下文上限（会话被压缩 / 重开）— 自动续
+### 上下文窗口压缩：自动恢复
 
-- 谐架 auto-compact + **SessionStart hook**：`.claude/settings.json` 在 `compact|resume` 时调用 [`scripts/resume_hint.py`](scripts/resume_hint.py)，把 `pipeline.py next`（机器派生的下一步）+ 各 staging digest 顶部的 `## ⏩ RESUME` 块重新注入上下文。
-- `ingest` skill **每窗硬性维护**那个 `## ⏩ RESUME` 块（写页协议 U7），所以续跑锚点对**任意来源**自带，不是某本书的专属。
+Claude Code 的 auto-compact 与 SessionStart hook 配合完成自动恢复：`.claude/settings.json` 在 `compact` / `resume` 事件时调用 [`scripts/resume_hint.py`](scripts/resume_hint.py)，将 `pipeline.py next`（机器推导的下一步）与各 staging digest 顶部的 `## ⏩ RESUME` 块重新注入上下文。`ingest` skill 在每个 window 维护该 RESUME 块，因此恢复锚点对任意来源自动具备，不限于特定文档。
 
-### 订阅限额（官方 5h 窗口）— 需要一点工程
+### 订阅限额（5 小时用量窗口）：需配置调度
 
-诚实边界：**限额冻结期间 agent 根本跑不了，本地没有任何东西能在冻结期驱动它**；复位后必须有东西"重新点火"。三种方式按自动化程度递增：
+限额冻结期间 agent 无法运行；用量窗口复位后，需由外部调度重新触发续跑。可选三种方式，自动化程度依次递增：
 
-| 方式 | 自动化 | 怎么做 |
+| 方式 | 自动化 | 说明 |
 |------|------|------|
-| 手动续 | 人工 | 复位后在会话里发一句"继续"，hook 注入的 RESUME 带它接着跑 |
-| **OS 调度（推荐无人值守）** | 全自动 | Windows 任务计划程序 / cron 按 **> 5h** 间隔调 [`scripts/resume-ingest.ps1`](scripts/resume-ingest.ps1)：仅在有进行中 ingest 时唤起所选 agent 的 headless 续跑（`-Agent claude` → `claude -p … --dangerously-skip-permissions`；`-Agent codex` → `codex exec --sandbox workspace-write …`；该机沙箱挡路写不动库时加 `-Bypass` 改用 `codex exec --dangerously-bypass-approvals-and-sandbox …`），冻结时空转、复位后自然成功。脚本头部含注册命令 |
-| 第三方 API key | 不适用 | 按 token 计费、**没有 5h 窗口**，额度够就一路跑完，无需上面任何东西 |
+| 手动续跑 | 人工 | 用量复位后在会话中输入“继续”，hook 注入的 RESUME 块会引导其从下一个 window 继续。 |
+| **OS 级调度（推荐用于无人值守）** | 全自动 | 用 Windows 任务计划程序或 cron，以 **大于 5 小时** 的间隔调度 [`scripts/resume-ingest.ps1`](scripts/resume-ingest.ps1)。该脚本仅在存在进行中的 ingest 时唤起所选 agent 的 headless 续跑，冻结期内空转退出、复位后正常完成；脚本头部附注册命令。 |
+| 第三方 API key | 不适用 | 按 token 计费、无 5 小时窗口限制；额度充足时可一次完成，无需上述调度。 |
 
-> 别指望 `ScheduleWakeup` / 会话级 cron 扛 5h：前者上限 1h，后者要 REPL 常开、且冻结期自身也被限流而续不上。只有 `scripts/resume-ingest.ps1` 这种 **OS 级、独立进程**的调度才真正跨得过复位窗口。
+OS 级调度提供的是收敛式重试，而非“一次完成”的保证：每次 `claude -p` / `codex exec` 均为无记忆的新会话，进度持久化在磁盘（`ingest_progress`、proposed 页、`digest`），新会话通过 `pipeline.py next` 与 RESUME 块重新定位到下一个未完成 window。任何一次触发都不会丢失进度；将间隔设为大于 5 小时，可确保相邻两次触发不会同时落入同一冻结窗口——落在冻结期的一次空转退出，下一次成功——从而单调收敛至 `ingest` 与 `lint` 全部完成。
 
-它给的**不是"一次跑完"的硬保证，而是收敛重试**：每次 `claude -p` / `codex exec` 都是无记忆新会话，但进度落在磁盘（`ingest_progress` + proposed 页 + digest），新会话靠 `pipeline.py next` + RESUME 块重新定位到下一个未完成 window。**没有任何一次 fire 会丢进度**；`6h > 5h` 保证不会连续两次都落在同一冻结里，落在冻结期的那次空转退出、下一次成功——单调收敛到 `ingest + lint` 全完成。前提（缺一则"自动"会断，脚本头部有详述）：① 所选 agent（`claude` 或 `codex`）已登录且在 PATH；② **非交互权限**——Claude headless 的 Bash 不会自动放行，脚本默认用 `--dangerously-skip-permissions`（仅触及本仓库 + gitignored 的 `wiki/` 运行时），或改 `acceptEdits` 但须在 `permissions.allow` 放行 `Bash(python scripts/pipeline.py:*)`；Codex 默认用 `--sandbox workspace-write`（最小权限、仅写 workspace），若该机沙箱挡路写不动库，注册时加 `-Bypass` 改用 `--dangerously-bypass-approvals-and-sandbox`；③ fire 时机器醒着（睡眠需唤醒定时器、笔记本需允许电池下运行——注册命令已带这些设置）。**同一 vault 同刻只许一个 ingest，别同时给两个 agent 各注册指向同库的任务。** 每次 fire 的结果会追加到 `tmp/resume.log` 供你核对。
+**前提条件**（任一项缺失将中断自动恢复，脚本头部有详细说明）：
 
-### 克隆后能直接套用吗
+1. 所选 agent（`claude` 或 `codex`）已登录并位于 `PATH` 中。
+2. 非交互式权限。Claude headless 模式下 Bash 不会自动放行，脚本默认使用 `--dangerously-skip-permissions`（作用范围仅限本仓库与 gitignored 的 `wiki/` 运行时目录），或改用 `acceptEdits` 并在 `permissions.allow` 中放行 `Bash(python scripts/pipeline.py:*)`；Codex 默认用 `--sandbox workspace-write`（最小权限，仅写入 workspace），若沙箱阻止写入则在注册时附加 `-Bypass` 改用 `--dangerously-bypass-approvals-and-sandbox`。
+3. 触发时设备处于唤醒状态（睡眠需配置唤醒定时器，笔记本需允许电池供电下运行；注册命令已包含相关设置）。
 
-能——以上对**任意领域 / 任意文档**生效，不是示例 PDF 专属：状态机、digest、`## ⏩ RESUME` 块、两个续跑脚本都随仓库分发且文档无关。个人偏好（如自动接受编辑的 `defaultMode`）放在 gitignored 的 `.claude/settings.local.json`，不强加给克隆者；想要无人值守，自己注册一次 `scripts/resume-ingest.ps1` 即可。
+> **注意**：`ScheduleWakeup` 与会话级 cron 不适用于跨越 5 小时窗口——前者上限为 1 小时，后者需保持 REPL 常驻且在冻结期同样受限。仅 OS 级、独立进程的调度（如 `scripts/resume-ingest.ps1`）能可靠跨越用量复位窗口。
+>
+> **并发约束**：同一 vault 在同一时刻只允许一个 ingest，请勿为两个 agent 注册指向同一知识库的调度任务。每次触发结果会追加至 `tmp/resume.log` 以供核对。
+
+### 克隆后是否可直接套用
+
+可以。上述机制对任意领域、任意文档均生效，不限于示例文件：状态机、digest、`## ⏩ RESUME` 块与两个续跑脚本均随仓库分发，且与具体文档无关。个人偏好（如自动接受编辑的 `defaultMode`）置于 gitignored 的 `.claude/settings.local.json`，不影响其他使用者。如需无人值守运行，注册一次 `scripts/resume-ingest.ps1` 即可。
 
 ---
 
@@ -289,7 +296,7 @@ wiki/
 
 > [!TIP]
 > **frontmatter 是承重的**（Dataview 字段 + lint 全靠它），不能删。若觉得它显示在正文开头影响阅读：Obsidian → **Settings → Editor → "Properties in document" 选 "Hidden"**——文件照旧、阅读时不显示。
-> **关系图（Graph）太密**多半是"汇总页把每个概念都 wikilink"造成的中心化 hub；写页纪律已要求只连真实强关系（见 ingest skill 阶段 D），汇总页只挑核心几个链、其余用普通文本。
+> **关系图（Graph）过于密集**通常源于"汇总页对每个概念都建立 wikilink"形成的中心化 hub；写页规范已要求仅连接真实的强关系（见 ingest skill 阶段 D），汇总页只保留核心的若干链接，其余以普通文本表述。
 
 ---
 

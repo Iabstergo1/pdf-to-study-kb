@@ -1,7 +1,7 @@
 # PDF to Study KB — Codex 项目指令
 
 > 本文件是 **Codex 理解本项目的唯一真值**（Claude Code 对应 `CLAUDE.md`，内容对等、调同一套 CLI）。
-> 详细运行时协议在 `docs/skill-runtime/*`（skill 执行时按需加载）。其余历史设计文档已删除，**勿据已删文档开工**。
+> 详细运行时协议在 `docs/skill-runtime/*`（skill 执行时按需加载）。其余历史设计文档已删除，**请勿参照已删除的文档开展工作**。
 
 ## 1. 本质
 
@@ -25,7 +25,7 @@ ingest skill 编排预处理（零 LLM）：add-source → profile → source-co
 2. **不拆分**：不让 LLM 做语义 unit 规划/审批；长源用确定性 processing windows（TOC/标题/页码/token 滑窗）读取。
 3. **概念去重**：所有 concept 创建/更新走单一 `resolve-concept`，命中 `canonical_id` 即合并、**绝不新建重复页**；`_registry.yaml`/`aliases.md` 为派生文件，skill 不手写。
 4. **两阶段发布**：skill 只写 `status: proposed`；收尾门禁过才 promote 到 `published` 并入 index，失败回滚（`pipeline-workspace/snapshots/`，默认非 git）+ 进 `Review-Queue/`。
-5. **覆盖保护**：写已存在页须"在 work-order snapshot 中 + `managed_by != human` + hash 一致"，否则拒写、出 proposal。**绝不悄悄改 human 维护页。**
+5. **覆盖保护**：写已存在页须"在 work-order snapshot 中 + `managed_by != human` + hash 一致"，否则拒写、出 proposal。**绝不静默修改由 human 维护的页面。**
 6. **fail-closed lint**：断链、缺必需小节、孤儿页（未记账归属）、重复 canonical_id、公式页缺源图——任一不过即阻断发布。
 
 ## 4. 命令层（skills 驱动，可自动触发）
@@ -36,15 +36,15 @@ LLM 能力 = `.agents/skills/{ingest,kb-query,kb-save,kb-review,kb-qa,wiki-lint-
 
 - **同一时刻同一 vault 只允许一个 ingest**（`source_locks` 强制）。Codex 与 Claude Code **不得同时对同一库 ingest**；崩溃残留锁用 `python scripts/pipeline.py unlock` 回收。
 - **共享 CLI 是唯一契约**：两 agent 都只调 `scripts/pipeline.py`，**业务逻辑只改这里**，不在各自 skill 里重复实现；改了 CLI 行为要保证两边 skill 仍一致。
-- **解释器统一用 `study-kb` conda 环境**（`D:\miniconda3\envs\study-kb\python.exe`）：装 `requirements.txt`（PyMuPDF / PyYAML / pytest，route B 无重型 OCR 后端）；**勿用 `pythonProject`**。
+- **解释器统一用 `study-kb` conda 环境**（`D:\miniconda3\envs\study-kb\python.exe`）：装 `requirements.txt`（PyMuPDF / PyYAML / pytest，route B 无重型 OCR 后端）；**请勿改用其他解释器**。
 - **生成物非 git**：`wiki/`、`pipeline-workspace/` 已 gitignore，不提交——它们是每机运行时状态。
 
 ## 6. 真实能力边界（开工前知悉）
 
-- **公式保真（route B：读图兜底）**：PDF 经 PyMuPDF 抽纯文本，上/下标/分数会拍平失真；`source-convert` 把每个公式风险页（`needs_vision`）渲染为整页 PNG，由 ingest 时 LLM **读图写 KaTeX** 保真（lint 硬规则强制 lesson 内嵌源图）。**不依赖任何重型 OCR/ML 后端**（marker/surya 已评估并移除：4GB 显存下约 4.5 分钟/页太慢）。
+- **公式保真（route B：读图兜底）**：PDF 经 PyMuPDF 抽纯文本，上/下标/分数会拍平失真；`source-convert` 把每个公式风险页（`needs_vision`）渲染为整页 PNG，由 ingest 时 LLM **读图写 KaTeX** 保真（lint 硬规则强制 lesson 内嵌源图）。**不依赖任何重型 OCR/ML 后端**（marker/surya 已评估并移除：4GB 显存下约 4.5 分钟/页，速度过慢）。
 - **格式覆盖**：`pdf`/`md` 已端到端打通；`docx`/`pptx` 适配器为后续期。
-- **每本书是一次 LLM 付费动作**，非导入即用；交付即空库，内容靠跑 ingest 长出。
-- **lint 硬规则**：wikilink 必须全 vault 相对路径（非 Obsidian basename）、必需小节标题逐字、非 source 页（topic/comparison/synthesis/overview）必须进某 window 的 `--writes` 记账——见 ingest skill 阶段 D 速查；不照做会被门禁拦。
+- **每本书的入库都是一次需付费的 LLM 操作**，并非导入即用；项目交付时为空库，内容通过运行 ingest 逐步生成。
+- **lint 硬规则**：wikilink 必须全 vault 相对路径（非 Obsidian basename）、必需小节标题逐字、非 source 页（topic/comparison/synthesis/overview）必须进某 window 的 `--writes` 记账——见 ingest skill 阶段 D 速查；未遵守将被门禁拦截。
 
 ## 7. Windows / PowerShell 工具约定
 
@@ -59,5 +59,5 @@ Codex 的 Bash 工具底层是 Git Bash (MSYS2)，处理含中文的 Windows 路
 
 - **本文件 = Codex 的项目真值**；`CLAUDE.md` = Claude Code 的（内容对等）。两者冲突时以行为更安全的一方为准并同步修正。
 - `docs/skill-runtime/*` = skill 运行时协议（保持准确、按需加载），不是"背景文档"。
-- 旧 `docs/`（spec / adr / agents）已删除——不要据已删文档开工；**不要重新引入 LangGraph / 双 SQLite / plan-units / 逐 unit 孤立生成 / surya 硬管线**（`tests/test_legacy_removed.py` 守卫）。
+- 旧 `docs/`（spec / adr / agents）已删除——请勿参照已删除的文档开展工作；**请勿重新引入 LangGraph / 双 SQLite / plan-units / 逐 unit 孤立生成 / surya 硬管线**（`tests/test_legacy_removed.py` 守卫）。
 - 执行/修复/审阅报告写入项目文件（如 `pipeline-workspace/reports/`），对话中只说一句指引，不复制大段输出。
