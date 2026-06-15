@@ -701,6 +701,101 @@ def cmd_unlock(args):
                      f"可能有活跃 /ingest，等待或先 window-fail 收尾")
 
 
+def cmd_skill_mine(args):
+    """skill 自进化·零-LLM：扫已落库的失败信号(review_proposals) → 按 kind 聚类成 backlog.yaml。"""
+    import state_store
+    import yaml as _yaml
+    db = _vault_state_db()
+    proposals = state_store.list_review_proposals(db) if db.exists() else []
+    clusters: dict[str, dict] = {}
+    for p in proposals:
+        c = clusters.setdefault(p["kind"], {"signature": p["kind"], "count": 0,
+                                            "sources": [], "sample_reason": p["reason"]})
+        c["count"] += 1
+        if p["source_id"] not in c["sources"]:
+            c["sources"].append(p["source_id"])
+    backlog = sorted(clusters.values(), key=lambda c: (-c["count"], c["signature"]))
+    out = _workspace_root() / "pipeline-workspace/skill-evolution/backlog.yaml"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(_yaml.safe_dump({"backlog": backlog}, allow_unicode=True, sort_keys=False),
+                   encoding="utf-8")
+    print(f"[OK] skill-mine: {len(backlog)} signatures -> {out}")
+
+
+def _skill_gate_check(base):
+    """gate 核心（skill-gate 与 skill-adopt 共用）：候选只许动 skill 两树(白名单) + 过 pytest。
+    返回 (ok, reason)。"""
+    import subprocess as _sp
+    tracked = _sp.run(["git", "diff", "--name-only", base], capture_output=True, text=True)
+    if tracked.returncode != 0:
+        return False, f"git diff 失败（不在 git 仓？）: {tracked.stderr.strip()}"
+    untracked = _sp.run(["git", "ls-files", "--others", "--exclude-standard"],
+                        capture_output=True, text=True)
+    changed = [ln.strip() for ln in (tracked.stdout + untracked.stdout).splitlines() if ln.strip()]
+    allowed = (".claude/skills/", ".agents/skills/")
+    outside = sorted(f for f in changed if not f.startswith(allowed))
+    if outside:
+        return False, (f"gate-integrity: 候选越界改动 {outside}"
+                       f"（只许动 .claude/skills 与 .agents/skills，防游戏自己的门）")
+    pt = _sp.run([sys.executable, "-m", "pytest", "tests", "-q"])
+    if pt.returncode != 0:
+        return False, "pytest: 候选未过测试门（含双树对等）"
+    return True, "gate-integrity + pytest 全绿"
+
+
+def cmd_skill_gate(args):
+    """skill 自进化·零-LLM 确定性门：候选只许动 skill 两树（gate-integrity，防游戏自己的门）
+    + 过 pytest（含 T2 双树对等等全部守卫）。任一不过即 exit 1。"""
+    ok, msg = _skill_gate_check(args.base)
+    if not ok:
+        print(f"[skill-gate] DENY {msg}")
+        raise SystemExit(1)
+    print(f"[skill-gate] PASS candidate={args.candidate}: {msg}")
+
+
+def _append_audit(base_dir, row):
+    """skill 自进化 audit（append-only，落 gitignored 工作区）。"""
+    import json as _json
+    from datetime import datetime, timezone
+    base_dir.mkdir(parents=True, exist_ok=True)
+    row = {**row, "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    with open(base_dir / "audit.jsonl", "a", encoding="utf-8", newline="\n") as f:
+        f.write(_json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def cmd_skill_stage(args):
+    """skill 自进化·零-LLM：把候选改动(skill 树 diff)登记为待审提案 + audit；线上(已提交状态)不动。"""
+    import subprocess as _sp
+    diff = _sp.run(["git", "diff", args.base, "--", ".claude/skills", ".agents/skills"],
+                   capture_output=True, text=True)
+    base_dir = _workspace_root() / "pipeline-workspace/skill-evolution"
+    cand_dir = base_dir / "candidates" / args.candidate
+    cand_dir.mkdir(parents=True, exist_ok=True)
+    (cand_dir / "proposal.diff").write_text(diff.stdout, encoding="utf-8")
+    _append_audit(base_dir, {"candidate": args.candidate, "event": "staged"})
+    print(f"[skill-stage] candidate={args.candidate} 已登记提案 -> {cand_dir / 'proposal.diff'}"
+          f"（线上不动，待人 skill-adopt）")
+
+
+def cmd_skill_adopt(args):
+    """skill 自进化·人触发：重跑 gate 兜底 → 把候选合并进双树(commit) → audit。gate 不过则拒绝、不提交。"""
+    import subprocess as _sp
+    ok, msg = _skill_gate_check(args.base)
+    if not ok:
+        print(f"[skill-adopt] DENY: 候选未过 gate，拒绝采纳：{msg}")
+        raise SystemExit(1)
+    _sp.run(["git", "add", ".claude/skills", ".agents/skills"])
+    commit = _sp.run(["git", "commit", "-q", "-m", f"skill-evolve: adopt candidate {args.candidate}"],
+                     capture_output=True, text=True)
+    if commit.returncode != 0:
+        print(f"[skill-adopt] git commit 失败: {commit.stdout}{commit.stderr}")
+        raise SystemExit(1)
+    sha = _sp.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    _append_audit(_workspace_root() / "pipeline-workspace/skill-evolution",
+                  {"candidate": args.candidate, "event": "adopted", "commit": sha})
+    print(f"[skill-adopt] candidate={args.candidate} 已采纳并提交双树 commit={sha}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="PDF to Study KB 流水线 CLI")
     subparsers = parser.add_subparsers(dest='command', help='可用命令')
@@ -775,6 +870,20 @@ def main():
     fp.add_argument("--source", required=True, help="source_id")
     fp.add_argument("--stage", required=True, help="卡死的 stage 名")
     fp.add_argument("--error", required=True, help="失败原因（记入 source_stage_runs.error）")
+    subparsers.add_parser("skill-mine",
+                          help="skill 自进化·零-LLM：扫失败信号(review_proposals) → backlog.yaml")
+    sgp = subparsers.add_parser("skill-gate",
+                                help="skill 自进化·零-LLM 门：候选只许动 skill 树(gate-integrity)+过 pytest")
+    sgp.add_argument("--candidate", required=True)
+    sgp.add_argument("--base", default="HEAD", help="diff 基线 ref（默认 HEAD）")
+    ssp = subparsers.add_parser("skill-stage",
+                                help="skill 自进化·零-LLM：登记候选提案(diff)+audit，线上不动")
+    ssp.add_argument("--candidate", required=True)
+    ssp.add_argument("--base", default="HEAD", help="diff 基线 ref（默认 HEAD）")
+    sadp = subparsers.add_parser("skill-adopt",
+                                 help="skill 自进化·人触发：重跑 gate 兜底 + 合并候选进双树(commit)")
+    sadp.add_argument("--candidate", required=True)
+    sadp.add_argument("--base", default="HEAD", help="diff 基线 ref（默认 HEAD）")
 
     args = parser.parse_args()
 
@@ -809,6 +918,10 @@ def main():
         'promotion-candidates': cmd_promotion_candidates,
         'promote-concept': cmd_promote_concept,
         'check-session': cmd_check_session,
+        'skill-mine': cmd_skill_mine,
+        'skill-gate': cmd_skill_gate,
+        'skill-stage': cmd_skill_stage,
+        'skill-adopt': cmd_skill_adopt,
     }
 
     commands[args.command](args)

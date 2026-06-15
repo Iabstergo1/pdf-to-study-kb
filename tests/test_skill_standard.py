@@ -99,6 +99,7 @@ _PROTOCOL_KEYWORDS = {
     "source-preflight": ["workorder", "source-convert", "windows", "write_scope", "零 LLM"],
     "kb-qa": ["Q 链", "Review-Queue", "覆盖率", "互斥"],
     "source-xray": ["reports/source-xray", "已发布", "kb-save"],
+    "skill-evolve": ["skill-mine", "skill-gate", "skill-stage", "skill-adopt", "backlog"],
 }
 
 
