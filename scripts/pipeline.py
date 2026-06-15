@@ -557,6 +557,10 @@ def cmd_lint(args):
             encoding="utf-8", newline="\n")
         state_store.fail_stage(db, args.source, "lint",
                                error=f"{len(violations)} lint violations")
+        try:
+            _refresh_skill_backlog(db)  # 自动 harvest：把刚记的失败聚进 skill backlog（best-effort）
+        except Exception:
+            pass  # harvest 绝不打断 lint 收尾
         raise SystemExit(f"lint failed: {len(violations)} violations -> {queue}")
     # 通过：promote + 重建派生 + 日志 + 清快照
     n = wiki_gate.promote(vault, proposed)
@@ -701,12 +705,12 @@ def cmd_unlock(args):
                      f"可能有活跃 /ingest，等待或先 window-fail 收尾")
 
 
-def cmd_skill_mine(args):
-    """skill 自进化·零-LLM：扫已落库的失败信号(review_proposals) → 按 kind 聚类成 backlog.yaml。"""
+def _refresh_skill_backlog(db):
+    """零-LLM：扫 review_proposals 按 kind 聚类 → 写 backlog.yaml，返回 backlog 列表。
+    供 skill-mine 显式调用 + lint 收尾自动 harvest 复用。"""
     import state_store
     import yaml as _yaml
-    db = _vault_state_db()
-    proposals = state_store.list_review_proposals(db) if db.exists() else []
+    proposals = state_store.list_review_proposals(db) if Path(db).exists() else []
     clusters: dict[str, dict] = {}
     for p in proposals:
         c = clusters.setdefault(p["kind"], {"signature": p["kind"], "count": 0,
@@ -719,6 +723,13 @@ def cmd_skill_mine(args):
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(_yaml.safe_dump({"backlog": backlog}, allow_unicode=True, sort_keys=False),
                    encoding="utf-8")
+    return backlog
+
+
+def cmd_skill_mine(args):
+    """skill 自进化·零-LLM：扫已落库的失败信号(review_proposals) → 按 kind 聚类成 backlog.yaml。"""
+    backlog = _refresh_skill_backlog(_vault_state_db())
+    out = _workspace_root() / "pipeline-workspace/skill-evolution/backlog.yaml"
     print(f"[OK] skill-mine: {len(backlog)} signatures -> {out}")
 
 

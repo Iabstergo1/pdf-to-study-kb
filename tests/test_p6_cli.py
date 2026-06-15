@@ -230,6 +230,9 @@ def test_lint_fail_blocks_rolls_back_and_queues(tmp_path):
     queue = list((vault / "Review-Queue").glob("note-lint-*.md"))
     assert len(queue) == 1 and "L1" in queue[0].read_text(encoding="utf-8")
     assert len(state_store.list_review_proposals(db, "note")) >= 1
+    # 自动 harvest：lint 失败即刷新 skill backlog（零-LLM，不必手敲 skill-mine；Claude/Codex 同生效）
+    backlog = tmp_path / "pipeline-workspace/skill-evolution/backlog.yaml"
+    assert backlog.exists() and "L1" in backlog.read_text(encoding="utf-8")
     # 坏页保持 proposed、index 不收录
     meta, _ = mdpage.read_page(vault / "domains/misc/lessons/bad.md")
     assert meta["status"] == "proposed"
