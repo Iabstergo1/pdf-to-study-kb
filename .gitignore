@@ -23,8 +23,6 @@ secrets.json
 # Local book workspaces and generated assets
 books/*
 !books/.gitkeep
-# Tracked sample source so a fresh clone is self-testable (README end-to-end example)
-!books/sample-binary-search/
 
 # Generated knowledge-base vault + local pipeline runtime state
 # (state db / staging / snapshots / query-sessions / reports; spec §3.3: snapshots 默认非 git)
