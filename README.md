@@ -93,7 +93,7 @@ python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yam
 
 第一次对话前，先初始化 vault 脚手架（若 agent 尚未自动建库，可直接说一句“初始化知识库”或手动跑 `python scripts/pipeline.py init-vault`），然后编辑 **`wiki/_meta/purpose.md`**：写下你的**学习目标、当前重点、偏好的讲解风格**（如应试导向 vs 研究导向、偏直觉 vs 偏推导、哪些章节是重点）。
 
-这是 `init-vault` 落下的空模板，也是**整个 vault 里唯一为你准备、需要你手写的文件**；`ingest` 写库时会读取它来调整产出。其余所有内容页都由模型生成，你都不用碰——填不填都能跑，但填了产出更贴合你的需求。
+这是 `init-vault` 落下的空模板，也是**整个 vault 里唯一为你准备、需要你手写的文件**；`ingest` 在 [输入阶段读取它](.claude/skills/ingest/SKILL.md)，作为**贯穿写页与综合层的全局写作偏好**（中断续跑时每个新会话会重新读取）。其余所有内容页都由模型生成，你都不用碰——填不填都能跑，但填了产出更贴合你的需求。
 
 ### ② 一句话入库（ingest）
 
