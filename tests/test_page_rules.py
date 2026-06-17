@@ -72,3 +72,15 @@ def test_unknown_page_type_raises():
 def test_overview_required_sections_l5():
     secs = page_rules.required_sections_for("overview")
     assert "## 核心概念地图" in secs and "## 推荐学习路线" in secs and "## 模型家族对比" in secs
+
+
+def test_katex_pipe_in_table_flags_unescaped_pipe():
+    # 表格单元格内公式含裸 |（如 \frac{|S|...}）→ 命中（会撕碎表格 / KaTeX 失败）
+    assert page_rules.katex_pipe_in_table(
+        "| 工具 | 公式 |\n|---|---|\n| 夏普里值 | $\\phi=\\frac{|S|!}{n!}$ |\n")
+    # 行内公式不在表格里（无结构性 |）→ 不报
+    assert page_rules.katex_pipe_in_table("正文里 $|S|$ 不在表格。\n") == []
+    # 表格内用 \lvert\rvert（无裸 |）→ 不报
+    assert page_rules.katex_pipe_in_table("| a | $\\lvert S\\rvert$ |\n") == []
+    # 表格内把 | 转义为 \| → 不报
+    assert page_rules.katex_pipe_in_table("| a | $x \\| y$ |\n") == []

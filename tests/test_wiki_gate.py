@@ -122,6 +122,32 @@ def test_build_index_only_published(tmp_path):
     assert (tmp_path / "index.generated.md").exists()
 
 
+def test_lint_formula_table_pipe(tmp_path):
+    # 表格单元格内公式含裸 | → 硬拦（fail-closed），任意页类型
+    _page(tmp_path, "domains/d/lessons/coop.md",
+          {"type": "lesson", "status": "proposed"},
+          "合作博弈核心工具，足够长的干净散文正文用来绕过空课检查再多写一些字凑够长度阈值：\n\n"
+          "| 工具 | 公式 |\n|---|---|\n| 夏普里值 | $\\phi=\\frac{|S|!}{n!}$ |\n")
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert any(v["rule"] == "formula-table-pipe" for v in vs)
+
+
+def test_lint_blocks_concept_without_synthesis(tmp_path):
+    # 阶段 E 强制（一等产物）：产出 concept 但无综合层页 → 阻断发布
+    _page(tmp_path, "domains/d/concepts/x.md",
+          {"type": "concept", "status": "proposed", "canonical_id": "concept.d.x",
+           "canonical_name": "X", "domain": "d"},
+          "# X\n\n## 一句话\n\nx\n\n## 直觉\n\nx\n\n## 形式化\n\nx\n\n"
+          "## 各章如何处理\n\nx\n\n## 与其他概念的关系\n\nx\n\n## 自测\n\n1?\n")
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert any(v["rule"] == "L7-synthesis-missing" for v in vs)
+    # 补一个 overview 综合页 → 该规则不再触发
+    _page(tmp_path, "overview.md", {"type": "overview", "status": "proposed"},
+          "# O\n\n## 核心概念地图\n\nx\n\n## 推荐学习路线\n\nx\n\n## 模型家族对比\n\nx\n")
+    vs2 = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert not any(v["rule"] == "L7-synthesis-missing" for v in vs2)
+
+
 def test_promote_flips_status(tmp_path):
     _page(tmp_path, "domains/d/lessons/a.md",
           {"type": "lesson", "status": "proposed"}, GOOD_LESSON)

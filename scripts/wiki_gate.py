@@ -85,6 +85,10 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
         # 公式邻接：公式重的 lesson 必须引用源页截图（spec §10）
         if ptype == "lesson" and "$$" in body and "![[" not in body:
             hit(rel, "formula-screenshot", "formula lesson lacks source-page screenshot embed")
+        # 表格内公式含未转义 `|`：会被当列分隔符撕碎公式 / KaTeX 渲染失败（任意页类型）
+        for snip in page_rules.katex_pipe_in_table(body):
+            hit(rel, "formula-table-pipe",
+                f"公式内未转义的 | 落在表格单元格（用 \\lvert\\rvert 或 \\| 或把公式移出表格）：{snip}")
         # L6 代理：lesson 去占位后过短 = 疑似空课/封面页产物（精确 L6 需源页映射，见 plan 取舍）
         if ptype == "lesson" and len(_PLACEHOLDER.sub("", body).strip()) < 80:
             hit(rel, "L6-empty-lesson", "lesson body too short (proxy for cover/blank/toc)")
@@ -94,6 +98,12 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
                 continue
             if not _link_exists(vault, target):
                 hit(rel, "broken-link", f"[[{target}]] not found")
+    # 综合层缺失（阶段 E 是一等产物，spec §3）：本批产出 concept 却无任何综合层页 → fail-closed
+    n_skip = concepts_without_synthesis(pages)
+    if n_skip:
+        hit("(synthesis-layer)", "L7-synthesis-missing",
+            f"本批产出 {n_skip} 个 concept 但无综合层页（overview/topic/comparison/synthesis）；"
+            "阶段 E 必做——至少更新 overview，再发布")
     # 重复 canonical_id（vault 级，阻断）
     _reg, errors, _warn = concept_store.build_registry(concept_store.scan_concept_pages(vault))
     for e in errors:

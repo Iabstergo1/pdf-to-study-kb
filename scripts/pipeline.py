@@ -579,11 +579,6 @@ def cmd_lint(args):
         shutil.rmtree(snap_dir)
     state_store.complete_stage(db, args.source, "lint", output_hash=ihash)
     print(f"[OK] lint passed: promoted {n} pages; index/registry/aliases rebuilt; source published")
-    skipped = wiki_gate.concepts_without_synthesis(proposed)
-    if skipped:
-        print(f"[warn] 本源产出 {skipped} 个 concept 但未更新综合层"
-              "（overview/topic/comparison/synthesis）——阶段 E 是一等产物，"
-              "建议补 overview 知识地图 / 对比 / 主题页后重跑 ingest 增量发布")
 
 
 def cmd_promotion_candidates(args):

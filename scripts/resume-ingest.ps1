@@ -58,7 +58,7 @@ if (Test-Path $lock) {
 New-Item -ItemType File -Path $lock -Force | Out-Null
 
 # 3) 唤起所选 agent 的 headless 续跑。被限额时本次非零退出、空转，下一次（复位后）成功。
-$prompt = '继续未完成的 ingest：读 pipeline-workspace/staging 下对应来源 digest.md 顶部的 "## ⏩ RESUME" 块、并跑 python scripts/pipeline.py next，从下一个未完成 window 接着逐窗跑到该来源 ingest 与 lint 全部完成。先设环境变量 PYTHONUTF8=1。遇问题直接修，不要等人确认。'
+$prompt = '继续未完成的 ingest：读 pipeline-workspace/staging 下对应来源 digest.md 顶部的 "## ⏩ RESUME" 块、并跑 python scripts/pipeline.py next，从下一个未完成 window 接着逐窗跑。逐窗写完后必须先做阶段 E 综合层（更新 overview + 按需建 topic/comparison/synthesis，并进某窗 --writes），再 ingest-done → lint——漏做 lint 会 L7-synthesis-missing 阻断。先设环境变量 PYTHONUTF8=1。遇问题直接修，不要等人确认。'
 switch ($Agent) {
     "claude" { $exe = "claude"; $invokeArgs = @("-p", $prompt, "--dangerously-skip-permissions") }
     "codex"  { $exe = "codex"

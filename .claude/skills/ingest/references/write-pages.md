@@ -48,3 +48,5 @@
 4. **含 `$$` 的 lesson 必须内嵌真实存在的源页 PNG** `![[assets/<src>/pXXXX.png]]`；非 needs_vision 页按需用 PyMuPDF 渲染。lesson 去占位后不得过短。
 5. **概念去重**：只经 resolve-concept，命中即 merge，绝不手建重复概念页（重复 canonical_id 阻断）。
 6. **归属（最易漏）**：无 `source:` frontmatter 的页（`topics/**`/`comparisons/**`/`synthesis/**`/`overview.md`）**必须在某 window 的 `window-done --writes` 里**，否则 fail-closed 判孤儿页阻断。
+7. **表格内公式不能含裸 `|`**：单元格里的 `$...$` 用 `\lvert S \rvert` 代替 `|S|`（或转义 `\|`，或把复杂公式移出表格放表下）——裸 `|` 会被当列分隔符撕碎公式、KaTeX 渲染失败（lint `formula-table-pipe` 硬拦）。
+8. **综合层（阶段 E）必做**：产出 concept 后必须更新 overview + 按需建 topic/comparison/synthesis（进 `--writes`），否则 lint `L7-synthesis-missing` 阻断。

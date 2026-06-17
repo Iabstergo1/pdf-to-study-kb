@@ -59,3 +59,28 @@ def required_sections_for(page_type: str) -> list[str]:
 def missing_sections(body: str, required: list[str]) -> list[str]:
     present = {ln.strip() for ln in body.splitlines() if ln.lstrip().startswith("#")}
     return [s for s in required if s not in present]
+
+
+# 表格单元格里的行内/块公式含未转义的 `|`：GFM 会把它当列分隔符，撕碎公式、KaTeX 无法渲染
+_MATH_SPAN = re.compile(r"\$\$.+?\$\$|\$[^$\n]+?\$")
+
+
+def katex_pipe_in_table(body: str) -> list[str]:
+    """检测 Markdown 表格行的单元格内，公式 $...$ / $$...$$ 含未转义的 `|`（如 \\frac{|S|...}）。
+    表格里裸 `|` 会被当成列分隔符，把公式拆进相邻列、KaTeX 渲染失败（spec §10 公式保真）。
+    修法：集合基数用 \\lvert S \\rvert 代替 |S|，或把 `|` 转义为 \\|，或把公式移出表格放下方。
+    返回命中行（截断 120 字）；空列表 = 无此问题。纯函数、无 I/O。"""
+    bad: list[str] = []
+    for line in body.splitlines():
+        spans = _MATH_SPAN.findall(line)
+        if not spans:
+            continue
+        # 该行剔除公式与行内代码后若仍含 `|`，即为表格行（存在结构性列分隔符）
+        masked = _INLINE_CODE.sub(" ", _MATH_SPAN.sub(" ", line))
+        if "|" not in masked:
+            continue
+        for span in spans:
+            if "|" in re.sub(r"\\\|", "", span):  # 去掉转义的 \| 后仍有裸 |
+                bad.append(line.strip()[:120])
+                break
+    return bad
