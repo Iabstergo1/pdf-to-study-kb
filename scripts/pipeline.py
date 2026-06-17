@@ -202,17 +202,39 @@ def _vault_dir() -> Path:
 
 
 def cmd_init_vault(args):
-    """建 wiki/ 脚手架（spec §4）+ overview/log/purpose 种子。幂等：已存在的文件/目录绝不覆盖。"""
+    """建 wiki/ 脚手架（spec §4）+ overview/log/purpose 种子 + Obsidian 图谱配置。
+    幂等：已存在的文件/目录绝不覆盖。Obsidian 配置随每库自动落地（任意领域通用），
+    让原生关系图按页面 type 着色、直接当导航入口——零 LLM、对任意来源生效。"""
+    import json
     vault = _vault_dir()
     for d in ["_meta", "domains", "concepts", "topics", "comparisons", "synthesis",
-              "sources", "assets", "Review-Queue"]:
+              "sources", "assets", "Review-Queue", ".obsidian"]:
         (vault / d).mkdir(parents=True, exist_ok=True)
+    # 关系图按 frontmatter type 着色（concept/topic/comparison/synthesis/source/overview）——
+    # 与具体领域无关；Obsidian 会忽略未知键、补齐缺省，故部分配置即可。
+    _graph_cfg = {
+        "showTags": False, "showAttachments": False, "hideUnresolved": True, "showOrphans": True,
+        "colorGroups": [
+            {"query": '["type":"overview"]', "color": {"a": 1, "rgb": 15054183}},
+            {"query": '["type":"topic"]', "color": {"a": 1, "rgb": 5214681}},
+            {"query": '["type":"comparison"]', "color": {"a": 1, "rgb": 10181558}},
+            {"query": '["type":"synthesis"]', "color": {"a": 1, "rgb": 10181558}},
+            {"query": '["type":"concept"]', "color": {"a": 1, "rgb": 5744499}},
+            {"query": '["type":"source"]', "color": {"a": 1, "rgb": 9806246}},
+        ],
+        "nodeSizeMultiplier": 1.3, "lineSizeMultiplier": 1,
+        "centerStrength": 0.3, "repelStrength": 12, "linkStrength": 1, "linkDistance": 250, "scale": 1,
+    }
     seeds = {
         "overview.md": (Path(__file__).resolve().parents[1] / "templates" / "overview.md"
                         ).read_text(encoding="utf-8"),
         "log.md": "# 操作日志（append-only：/ingest 与收尾 lint 各自追加）\n",
         "_meta/purpose.md": ("# 学习目标与偏好（用户维护）\n\n"
                              "<写下你的学习目标、当前重点、偏好的讲解风格——/ingest 会参考>\n"),
+        ".obsidian/graph.json": json.dumps(_graph_cfg, ensure_ascii=False, indent=2) + "\n",
+        ".obsidian/app.json": json.dumps(
+            {"propertiesInDocument": "hidden", "readableLineLength": True},
+            ensure_ascii=False, indent=2) + "\n",
     }
     for rel, content in seeds.items():
         target = vault / rel

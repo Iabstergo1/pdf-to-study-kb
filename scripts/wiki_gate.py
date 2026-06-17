@@ -43,6 +43,21 @@ def concepts_without_synthesis(pages: list[dict]) -> int:
     return n_concept if (n_concept and not has_synth) else 0
 
 
+# 概念多的源必须有 topic 主题页做分类层（扁平概念之上的导航）；阈值以下的小源不强制
+_TOPIC_THRESHOLD = 6
+
+
+def concept_heavy_without_topic(pages: list[dict]) -> int:
+    """阻断原语：本批产出 ≥_TOPIC_THRESHOLD 个 concept 却无任何 topic 页时返回 concept 数；否则 0。
+    概念去重后是扁平命名空间，分类靠 topic 页（按主题把概念聚起来）——概念多还不分组就发布，
+    用户只会看到一堆并列概念、无从导航（llm-wiki 通用模式：topic 页 + 图谱做分类，不靠文件夹）。
+    小源（<阈值）只有零散概念、无主题可聚属正常，不强制。"""
+    types = [p.get("meta", {}).get("type") for p in pages]
+    n_concept = sum(t == "concept" for t in types)
+    has_topic = any(t == "topic" for t in types)
+    return n_concept if (n_concept >= _TOPIC_THRESHOLD and not has_topic) else 0
+
+
 def belongs_to_source(rel_path: str, meta: dict, source_id: str, written: set[str]) -> bool:
     """页面归属判定（lint/promote 范围隔离）：本 source 的 window write_set 优先（覆盖
     topic/synthesis/overview 等无归属字段的页），其次 frontmatter 归属。"""
@@ -104,6 +119,12 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
         hit("(synthesis-layer)", "L7-synthesis-missing",
             f"本批产出 {n_skip} 个 concept 但无综合层页（overview/topic/comparison/synthesis）；"
             "阶段 E 必做——至少更新 overview，再发布")
+    # 分类层缺失：概念多却无 topic 主题页 → fail-closed（扁平概念之上的导航层）
+    n_flat = concept_heavy_without_topic(pages)
+    if n_flat:
+        hit("(topics)", "topics-missing",
+            f"本批产出 {n_flat} 个 concept 却无 topic 主题页（≥{_TOPIC_THRESHOLD} 概念须按主题聚成 topic 页做分类层）；"
+            "阶段 E 必做——把概念按主题分组")
     # 重复 canonical_id（vault 级，阻断）
     _reg, errors, _warn = concept_store.build_registry(concept_store.scan_concept_pages(vault))
     for e in errors:

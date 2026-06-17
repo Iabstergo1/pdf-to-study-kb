@@ -148,6 +148,27 @@ def test_lint_blocks_concept_without_synthesis(tmp_path):
     assert not any(v["rule"] == "L7-synthesis-missing" for v in vs2)
 
 
+def test_lint_blocks_concept_heavy_without_topic(tmp_path):
+    # ≥6 concept 却无 topic 主题页 → 阻断（扁平概念缺分类导航层）
+    CSEC = ("## 一句话\n\nx\n\n## 直觉\n\nx\n\n## 形式化\n\nx\n\n"
+            "## 各章如何处理\n\nx\n\n## 与其他概念的关系\n\nx\n\n## 自测\n\n1?\n")
+    for i in range(6):
+        _page(tmp_path, f"domains/d/concepts/c{i}.md",
+              {"type": "concept", "status": "proposed", "canonical_id": f"concept.d.c{i}",
+               "canonical_name": f"C{i}", "domain": "d"}, f"# C{i}\n\n{CSEC}")
+    # 加 overview 满足 L7（综合层有页），但仍缺 topic → 命中 topics-missing
+    _page(tmp_path, "overview.md", {"type": "overview", "status": "proposed"},
+          "# O\n\n## 核心概念地图\n\nx\n\n## 推荐学习路线\n\nx\n\n## 模型家族对比\n\nx\n")
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert any(v["rule"] == "topics-missing" for v in vs)
+    assert not any(v["rule"] == "L7-synthesis-missing" for v in vs)  # overview 已满足 L7
+    # 加一个 topic 页 → 不再触发
+    _page(tmp_path, "topics/t.md", {"type": "topic", "status": "proposed"},
+          "# T\n\n## 核心综合\n\nx\n\n## 各来源贡献\n\nx\n\n## 未解决问题\n\nx\n")
+    vs2 = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert not any(v["rule"] == "topics-missing" for v in vs2)
+
+
 def test_promote_flips_status(tmp_path):
     _page(tmp_path, "domains/d/lessons/a.md",
           {"type": "lesson", "status": "proposed"}, GOOD_LESSON)
