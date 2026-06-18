@@ -246,6 +246,99 @@ def cmd_init_vault(args):
     print(f"[OK] vault skeleton at {vault}")
 
 
+# 学习库观感 CSS snippet（零内容改动，纯 .obsidian 配置层）：给概念页六段式标题加色条/卡片感。
+# 不碰任何 md 内容，对现有页面立即生效。社区共识：好看 = 主题 + snippet + Style Settings + cssclasses。
+_STUDY_KB_SNIPPET = """\
+/* study-kb：知识库观感增强（由 `pipeline.py apply-obsidian-style` 落地，幂等可重跑）。
+   设计目标：把概念页六段式（一句话/直觉/形式化/各章如何处理/与其他概念的关系/自测）渲染成卡片感，
+   不改任何 md 内容、对全部已发布页立即生效。可在 Obsidian 设置→外观→CSS 片段里开关。 */
+
+/* 阅读视图：H2 小节加左色条 + 轻微背景，形成「卡片分段」观感 */
+.markdown-rendered h2 {
+  border-left: 3px solid var(--interactive-accent);
+  padding-left: 0.6em;
+  margin-top: 1.4em;
+}
+
+/* 正文行宽与行距：长概念页更易读 */
+.markdown-rendered p,
+.markdown-rendered li {
+  line-height: 1.7;
+}
+
+/* 行内代码 / KaTeX 公式块：轻边框，突出「形式化」节 */
+.markdown-rendered :not(pre) > code {
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+
+/* 表格（对比页差异维度）：表头底色 + 单元格内边距 */
+.markdown-rendered table thead {
+  background: var(--background-secondary);
+}
+.markdown-rendered table th,
+.markdown-rendered table td {
+  padding: 0.5em 0.8em;
+}
+
+/* 引用块（一句话 / 导航提示）：左色条加粗、背景更柔 */
+.markdown-rendered blockquote {
+  border-left: 4px solid var(--interactive-accent);
+  background: var(--background-secondary-alt);
+  border-radius: 0 6px 6px 0;
+}
+"""
+
+_SNIPPET_NAME = "study-kb"
+
+
+def cmd_apply_obsidian_style(args):
+    """落地学习库观感（纯 .obsidian 配置层，零内容改动，幂等）：
+    1) 写 wiki/.obsidian/snippets/study-kb.css（不存在才写，已存在保留）；
+    2) 安全 merge wiki/.obsidian/appearance.json 的 enabledCssSnippets，启用该 snippet，保留用户既有键。
+    与 init-vault 的"已存在不覆盖"语义解耦：本命令显式调用、专门改用户 Obsidian 偏好，故单列。"""
+    import json
+    vault = _vault_dir()
+    if not vault.exists():
+        raise SystemExit("no wiki/ vault yet；先跑 init-vault")
+    obs = vault / ".obsidian"
+    snippets = obs / "snippets"
+    snippets.mkdir(parents=True, exist_ok=True)
+
+    # 1) snippet：不存在才写（保留用户已自定义的同名 snippet）
+    snippet_path = snippets / f"{_SNIPPET_NAME}.css"
+    if not snippet_path.exists():
+        snippet_path.write_text(_STUDY_KB_SNIPPET, encoding="utf-8", newline="\n")
+        print(f"[OK] wrote .obsidian/snippets/{_SNIPPET_NAME}.css")
+    else:
+        print(f"[keep] .obsidian/snippets/{_SNIPPET_NAME}.css exists（不覆盖用户自定义）")
+
+    # 2) appearance.json：读取→合并→写回（保留用户既有键；已启用则幂等跳过）
+    app_path = obs / "appearance.json"
+    data = {}
+    if app_path.exists():
+        try:
+            data = json.loads(app_path.read_text(encoding="utf-8") or "{}")
+            if not isinstance(data, dict):
+                data = {}
+        except json.JSONDecodeError:
+            print("[warn] appearance.json 无法解析为 JSON，按空对象重建（已备份为 .bak）")
+            app_path.replace(app_path.with_suffix(".json.bak"))
+            data = {}
+    enabled = data.get("enabledCssSnippets")
+    if not isinstance(enabled, list):
+        enabled = []
+    if _SNIPPET_NAME in enabled:
+        print(f"[keep] appearance.json 已启用 snippet '{_SNIPPET_NAME}'（幂等跳过）")
+    else:
+        enabled.append(_SNIPPET_NAME)
+        data["enabledCssSnippets"] = enabled
+        app_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                            encoding="utf-8", newline="\n")
+        print(f"[OK] merged appearance.json：启用 snippet '{_SNIPPET_NAME}'（保留既有键）")
+    print("[OK] obsidian style applied（在 Obsidian 设置→外观→CSS 片段可开关；可另装 Minimal 主题增强）")
+
+
 def cmd_rebuild_registry(args):
     """从概念页 frontmatter 确定性重建 concepts/_registry.yaml + aliases.md（派生，勿手改）。"""
     import concept_store
@@ -846,6 +939,8 @@ def main():
         p = subparsers.add_parser(name, help=help_text)
         p.add_argument("--source", required=True, help="source_id")
     subparsers.add_parser("init-vault", help="建 wiki/ 脚手架 + overview/log/purpose 种子（幂等）")
+    subparsers.add_parser("apply-obsidian-style",
+                          help="落地学习库观感 CSS snippet + merge appearance.json（幂等，纯配置层零内容改动）")
     subparsers.add_parser("rebuild-registry", help="从概念页 frontmatter 重建 _registry.yaml + aliases.md")
     wop = subparsers.add_parser("workorder", help="生成 source 级 ingest work order")
     wop.add_argument("--source", required=True)
@@ -929,6 +1024,7 @@ def main():
         'windows': cmd_windows,
         'fail': cmd_fail,
         'init-vault': cmd_init_vault,
+        'apply-obsidian-style': cmd_apply_obsidian_style,
         'rebuild-registry': cmd_rebuild_registry,
         'workorder': cmd_workorder,
         'reopen': cmd_reopen,

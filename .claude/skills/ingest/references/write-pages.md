@@ -17,7 +17,7 @@
 | **U4 起草** | 归一结果 + 本窗文本 | `status: proposed` 页（模板必需小节齐） | frontmatter 合规、小节不缺 | vault（proposed） | check-write DENY |
 | **U5 自检** | 起草页 | page_rules 自检结果 | **0 违规**才进 U6 | — | 自检不过→修，不记账 |
 | **U6 记账** | 写过的页 | `window-done --writes '[...]'` | 非 source 页**全部**在 --writes | `ingest_progress` | 漏记→孤儿页 |
-| **U7 digest** | 本窗要点 | 追加 `digest.md` + 刷新顶部 `## ⏩ RESUME` 块 | 含新概念/未决线索；RESUME 指向下一窗 | `staging/<src>/digest.md` | — |
+| **U7 digest** | 本窗要点 | 滚动维护 `digest.md`（保留最近 8 窗详情 + 旧窗折叠章节摘要）+ 刷新顶部 `## ⏩ RESUME` 块 | 含新概念/未决线索；RESUME 指向下一窗；digest 不无限膨胀 | `staging/<src>/digest.md` | — |
 
 子单元命令细节：
 - U1：`python scripts/pipeline.py window-start --source <src> --window <id> --hash <窗 sha 或 char 范围串>`；
@@ -26,7 +26,8 @@
 - U3：`python scripts/pipeline.py resolve-concept --mention "<提及>" --domain <domain> [--alias "<英文名>"] --ref-source <src> --ref-sections "<5.2>"`，编辑它返回的页填充正文。
 - U5：自检原语 `scripts/page_rules.py`（见下「lint 硬规则」）。
 - U6：`python scripts/pipeline.py window-done --source <src> --window <id> --writes '["<写过的页>"]'`（失败改 `window-fail --error "<原因>"`）。
-- U7：每窗收尾把 `digest.md` **顶部**的 `## ⏩ RESUME` 块刷新（断点续跑锚点；SessionStart hook `scripts/resume_hint.py` 会在 compact/resume 时自动注入它，让上下文上限或订阅限额中断后能续）。该块以 `## ⏩ RESUME` 开头、到下一个 `## ` 结束，至少含：**进度**（已完成窗 + 下一个窗 id 及其 `--hash`）、**续跑步骤**（`ingest-start` 幂等会报 resumed → 逐窗 `window-start → show-window → 写页 → window-done`）、**写页纪律一行**（概念走 resolve-concept、wikilink 全路径、解释器与 `PYTHONUTF8=1`）。全源完成后把标题改成 `## ✅ 已完成` 以免误导续跑。这是让"中断后可续"对任意来源都生效的关键，别省。
+- U7：每窗收尾把 `digest.md` **顶部**的 `## ⏩ RESUME` 块刷新（断点续跑锚点；中断后说“继续”或由 `scripts/resume-ingest.ps1` 续跑时，靠 digest RESUME 块 + `pipeline.py next` 重新定位到下一窗——这对 Claude / Codex 都是机器可读锚点，不依赖任何会话级 hook）。该块以 `## ⏩ RESUME` 开头、到下一个 `## ` 结束，**保持精简**，至少含：**进度**（已完成窗 + 下一个窗 id 及其 `--hash`）、**续跑步骤**（`ingest-start` 幂等会报 resumed → 逐窗 `window-start → show-window → 写页 → window-done`）、**写页纪律一行**（概念走 resolve-concept、wikilink 全路径、解释器与 `PYTHONUTF8=1`）——**不要把完整窗口日志塞进 RESUME 块**。全源完成后把标题改成 `## ✅ 已完成` 以免误导续跑。这是让"中断后可续"对任意来源都生效的关键，别省。
+  - **digest 滚动纪律（防上下文膨胀，无人值守续跑尤其依赖）**：窗口日志区**只保留最近 8 个 window 的逐窗详情**；更早的窗**折叠为章节级摘要**（每章一行，如「第 1–4 章 ✅（要素/工具/经典/进阶，详见已发布概念页）」），不再逐窗罗列。每写完一窗，把滑出最近 8 窗范围的旧窗压进章节摘要。目标：digest 体积随章节数线性、而非随窗数无界增长。
 
 ## 阶段 D：写页纪律（每一笔写入都适用）
 

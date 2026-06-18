@@ -36,6 +36,7 @@ LLM 能力 = `.agents/skills/{ingest,kb-query,kb-save,kb-review,kb-qa,wiki-lint-
 
 - **同一时刻同一 vault 只允许一个 ingest**（`source_locks` 强制）。Codex 与 Claude Code **不得同时对同一库 ingest**；崩溃残留锁用 `python scripts/pipeline.py unlock` 回收。
 - **共享 CLI 是唯一契约**：两 agent 都只调 `scripts/pipeline.py`，**业务逻辑只改这里**，不在各自 skill 里重复实现；改了 CLI 行为要保证两边 skill 仍一致。
+- **续跑锚点 = `pipeline.py next` + digest `## ⏩ RESUME` 块**（不依赖任何会话级 hook）：中断后（上下文压缩 / 模型不可用）说“继续”或由 `scripts/resume-ingest.ps1`（OS 定时器触发，prompt 自带定位逻辑）续跑，都从下一个未完成 window 接上。两 agent 的**共享契约始终是 `pipeline.py` + `digest.md`（含 RESUME 块）+ 字节对等的 skill 双树**，对 Codex / Claude 一致。
 - **解释器统一用项目指定的 `study-kb` conda 环境**（`conda create -n study-kb python=3.12` 后安装 `requirements.txt`：PyMuPDF / PyYAML / pytest，route B 无重型 OCR 后端）；**请勿改用其他解释器**。
 - **生成物非 git**：`wiki/`、`pipeline-workspace/` 已 gitignore，不提交——它们是每机运行时状态。
 
