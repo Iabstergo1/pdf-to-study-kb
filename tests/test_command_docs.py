@@ -63,6 +63,13 @@ def test_ingest_skill_synthesis_duties():
         assert must in text, f"ingest 缺综合层职责要素: {must}"
 
 
+def test_ingest_skill_whole_book_chapter_map_and_typed_embed():
+    # Stage 2/3：全书理解（chapters.json 章节图/导航脊柱）+ 按类型嵌入原图（图/表/公式）须在 ingest 协议里
+    text = _skill_all("ingest")
+    for must in ["chapters.json", "全书", "按类型", "vector-figure", "导航脊柱"]:
+        assert must in text, f"ingest 缺 Stage2/3 协议要素: {must}"
+
+
 def test_ingest_skill_split_into_references():
     # 工程标准：复杂 skill 主文件做编排，阶段细节拆到 references/*.md
     refs = SKILLS / "ingest" / "references"

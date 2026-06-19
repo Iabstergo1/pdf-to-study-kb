@@ -5,9 +5,18 @@
 `python scripts/pipeline.py ingest-start --source <src>`：取 vault 锁 + 校验 stale registry。
 若中止，按提示重新生成 work order，**不要绕过**。
 
+## 阶段 C 前置：先建立全书理解（`chapters.json` = 确定性章节图 / 导航脊柱）
+
+逐窗写页前，先读 `staging/<src>/chapters.json`——它由 `source-convert` 据 PDF 书签**确定性**产出（每章 `chapter_id` + 页范围，**章节图由 CLI 划定并 sha256 冻结，不是 LLM 划的**；md 源退化为整书一章）。它是本源的**全书地图**：
+
+- **先通读章节图**，对每章判断"哪些概念值得深写、哪些一句话带过"，把它当逐章深写的**共享上下文**。这是治"简陋"的关键——LLM 在整本书的结构里写，而非从孤立的 2000-token 碎片里硬凑。
+- **按章组织写作**：windows 仍是**确定性读取与记账单元**（`window-done --writes` 不变，操作真值留在窗级），但**按 window 覆盖页落在哪一章、以章序推进**——同章的窗连续写完再进下一章。窗→章用 `source.md` 的 `<!-- page N -->` 标记对应章页范围。
+- **续跑锚点**：中断后重读 `chapters.json` + digest `## ⏩ RESUME` 块，定位到下一章未完成的窗；章节图可由 CLI 确定性重放，LLM 不另行划分，只用它当共享上下文。
+- overview 的「核心概念地图」与 topic 划分**跟随章节图**（见阶段 E）。
+
 ## 阶段 C：逐窗子单元（rolling digest，长源外部记忆）
 
-对 `staging/<src>/windows.jsonl` 每个 window（window_id 升序），按 U1–U7 推进。**每个子单元有产出 + 验收 + 持久化**，不再是一段「读窗写页」。
+对 `staging/<src>/windows.jsonl` 每个 window（window_id 升序、**按章序**），按 U1–U7 推进。**每个子单元有产出 + 验收 + 持久化**，不再是一段「读窗写页」。
 
 | 子单元 | 输入 | 产出 | 验收 | 持久化 | 停止点 |
 |---|---|---|---|---|---|
@@ -36,7 +45,11 @@
 - **所有新建/修改页 frontmatter 一律 `status: proposed` + `managed_by: pipeline`**；模板见 `templates/`，必需小节不可缺。
 - **概念只走 resolve-concept**（命中合并、绝不新建重复页）；别名只写概念页 frontmatter `aliases:`。
 - **派生文件绝不手写**：`concepts/_registry.yaml`、`aliases.md`、`index.generated.md` 由收尾 CLI 重建。
-- **公式保真（route B 必走）**：凡内容来自 `needs_vision` 公式风险页，无论写进 concept 还是 lesson，都必须在公式旁内嵌该页源图 `![[assets/<src>/pXXXX.png]]`——PyMuPDF 抽的公式文本会失真，源图是唯一保真背书。（lesson 含 `$$` 缺图由 lint 硬拦；concept 同样别省，把源图放进「形式化」节。）
+- **非文本内容以原图为准（route B 必走，按类型分轨）**：凡内容来自 `needs_vision` 难页（`pages.jsonl` 的 `needs_vision_reason` 标明 formula / formula-borderline / vector-figure / table / caption），都必须内嵌该页源图 `![[assets/<src>/pXXXX.png]]`，并**按类型**处理：
+  - **公式页**（formula / formula-borderline）：写完整 KaTeX **并**在旁内嵌源图——纯文本会拍平上/下标与分数（lesson 含 `$$` 缺图由 lint 硬拦；concept 把源图放进「形式化」节，别省）。
+  - **图页**（vector-figure / 带图标题的 caption）：**不要凭文字重画图**——直接内嵌原图，正文只讲它在说什么、怎么读（LLM 重绘矢量图/流程图不可靠，原图才是保真背书）。
+  - **表页**（table）：尽量转成 markdown 表保可搜索 / 可链接，**并**内嵌源图供核对；复杂或无框线表以原图为准。
+  - 原则：**LLM 擅长理解、组织、讲解；非文本对象的忠实复刻交给原始像素**——把 LLM 自身不确定性带来的失真降到最低，不过度改写原文。
 - **链接克制（防关系图噪声）**：wikilink 只连"真实强关系"（谁依赖/推广/对比/特例化谁），别建"什么都链"的中心化 hub——`sources/<src>.md`、`overview.md` 等汇总页只挑核心几个概念做 wikilink、其余用普通文本带过；概念页「与其他概念的关系」只列确有逻辑关联的，不为凑数互链。
 - **深度（别退化成摘要）**：每个 concept 至少含一个 worked example 或关键推导步骤（不止下定义）；lesson 给可操作细节、worked example 而非章节复述。空泛摘要式页面视作未完成。
 - 追加 `log.md`：`## [YYYY-MM-DD] ingest | <src> | <created/updated 页列表>`（append-only）。

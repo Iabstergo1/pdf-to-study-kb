@@ -15,7 +15,7 @@
 
 ```text
 ingest skill 编排预处理（零 LLM）：add-source → profile → source-convert → windows → workorder
-   ↓ 同一会话（唯一 LLM）：读 source.md/难页图 → 写 status:proposed 页 + 概念归一 + 综合层
+   ↓ 同一会话（唯一 LLM）：读 chapters.json 全书章节图 + source.md/难页图 → 按章写 status:proposed 页（难页按类型嵌原图）+ 概念归一 + 综合层
    ↓ 同一会话收尾（零 LLM）：确定性 lint → promote(proposed→published) 或 回滚+Review-Queue → 重建 index/registry/aliases
 ```
 
