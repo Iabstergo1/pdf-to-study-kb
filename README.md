@@ -81,7 +81,7 @@ python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yam
 
 > [!NOTE]
 > 必需依赖只有 **PyMuPDF + PyYAML**（见 [`requirements.txt`](requirements.txt)）。
-> 公式保真走 route B：`source-convert` 用 PyMuPDF 抽文本，公式风险页渲染整页 PNG，由 ingest **读图写 KaTeX** 保真。不依赖任何重型 OCR/ML 后端。
+> 视觉保真走 route B：`source-convert` 用 PyMuPDF 抽文本，**难页（公式 / 矢量图 / 表 / 图表标题）高召回渲染整页 PNG**，由 ingest **读图**保真（公式写 KaTeX）。不依赖任何重型 OCR/ML 后端。
 
 ---
 
@@ -294,7 +294,7 @@ wiki/
 ├── comparisons/         # 横向对比页：多个并列对象同页比差异维度
 ├── synthesis/           # 深度综合/结晶化
 ├── sources/             # 所有来源摘要（统一台账）
-├── assets/<src>/        # 源页截图：公式风险页(needs_vision)整页 PNG，供 route B 读图
+├── assets/<src>/        # 源页截图：难页(needs_vision:公式/矢量图/表/图表标题)整页 PNG，供 route B 读图
 ├── Review-Queue/        # 未过门禁 / 需人工决策的 proposal
 ├── overview.md          # living synthesis，vault 入口（ingest 维护）
 ├── index.generated.md   # 内容目录（派生，只收录 published；首次 ingest 后出现）
@@ -316,7 +316,7 @@ wiki/
 | `comparisons/` | ingest（LLM） | 把同一主题下**多个并列对象放一页做横向对比**（按差异维度），避免比较点散落各页。 |
 | `synthesis/` | ingest（LLM） / `kb-save` | 深度综合、结论结晶化的页面。 |
 | `sources/` | ingest（LLM） | 每个来源一页摘要，作为“来过哪些书”的统一台账。 |
-| `assets/<src>/` | **`source-convert` 渲染并同步**（零 LLM） | 把被判定为**公式 / 排版风险页（`needs_vision`）**的源页整页渲成 PNG，供 ingest 读图把公式写成 KaTeX（route B）。**因此这里出现的图，正是该来源里上 / 下标、分数等在纯文本抽取下会失真的那些页**——数量、页码随每本书的公式密度而不同，由确定性判定自动选出，无需人工指定。 |
+| `assets/<src>/` | **`source-convert` 渲染并同步**（零 LLM） | 把被判定为**难页（`needs_vision` 高召回：公式 / 矢量图 / 表 / 图表标题）**的源页整页渲成 PNG，供 ingest 读图保真（route B）。**因此这里出现的图，正是纯文本抽取会失真或根本看不见的那些页**（拍平的公式、矢量绘制的图、无框线表）——由确定性视觉信号（`get_drawings`/`find_tables`/标题正则）自动选出，`pages.jsonl` 记 `needs_vision_reason`，无需人工指定。 |
 | `Review-Queue/` | 收尾 lint 失败时写入 | 未过门禁 / 需人工决策的 proposal；你用 `/kb-review` 逐条处置。 |
 | `index.generated.md` · `aliases.md` | 收尾 CLI 从 frontmatter **派生重建**（首次 ingest 后出现） | 内容目录 / 别名视图，只收录 `published`。**派生文件，手改会被下次收尾覆盖**。 |
 
@@ -330,7 +330,7 @@ wiki/
 
 - 把 **PDF / Markdown** 教材、讲义、论文、技术报告编成按概念导航、跨领域互联的学习知识库
 - 多本书**跨领域合并**：同名概念去重合并，长期增量积累、越长越互联
-- 公式较多的理工 / 经管材料：公式风险页渲整页 PNG，由 LLM 读图写 KaTeX 保真
+- 公式 / 图表较多的理工 / 经管材料：难页（公式 / 矢量图 / 表 / 标题）渲整页 PNG，由 LLM 读图保真（公式写 KaTeX）
 - **概念 / 主题为主**的二次组织（而非线性翻译原文）
 
 ### 暂不适用

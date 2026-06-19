@@ -42,7 +42,7 @@ LLM 能力 = `.agents/skills/{ingest,kb-query,kb-save,kb-review,kb-qa,wiki-lint-
 
 ## 6. 真实能力边界（开工前知悉）
 
-- **公式保真（route B：读图兜底）**：PDF 经 PyMuPDF 抽纯文本，上/下标/分数会拍平失真；`source-convert` 把每个公式风险页（`needs_vision`）渲染为整页 PNG，由 ingest 时 LLM **读图写 KaTeX** 保真（lint 硬规则强制 lesson 内嵌源图）。**不依赖任何重型 OCR/ML 后端**（marker/surya 已评估并移除：在约 4GB 显存的 GPU 上约 4.5 分钟/页，速度过慢；大显存机器可另行接入）。
+- **视觉保真（route B：读图兜底）**：PDF 经 PyMuPDF 抽纯文本，会拍平上/下标/分数、且看不见矢量图与无框线表；`source-convert` 把每个难页（`needs_vision` 高召回判定：公式页 / 矢量图页[`get_drawings`] / 表格页[`find_tables`] / 图表标题页）渲染为整页 PNG，由 ingest 时 LLM **读图**保真（公式写 KaTeX；lint 硬规则强制 lesson 内嵌源图），`pages.jsonl` 记 `needs_vision_reason` 可审计。**不依赖任何重型 OCR/ML 后端**（marker/surya 已评估并移除：在约 4GB 显存的 GPU 上约 4.5 分钟/页，速度过慢；大显存机器可另行接入）。
 - **格式覆盖**：`pdf`/`md` 已端到端打通；`docx`/`pptx` 适配器为后续期。
 - **每本书的入库都是一次需付费的 LLM 操作**，并非导入即用；项目交付时为空库，内容通过运行 ingest 逐步生成。
 - **lint 硬规则**：wikilink 必须全 vault 相对路径（非 Obsidian basename）、必需小节标题逐字、非 source 页（topic/comparison/synthesis/overview）必须进某 window 的 `--writes` 记账——见 ingest skill 阶段 D 速查；未遵守将被门禁拦截。

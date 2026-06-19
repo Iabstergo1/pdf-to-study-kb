@@ -17,6 +17,6 @@
 ## 验收（进入阶段 B 前必须满足）
 
 - `workorder.yaml` 已生成，`write_scope` 覆盖 `domains/<domain>/**` 等。
-- **needs_vision 合理**：`source-convert` 输出的难页数不应为 0（公式书应有若干公式页被标记）；为 0 且源含公式则可疑，复核。
-- **公式风险页（route B）**：`source-convert` 对公式风险页打 `[info]`——纯文本已把上/下标拍平，每页渲整页 PNG 供 ingest 读图写 KaTeX 保真。确认难页 PNG 已生成即可（不依赖任何 OCR/ML 后端）。
+- **needs_vision 合理**：`source-convert` 输出的难页数不应为 0（含公式 / 图表的书应有若干页被标记）；为 0 且源含公式或插图则可疑，复核。
+- **难页（route B）**：`source-convert` 对难页（公式 / 矢量图 / 表 / 图表标题，高召回）打 `[info]`——纯文本会拍平上/下标、且看不见矢量图与无框线表，每页渲整页 PNG 供 ingest 读图保真。确认难页 PNG 已生成、`pages.jsonl` 有 `needs_vision_reason` 即可（不依赖任何 OCR/ML 后端）。
 - **windows 覆盖**：`windows.jsonl` 的 char 范围应覆盖 `source.md` 全文（无大段漏读）。
