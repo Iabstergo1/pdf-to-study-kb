@@ -108,3 +108,45 @@ def test_text_pdf_backend_or_skips_when_pymupdf_missing(tmp_path):
     md = (out_dir / "source.md").read_text(encoding="utf-8")
     assert "Hello PDF" in md
     assert res["pages"][0]["page"] == 1
+
+
+# --- Stage 1 高召回 needs_vision(矢量图/表/标题/边缘公式)+ 可审计 reason ---
+
+def test_vector_figure_flagged_by_drawings():
+    # 矢量图页:无公式、无内嵌栅格图,但矢量路径多(反应函数图/流程图)
+    page = {"text_len": 800, "formula_symbols": 0, "image_count": 0, "n_draw": 30, "n_tables": 0}
+    assert source_profile.needs_vision(page) is True
+    assert "vector-figure" in source_profile.needs_vision_reasons(page)
+
+
+def test_table_page_flagged():
+    page = {"text_len": 800, "formula_symbols": 0, "image_count": 0, "n_draw": 0, "n_tables": 1}
+    assert source_profile.needs_vision(page) is True
+    assert "table" in source_profile.needs_vision_reasons(page)
+
+
+def test_caption_page_flagged():
+    # 图标题命中(get_drawings 漏的小图靠标题兜)
+    p = source_profile.profile_page(5, "图 4.1 古诺均衡的反应函数图解\n正文若干。", image_count=0)
+    assert p["has_caption"] is True
+    assert p["needs_vision"] is True
+    assert "caption" in p["needs_vision_reason"]
+
+
+def test_subthreshold_formula_now_flagged():
+    # 旧阈值 12 漏掉的 6-11 区间真公式页,现按 >=6 召回
+    page = {"text_len": 800, "formula_symbols": 8, "image_count": 0, "n_draw": 0, "n_tables": 0}
+    assert source_profile.needs_vision(page) is True
+
+
+def test_plain_text_with_header_rules_not_flagged():
+    # 纯文字页只有页眉/页脚线(少量 draw)+ 无表无标题 → 不截(治旧面积信号假阳)
+    page = {"text_len": 900, "formula_symbols": 1, "image_count": 0, "n_draw": 6, "n_tables": 0}
+    assert source_profile.needs_vision(page) is False
+
+
+def test_reason_recorded_in_profile_page():
+    p = source_profile.profile_page(1, "纯散文一段,没有公式。", image_count=0)
+    assert p["needs_vision"] is False
+    assert p["needs_vision_reason"] == []
+    assert {"n_draw", "n_tables", "has_caption", "is_code"} <= set(p.keys())

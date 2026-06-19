@@ -15,7 +15,7 @@ import re
 # 确定性 profiler 版本：needs_vision/公式信号启发式每次实质改动就 +1。
 # 折进 profile/convert 阶段的 input_hash，使启发式升级自动失效缓存、强制对任意来源重算
 # （否则 should_run_stage 只看 PDF sha，改了启发式也会 [skip]）。v2: 强/弱信号分层 + 代码页抑制。
-PROFILER_VERSION = "2"
+PROFILER_VERSION = "3"  # v3: 高召回视觉信号(get_drawings/find_tables/caption) + reason 审计;丢弃面积信号。
 
 # 强信号：非 ASCII 数学符号 + 希腊字母 + Unicode 上/下标 + 真减号（U+2212）。
 _MATH_STRONG = re.compile(
@@ -30,6 +30,9 @@ _W_DOLLAR = re.compile(r"\$[^$\n]{1,60}\$")     # 行内 $…$
 _W_CARET = re.compile(r"\^")                    # 裸上标符
 _W_LATEX = re.compile(r"\\[A-Za-z]{2,}")        # \alpha \frac \sum
 _W_SUBVAR = re.compile(r"[A-Za-zα-ωΑ-Ω][0-9](?![0-9A-Za-z])")  # 下标变量 q1 R1 π1
+
+# 图/表标题：get_drawings 漏的小图靠标题兜底（图4.1 / 表2 / Figure 3 / Table 1）。
+_CAPTION = re.compile(r"(?:图|表)\s*\d+(?:[.\-]\d+)?|(?:Figure|Fig\.|Table)\s*\d+", re.IGNORECASE)
 
 # 代码页指纹：REPL 提示符、转义序列、十六进制字面量、Python 关键字/内建常量。
 _CODE_HINT = re.compile(
@@ -53,24 +56,62 @@ def count_formula_symbols(text: str) -> int:
     return strong + weak
 
 
+def has_caption(text: str) -> bool:
+    return bool(_CAPTION.search(text))
+
+
+def visual_signals(page) -> dict:
+    """从 fitz page 取确定性视觉信号（零 ML）：矢量路径数 / 表格数 / 内嵌栅格图数。
+    全部 try/except 兜底：任一信号失败按 0 计，绝不让 profile 崩。"""
+    try:
+        n_draw = len(page.get_drawings())
+    except Exception:
+        n_draw = 0
+    try:
+        n_tables = len(page.find_tables().tables)
+    except Exception:
+        n_tables = 0
+    try:
+        image_count = len(page.get_images())
+    except Exception:
+        image_count = 0
+    return {"n_draw": n_draw, "n_tables": n_tables, "image_count": image_count}
+
+
+def needs_vision_reasons(page: dict) -> list:
+    """高召回：任一视觉/公式信号命中即返回原因（可审计）。
+    代价不对称——漏页不可恢复，多截近乎零成本，故偏召回。"""
+    reasons = []
+    f = page.get("formula_symbols", 0)
+    if f >= 12:
+        reasons.append("formula")
+    elif f >= 6 and not page.get("is_code", False):
+        reasons.append("formula-borderline")
+    if page.get("text_len", 0) < 50 and page.get("image_count", 0) >= 1:
+        reasons.append("scanned-or-image")
+    if page.get("n_draw", 0) >= 12:          # 阈值据实测：真图 13-37，纯文字页页眉线 2-6
+        reasons.append("vector-figure")
+    if page.get("n_tables", 0) >= 1:
+        reasons.append("table")
+    if page.get("has_caption", False):
+        reasons.append("caption")
+    return reasons
+
+
 def needs_vision(page: dict) -> bool:
-    """难页：公式符号密集 / 文本过短且有图（疑似扫描或图密集）。"""
-    text_len = page.get("text_len", 0)
-    formula = page.get("formula_symbols", 0)
-    images = page.get("image_count", 0)
-    if formula >= 12:
-        return True
-    if text_len < 50 and images >= 1:
-        return True
-    return False
+    """难页：任一信号命中即需视觉（route B 读图）。"""
+    return bool(needs_vision_reasons(page))
 
 
-def profile_page(page_number: int, text: str, image_count: int) -> dict:
+def profile_page(page_number: int, text: str, image_count: int,
+                 *, n_draw: int = 0, n_tables: int = 0) -> dict:
     text_len = len(text.strip())
     formula = count_formula_symbols(text)
     p = {"page": page_number, "text_len": text_len, "formula_symbols": formula,
-         "image_count": image_count}
-    p["needs_vision"] = needs_vision(p)
+         "image_count": image_count, "n_draw": n_draw, "n_tables": n_tables,
+         "is_code": looks_like_code(text), "has_caption": has_caption(text)}
+    p["needs_vision_reason"] = needs_vision_reasons(p)
+    p["needs_vision"] = bool(p["needs_vision_reason"])
     return p
 
 
@@ -83,8 +124,12 @@ def profile_source(src_path, *, fmt: str) -> list[dict]:
     if fmt == "pdf":
         import fitz  # PyMuPDF（已装）
         doc = fitz.open(str(src))
-        pages = [profile_page(i + 1, doc[i].get_text(), image_count=len(doc[i].get_images()))
-                 for i in range(len(doc))]
+        pages = []
+        for i in range(len(doc)):
+            page = doc[i]
+            sig = visual_signals(page)
+            pages.append(profile_page(i + 1, page.get_text(), image_count=sig["image_count"],
+                                      n_draw=sig["n_draw"], n_tables=sig["n_tables"]))
         doc.close()
         return pages
     raise ValueError(f"no P1 profile backend for fmt={fmt}")
