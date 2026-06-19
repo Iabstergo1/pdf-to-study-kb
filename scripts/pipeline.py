@@ -128,6 +128,7 @@ def cmd_source_convert(args):
         res = source_convert.convert(raw, out_dir=out, fmt=src_row["format"])
         # pages.jsonl 已由 profile 阶段产出；convert 内部用同一批纯函数复算 needs_vision，结果一致
         state_store.record_artifact(db, args.source, kind="source_md", path=res["source_md"], sha256=res["sha256"])
+        state_store.record_artifact(db, args.source, kind="chapters", path=res["chapters_path"], sha256=res["chapters_sha"])
         n_assets = _sync_assets(args.source)  # 难页 PNG 入 vault（公式嵌图依赖；任意源通用）
         state_store.complete_stage(db, args.source, "converted", output_hash=res["sha256"])
         print(f"[OK] converted → {res['source_md']} (needs_vision pages: {res['needs_vision_pages']}; "

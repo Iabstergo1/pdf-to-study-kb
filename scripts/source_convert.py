@@ -9,12 +9,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 import importlib.util as _ilu
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import source_profile
+import chaptering
 
 class BackendUnavailable(RuntimeError):
     pass
@@ -25,31 +27,39 @@ def _sha256_text(s: str) -> str:
 
 
 def convert(src_path, *, out_dir, fmt: str) -> dict:
-    """返回 {source_md, sha256, assets_dir, pages:[profile...], needs_vision_pages:[int...]}。"""
+    """返回 {source_md, sha256, assets_dir, pages, needs_vision_pages, chapters, chapters_path, chapters_sha}。"""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     assets_dir = out_dir / "assets"
     if fmt == "md":
-        md, pages = _convert_markdown(Path(src_path))
+        md, pages, chapters = _convert_markdown(Path(src_path))
     elif fmt == "pdf":
-        md, pages = _convert_pdf_text(Path(src_path), assets_dir)
+        md, pages, chapters = _convert_pdf_text(Path(src_path), assets_dir)
     else:
         raise BackendUnavailable(f"no P1 backend for fmt={fmt} (docx/pptx 适配器后续期实现)")
     source_md = out_dir / "source.md"
     source_md.write_text(md, encoding="utf-8")
+    # 确定性章节计划（Stage 2 锚点）：与 source.md 同步落盘，由 record_artifact 以 sha256 冻结。
+    chapters_json = json.dumps(chapters, ensure_ascii=False, indent=2)
+    chapters_path = out_dir / "chapters.json"
+    chapters_path.write_text(chapters_json, encoding="utf-8")
     return {
         "source_md": str(source_md),
         "sha256": _sha256_text(md),
         "assets_dir": str(assets_dir),
         "pages": pages,
         "needs_vision_pages": [p["page"] for p in pages if p.get("needs_vision")],
+        "chapters": chapters,
+        "chapters_path": str(chapters_path),
+        "chapters_sha": _sha256_text(chapters_json),
     }
 
 
 def _convert_markdown(src: Path):
     text = src.read_text(encoding="utf-8")
     pages = [source_profile.profile_page(1, text, image_count=0)]
-    return text, pages
+    chapters = chaptering.chapters_from_toc([], n_pages=1)  # md 无 TOC → 整书一章（窗口仍按标题切读）
+    return text, pages, chapters
 
 
 def _convert_pdf_text(src: Path, assets_dir: Path):
@@ -70,6 +80,7 @@ def _convert_pdf_text(src: Path, assets_dir: Path):
             assets_dir.mkdir(parents=True, exist_ok=True)
             pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
             pix.save(str(assets_dir / f"p{i + 1:04d}.png"))
+    chapters = chaptering.chapters_from_toc(doc.get_toc(), len(doc))  # 确定性章节单元（取自 PDF 书签）
     doc.close()
     n_vision = sum(1 for p in pages if p.get("needs_vision"))
     if n_vision:
@@ -77,4 +88,4 @@ def _convert_pdf_text(src: Path, assets_dir: Path):
               f"已渲染整页 PNG（assets/pXXXX.png），由 ingest 读图保真（route B）。"
               f"纯文本抽取会拍平上/下标与分数、且看不见矢量图与无框线表，故以源图为准。",
               file=sys.stderr)
-    return "".join(parts).strip() + "\n", pages
+    return "".join(parts).strip() + "\n", pages, chapters

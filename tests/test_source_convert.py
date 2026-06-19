@@ -152,6 +152,36 @@ def test_reason_recorded_in_profile_page():
     assert {"n_draw", "n_tables", "has_caption", "is_code"} <= set(p.keys())
 
 
+def test_pdf_chapters_from_toc_emitted(tmp_path):
+    # convert 应据 PDF 书签目录产出确定性章节计划 chapters.json
+    import importlib.util as u
+    if u.find_spec("fitz") is None:
+        import pytest; pytest.skip("pymupdf not installed")
+    import fitz
+    src = tmp_path / "book.pdf"
+    doc = fitz.open()
+    for _ in range(6):
+        doc.new_page().insert_text((72, 72), "page text")
+    doc.set_toc([[1, "Part I", 1], [2, "导论", 1], [2, "进阶", 4]])
+    doc.save(str(src)); doc.close()
+    out_dir = tmp_path / "staging" / "book"
+    res = source_convert.convert(src, out_dir=out_dir, fmt="pdf")
+    assert (out_dir / "chapters.json").exists()
+    titles = [c["title"] for c in res["chapters"]]
+    assert "导论" in titles and "进阶" in titles
+    assert res["chapters"][-1]["page_end"] == 6
+    assert res["chapters_sha"]
+
+
+def test_md_chapters_whole_book(tmp_path):
+    src = tmp_path / "n.md"
+    src.write_text("# T\n\nbody\n", encoding="utf-8")
+    out_dir = tmp_path / "staging" / "n"
+    res = source_convert.convert(src, out_dir=out_dir, fmt="md")
+    assert (out_dir / "chapters.json").exists()
+    assert len(res["chapters"]) == 1
+
+
 def test_pdf_vector_drawing_page_rendered(tmp_path):
     # 端到端:含矢量图(无标题词,纯测 n_draw 接线)的 PDF 页应被判难页并渲染 PNG
     import importlib.util as u
