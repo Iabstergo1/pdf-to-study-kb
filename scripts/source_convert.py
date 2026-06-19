@@ -61,8 +61,9 @@ def _convert_pdf_text(src: Path, assets_dir: Path):
     for i in range(len(doc)):
         page = doc[i]
         text = page.get_text()
-        img_count = len(page.get_images())
-        prof = source_profile.profile_page(i + 1, text, image_count=img_count)
+        sig = source_profile.visual_signals(page)
+        prof = source_profile.profile_page(i + 1, text, image_count=sig["image_count"],
+                                           n_draw=sig["n_draw"], n_tables=sig["n_tables"])
         pages.append(prof)
         parts.append(f"\n\n<!-- page {i + 1} -->\n\n{text.strip()}\n")
         if prof["needs_vision"]:
@@ -70,10 +71,10 @@ def _convert_pdf_text(src: Path, assets_dir: Path):
             pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
             pix.save(str(assets_dir / f"p{i + 1:04d}.png"))
     doc.close()
-    n_formula = sum(1 for p in pages if p.get("needs_vision"))
-    if n_formula:
-        print(f"[info] source-convert：本源约 {n_formula} 个公式风险页在 PyMuPDF 纯文本抽取中"
-              f"上/下标与分数被拍平失真（例如 (a−c)q1²−bq1q2 会断行错位）。每页已渲染整页 PNG"
-              f"（assets/pXXXX.png），由 ingest 读图写 KaTeX 保真（route B）。",
+    n_vision = sum(1 for p in pages if p.get("needs_vision"))
+    if n_vision:
+        print(f"[info] source-convert：本源约 {n_vision} 个难页（公式 / 矢量图 / 表 / 图表标题）"
+              f"已渲染整页 PNG（assets/pXXXX.png），由 ingest 读图保真（route B）。"
+              f"纯文本抽取会拍平上/下标与分数、且看不见矢量图与无框线表，故以源图为准。",
               file=sys.stderr)
     return "".join(parts).strip() + "\n", pages

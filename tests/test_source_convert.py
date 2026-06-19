@@ -150,3 +150,23 @@ def test_reason_recorded_in_profile_page():
     assert p["needs_vision"] is False
     assert p["needs_vision_reason"] == []
     assert {"n_draw", "n_tables", "has_caption", "is_code"} <= set(p.keys())
+
+
+def test_pdf_vector_drawing_page_rendered(tmp_path):
+    # 端到端:含矢量图(无标题词,纯测 n_draw 接线)的 PDF 页应被判难页并渲染 PNG
+    import importlib.util as u
+    if u.find_spec("fitz") is None:
+        import pytest; pytest.skip("pymupdf not installed")
+    import fitz
+    src = tmp_path / "fig.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "示意页正文，无标题词。")
+    for k in range(20):
+        page.draw_line(fitz.Point(72, 100 + k * 5), fitz.Point(300, 100 + k * 5))
+    doc.save(str(src)); doc.close()
+    out_dir = tmp_path / "staging" / "fig"
+    res = source_convert.convert(src, out_dir=out_dir, fmt="pdf")
+    assert 1 in res["needs_vision_pages"]
+    assert (out_dir / "assets" / "p0001.png").exists()
+    assert "vector-figure" in res["pages"][0]["needs_vision_reason"]
