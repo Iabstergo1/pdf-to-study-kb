@@ -36,6 +36,38 @@ def test_concepts_without_synthesis_warns():
     assert wiki_gate.concepts_without_synthesis([{"meta": {"type": "lesson"}}]) == 0
 
 
+def test_risk_traceability_fails_without_block_refs():
+    pages = [{"rel_path": "domains/d/lessons/l1.md",
+              "meta": {"type": "lesson", "source": "s1", "source_refs": []}, "body": "x"}]
+    vs = wiki_gate.lint_risk_traceability(pages, source_id="s1", risk_block_ids={"b000003"},
+                                          written={"domains/d/lessons/l1.md"})
+    assert any(v["rule"] == "risk-traceability" for v in vs)
+
+
+def test_risk_traceability_passes_with_block_refs():
+    refs = [{"source": "s1", "window": "w0001", "pages": [2], "block_ids": ["b000003"]}]
+    pages = [{"rel_path": "domains/d/lessons/l1.md",
+              "meta": {"type": "lesson", "source": "s1", "source_refs": refs}, "body": "x"}]
+    vs = wiki_gate.lint_risk_traceability(pages, source_id="s1", risk_block_ids={"b000003"},
+                                          written=set())
+    assert vs == []
+
+
+def test_risk_traceability_no_risk_windows_skips():
+    pages = [{"rel_path": "domains/d/lessons/l1.md",
+              "meta": {"type": "lesson", "source": "s1", "source_refs": []}, "body": "x"}]
+    vs = wiki_gate.lint_risk_traceability(pages, source_id="s1", risk_block_ids=set(), written=set())
+    assert vs == []
+
+
+def test_risk_traceability_only_lessons_not_concepts():
+    pages = [{"rel_path": "concepts/c1.md",
+              "meta": {"type": "concept", "source": "s1", "source_refs": []}, "body": "x"}]
+    vs = wiki_gate.lint_risk_traceability(pages, source_id="s1", risk_block_ids={"b1"},
+                                          written={"concepts/c1.md"})
+    assert vs == []
+
+
 def test_collect_proposed_filters_correctly(tmp_path):
     _page(tmp_path, "domains/d/lessons/a.md",
           {"type": "lesson", "status": "proposed", "managed_by": "pipeline"}, GOOD_LESSON)

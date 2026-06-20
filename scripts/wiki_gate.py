@@ -132,6 +132,35 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
     return vs
 
 
+# Spec 2：MinerU 结构化块的风险 flag（lint 据此判风险窗，要求 lesson 可追溯）。
+RISK_FLAGS = {"table", "equation", "image", "ocr_low_confidence"}
+
+
+def lint_risk_traceability(pages: list[dict], *, source_id: str, risk_block_ids: set,
+                           written: set) -> list[dict]:
+    """Spec 2 渐进 risk lint（仅 mineru 源由 cmd_lint 启用）：本源有风险窗（table/equation/
+    image/ocr_low_confidence）时，归属本源的 proposed lesson 页须有可追溯 source_refs
+    （某条 ref 的 source==本源 且 block_ids 非空）。risk_block_ids 空 = 无风险窗，不触发；
+    不碰旧来源（pymupdf/markdown 源 cmd_lint 不调用此规则）。"""
+    vs: list[dict] = []
+    if not risk_block_ids:
+        return vs
+    for p in pages:
+        rel, meta = p["rel_path"], p["meta"]
+        if meta.get("type") != "lesson":
+            continue
+        if not belongs_to_source(rel, meta, source_id, written):
+            continue
+        refs = meta.get("source_refs") or []
+        ok = any(isinstance(r, dict) and r.get("source") == source_id and r.get("block_ids")
+                 for r in refs)
+        if not ok:
+            vs.append({"path": rel, "rule": "risk-traceability",
+                       "detail": "mineru 风险源（table/equation/image）的 lesson 页缺可追溯 "
+                                 "source_refs：须含 {source, window, pages, block_ids}"})
+    return vs
+
+
 def _published_pages(vault: Path) -> list[tuple[str, dict]]:
     out = []
     for f in sorted(vault.rglob("*.md")):

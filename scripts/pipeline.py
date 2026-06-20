@@ -697,6 +697,34 @@ def cmd_snapshot_page(args):
     print(f"[OK] snapshot {args.path} -> {manifest}")
 
 
+def _mineru_risk_violations(source_id, proposed, written):
+    """仅当本源 parse_report.selected_backend == 'mineru' 且有风险窗（table/equation/image/
+    ocr_low_confidence）时，跑 wiki_gate.lint_risk_traceability；否则返回空（旧 pymupdf/markdown
+    源不受新规则影响）。"""
+    import json
+    import wiki_gate
+    staging = _staging_dir(source_id)
+    pr = staging / "parse_report.json"
+    if not pr.exists():
+        return []
+    try:
+        backend = json.loads(pr.read_text(encoding="utf-8")).get("selected_backend")
+    except Exception:
+        return []
+    if backend != "mineru":
+        return []
+    risk_block_ids: set = set()
+    wf = staging / "windows.jsonl"
+    if wf.exists():
+        for line in wf.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                w = json.loads(line)
+                if wiki_gate.RISK_FLAGS & set(w.get("risk_flags") or []):
+                    risk_block_ids.update(w.get("block_ids") or [])
+    return wiki_gate.lint_risk_traceability(proposed, source_id=source_id,
+                                            risk_block_ids=risk_block_ids, written=written)
+
+
 def cmd_lint(args):
     """收尾门禁（spec §10/§11）：lint proposed 集合 → 过则 promote+重建派生；败则回滚+Review-Queue。"""
     import state_store
@@ -744,6 +772,8 @@ def cmd_lint(args):
                    "detail": "proposed 页不归属任何 source（缺 window-done --writes 记账"
                              "或 frontmatter 归属），fail-closed 阻断发布"}
                   for p in orphans] + wiki_gate.lint_pages(vault, proposed)
+    # Spec 2 渐进 risk lint：仅当本源 backend=mineru 且有风险窗时，要求 lesson 可追溯（旧源不受影响）。
+    violations += _mineru_risk_violations(args.source, proposed, written_by[args.source])
     if violations:
         for v in violations:
             print(f"[lint] {v['rule']} {v['path']}: {v['detail']}")
