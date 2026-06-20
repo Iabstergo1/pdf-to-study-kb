@@ -95,7 +95,7 @@ class SourceBlock:
     char_start: int          # 进 source.md 的字符偏移（保 char 兼容 + 供窗口聚合/show-window 切片）
     char_end: int
     text_level: int | None = None   # Markdown heading 的 # 级数；正文/PyMuPDF 为 None
-    heading_path: str = ""          # Markdown：所属标题路径；PyMuPDF：""
+    heading_path: str = ""          # Markdown：所属（直接）标题，与 _sections 一致（不嵌套）；PyMuPDF：""
     asset_path: str | None = None   # needs_vision 页 PNG 的 staging 相对路径（assets/pXXXX.png）；否则 None
     risk_flags: list[str] = field(default_factory=list)  # 由 profile reasons 派生
     source_ref: str = ""            # f"p{page:04d}#{block_id}" → 如 "p0043#b000043"
@@ -115,7 +115,7 @@ class SourceBlock:
 示例（Markdown，二级标题段）：
 
 ```json
-{"block_id":"b000007","type":"heading","page":1,"char_start":540,"char_end":1804,"text_level":2,"heading_path":"3 两阶段博弈 > 3.2 子博弈完美","asset_path":null,"risk_flags":[],"source_ref":"p0001#b000007","text":"## 3.2 子博弈完美\n\n在子博弈完美均衡中……（该 section 的完整正文，直到下一切分边界）"}
+{"block_id":"b000007","type":"heading","page":1,"char_start":540,"char_end":1804,"text_level":2,"heading_path":"3.2 子博弈完美","asset_path":null,"risk_flags":[],"source_ref":"p0001#b000007","text":"## 3.2 子博弈完美\n\n在子博弈完美均衡中……（该 section 的完整正文，直到下一切分边界）"}
 ```
 
 > **Markdown 块语义（消歧）**：section 块的 `text` 是该 section 的**完整 Markdown 片段**（heading 行 + 其下正文，直到下一切分边界）；`type="heading"` 仅表示该块**首行**是 heading，**绝不**把 heading 行单拆成小块而丢正文——否则破坏与 `_sections`/char 窗的等价性。
@@ -216,7 +216,7 @@ class SourceBlock:
 {
   "window_id": "w0032",
   "mode": "blocks",
-  "heading_path": "3 两阶段博弈 > 3.2 子博弈完美",
+  "heading_path": "",
   "char_start": 18233,
   "char_end": 21044,
   "overlap_before": 0,
