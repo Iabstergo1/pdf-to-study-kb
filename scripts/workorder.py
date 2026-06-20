@@ -21,6 +21,18 @@ def _managed_by(p: Path) -> str:
     return meta.get("managed_by", "pipeline")
 
 
+def _read_backend(staging: Path) -> str:
+    """从 parse_report.json 读 selected_backend；缺失/解析失败 → "unknown"（不破坏 legacy staging）。"""
+    import json
+    p = Path(staging) / "parse_report.json"
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8")).get("selected_backend", "unknown")
+        except Exception:
+            return "unknown"
+    return "unknown"
+
+
 def build_workorder(vault, *, source_id: str, domain: str, staging_dir) -> dict:
     vault = Path(vault)
     staging = Path(staging_dir)
@@ -60,9 +72,15 @@ def build_workorder(vault, *, source_id: str, domain: str, staging_dir) -> dict:
                      "scope": [f"domain:{domain}", "shared"]},
         "concept_pages_snapshot": concept_snap,
         "other_pages_snapshot": other_snap,
-        "source": {"text_md": str(staging / "source.md"),
-                   "page_images_dir": str(staging / "assets"),
-                   "processing_windows": str(staging / "windows.jsonl")},
+        "source": {"text_md": str(staging / "source.md"),               # 旧键保留（向后兼容）
+                   "source_md": str(staging / "source.md"),
+                   "blocks_jsonl": str(staging / "blocks.jsonl"),
+                   "parse_report_json": str(staging / "parse_report.json"),
+                   "chapters_json": str(staging / "chapters.json"),
+                   "assets_dir": str(staging / "assets"),
+                   "page_images_dir": str(staging / "assets"),           # 旧键保留
+                   "processing_windows": str(staging / "windows.jsonl"),
+                   "backend": _read_backend(staging)},
         "on_failure": "route_to_review_queue",
     }
 
