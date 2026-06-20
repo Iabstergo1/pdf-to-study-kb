@@ -97,3 +97,50 @@ def build_windows(md: str, *, target_tokens: int = 2000, max_tokens: int = 4000,
             out.append(_win(idx, path, c0, c1, ov))
             idx += 1
     return out
+
+
+def _sections_from_blocks(blocks: list) -> list:
+    """把有序 blocks 按「连续同 heading_path」聚成 section (path, char_start, char_end)。
+    Markdown 各块 heading_path 互异 → 各自成段（= _sections）；PyMuPDF 全空 → 合并为一段
+    （无 heading 块 → 不按页/标题碎片化，保 v2/v5 防碎片化语义）。"""
+    secs: list = []
+    for b in blocks:
+        path = b.get("heading_path", "")
+        if secs and secs[-1][0] == path:
+            p, s, _e = secs[-1]
+            secs[-1] = (p, s, b["char_end"])
+        else:
+            secs.append((path, b["char_start"], b["char_end"]))
+    return secs
+
+
+def _attach_block_meta(w: dict, blocks: list, c0: int, c1: int) -> None:
+    """给窗口回挂块元数据：与窗 char 区间 [c0,c1) 有交叠的块。"""
+    inwin = [b for b in blocks if not (b["char_end"] <= c0 or b["char_start"] >= c1)]
+    w["block_ids"] = [b["block_id"] for b in inwin]
+    pages = [b["page"] for b in inwin]
+    w["page_start"] = min(pages) if pages else 0
+    w["page_end"] = max(pages) if pages else 0
+    w["token_estimate"] = max(1, (c1 - c0) // 4)
+    w["contains"] = sorted({b["type"] for b in inwin})
+    w["assets"] = [b["asset_path"] for b in inwin if b.get("asset_path")]
+    flags: set = set()
+    for b in inwin:
+        flags.update(b.get("risk_flags") or [])
+    w["risk_flags"] = sorted(flags)
+
+
+def build_windows_from_blocks(blocks: list, *, target_tokens: int = 2000,
+                              max_tokens: int = 4000, overlap_tokens: int = 200) -> list[dict]:
+    """block-aware windows：按 section 切（与 char 窗共用 _slice_section 保等价），
+    再用窗 char 区间回挂块元数据（block_ids/page 范围/contains/assets/risk_flags）。"""
+    out: list[dict] = []
+    idx = 0
+    for path, s, e in _sections_from_blocks(blocks):
+        for c0, c1, ov in _slice_section(s, e, target_tokens=target_tokens,
+                                         max_tokens=max_tokens, overlap_tokens=overlap_tokens):
+            w = _win(idx, path, c0, c1, ov, mode="blocks")
+            _attach_block_meta(w, blocks, c0, c1)
+            out.append(w)
+            idx += 1
+    return out
