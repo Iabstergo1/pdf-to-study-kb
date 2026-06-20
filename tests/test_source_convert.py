@@ -304,3 +304,26 @@ def test_pdf_vector_drawing_page_rendered(tmp_path):
     assert 1 in res["needs_vision_pages"]
     assert (out_dir / "assets" / "p0001.png").exists()
     assert "vector-figure" in res["pages"][0]["needs_vision_reason"]
+
+
+# --- Spec 1：source_backends 拆分（Task 5/6） ---
+import sys as _sys
+_sys.path.insert(0, str(ROOT / "scripts"))
+
+
+def test_markdown_backend_section_blocks(tmp_path):
+    import importlib
+    mb = importlib.import_module("source_backends.markdown_backend")
+    src = tmp_path / "n.md"
+    src.write_text("# A\n\naaa\n\n## B\n\nbbb\n", encoding="utf-8")
+    res = mb.convert(src, out_dir=tmp_path / "o", input_hash="h")
+    # 块为 section 级，heading 块带 text_level/heading_path，text 含整段
+    headings = [b for b in res.blocks if b.type == "heading"]
+    assert any(b.heading_path == "A" and b.text_level == 1 for b in headings)
+    a_block = next(b for b in res.blocks if b.heading_path == "A")
+    assert "aaa" in a_block.text                     # 正文未被丢
+    assert res.source_md[a_block.char_start:a_block.char_end] == a_block.text  # 逐字一致
+    assert res.report["selected_backend"] == "markdown"
+    assert res.report["routing_advice"]["recommended_backend"] == "markdown"
+    assert res.report["section_count"] >= 2
+    assert res.needs_vision_pages == []

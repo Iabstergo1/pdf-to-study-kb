@@ -89,3 +89,14 @@ def write_parse_report(path, report: dict) -> str:
     text = json.dumps(report, ensure_ascii=False, indent=2)
     Path(path).write_text(text, encoding="utf-8")
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@dataclass
+class BackendResult:
+    """后端 → dispatcher 的内部交接（非落盘形状；dispatcher 据此写 artifact 并拼返回 dict）。"""
+    source_md: str            # source.md 全文（LLM 顺读视图）
+    blocks: list              # list[SourceBlock]
+    chapters: list            # chaptering 输出（dict 列表）
+    pages: list               # 逐页 profile（dict 列表）
+    report: dict              # build_parse_report 产出
+    needs_vision_pages: list  # 难页页号
