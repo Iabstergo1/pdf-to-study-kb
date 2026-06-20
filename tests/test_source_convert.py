@@ -383,3 +383,19 @@ def test_converted_input_hash_includes_versions(tmp_path):
     import source_profile as _sp
     import source_artifacts as _sa
     assert _sp.PROFILER_VERSION in h and _sa.ARTIFACT_VERSION in h
+
+
+def test_pymupdf_backend_raises_backendunavailable_when_fitz_missing(tmp_path, monkeypatch):
+    # parity（Task 7b）：fitz 缺失时抛 BackendUnavailable，而非裸 ImportError/fitz 错误。
+    import importlib
+    import importlib.util as u
+    import pytest
+    pb = importlib.import_module("source_backends.pymupdf_backend")
+    from source_backends import BackendUnavailable
+    real = u.find_spec
+    monkeypatch.setattr(u, "find_spec",
+                        lambda name, *a, **k: None if name == "fitz" else real(name, *a, **k))
+    src = tmp_path / "x.pdf"
+    src.write_text("dummy", encoding="utf-8")
+    with pytest.raises(BackendUnavailable):
+        pb.convert(src, out_dir=tmp_path / "o", input_hash="h")

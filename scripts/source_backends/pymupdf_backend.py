@@ -7,6 +7,7 @@ per-page 信号得出（advisory-only），不改 source_profile、不检测 Min
 """
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 import sys
 
@@ -15,6 +16,7 @@ import source_profile
 import chaptering
 import windowing
 import source_artifacts as sa
+from source_backends import BackendUnavailable
 
 # routing_advice 阈值（advisory，Spec 2 再校准）
 _LOW_TEXT_MEAN = 100
@@ -44,6 +46,8 @@ def _routing_advice(pages: list) -> sa.RoutingAdvice:
 
 
 def convert(src_path, *, out_dir, input_hash: str):
+    if importlib.util.find_spec("fitz") is None:    # parity：缺 fitz 时给清晰的 BackendUnavailable
+        raise BackendUnavailable("PyMuPDF (fitz) not installed; pip install pymupdf 或安装 study-kb 依赖")
     import fitz  # PyMuPDF
     out_dir = Path(out_dir)
     assets_dir = out_dir / "assets"
