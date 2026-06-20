@@ -156,3 +156,21 @@ def test_block_windows_md_equivalent_to_char_windows():
                                                    max_tokens=400, overlap_tokens=50)
     assert [(w["heading_path"], w["char_start"], w["char_end"]) for w in char_ws] == \
            [(w["heading_path"], w["char_start"], w["char_end"]) for w in block_ws]
+
+
+def test_block_windows_mineru_table_equation_image_metadata():
+    # MinerU 风格细类型块 → window 的 contains/risk_flags/assets 覆盖 table/equation/image
+    def blk(bid, typ, cs, ce, rf, asset=None):
+        return {"block_id": bid, "type": typ, "text": typ, "page": 1, "char_start": cs,
+                "char_end": ce, "text_level": (1 if typ == "heading" else None),
+                "heading_path": "T", "asset_path": asset, "risk_flags": rf}
+    blocks = [blk("b000001", "heading", 0, 10, []), blk("b000002", "text", 10, 20, []),
+              blk("b000003", "table", 20, 30, ["table"]),
+              blk("b000004", "equation", 30, 40, ["equation"]),
+              blk("b000005", "image", 40, 50, ["image"], asset="assets/fig1.jpg")]
+    ws = windowing.build_windows_from_blocks(blocks, target_tokens=1000, max_tokens=2000)
+    assert len(ws) == 1
+    w = ws[0]
+    assert set(w["contains"]) == {"heading", "text", "table", "equation", "image"}
+    assert set(w["risk_flags"]) == {"table", "equation", "image"}
+    assert w["assets"] == ["assets/fig1.jpg"]

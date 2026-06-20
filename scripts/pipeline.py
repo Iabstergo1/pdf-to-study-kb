@@ -174,11 +174,14 @@ def _sync_assets(source_id: str) -> int:
     dst_dir = _vault_dir() / "assets" / source_id
     dst_dir.mkdir(parents=True, exist_ok=True)
     n = 0
-    for png in sorted(staging_assets.glob("*.png")):
-        dst = dst_dir / png.name
+    imgs = []
+    for ext in ("*.png", "*.jpg", "*.jpeg"):     # PyMuPDF 难页 PNG + MinerU 图片(.jpg/.png)
+        imgs.extend(staging_assets.glob(ext))
+    for img in sorted(imgs):
+        dst = dst_dir / img.name
         if (not dst.exists()) or (hashlib.sha256(dst.read_bytes()).hexdigest()
-                                  != hashlib.sha256(png.read_bytes()).hexdigest()):
-            shutil.copy2(png, dst)
+                                  != hashlib.sha256(img.read_bytes()).hexdigest()):
+            shutil.copy2(img, dst)
             n += 1
     return n
 
@@ -500,9 +503,10 @@ def cmd_show_window(args):
         bids = ",".join(selected.get("block_ids") or [])
         rf = ",".join(selected.get("risk_flags") or [])
         assets = ",".join(selected.get("assets") or [])
+        contains = ",".join(selected.get("contains") or [])
         print(f"<!-- window-meta: heading_path={hp} "
               f"pages={selected.get('page_start')}-{selected.get('page_end')} "
-              f"block_ids={bids} risk_flags={rf} assets={assets} -->")
+              f"contains={contains} block_ids={bids} risk_flags={rf} assets={assets} -->")
     if not getattr(args, "plain", False):
         pages = _pages_overlapping_range(_page_ranges_for_md(md), start, end)
         page_meta = {}

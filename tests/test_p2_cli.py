@@ -167,3 +167,34 @@ def test_source_convert_docx_auto_mineru_unavailable_fail_closed(tmp_path):
     r = _run(["source-convert", "--source", sid], tmp_path)               # auto → mineru → 不可用
     assert r.returncode != 0
     assert "requirements-mineru" in (r.stdout + r.stderr)
+
+
+# --- Spec 2 C6：windows/show-window MinerU 风险元数据 ---
+
+def test_show_window_block_header_shows_mineru_risk(tmp_path):
+    import json
+    sid = "p2mru"
+    staging = tmp_path / "pipeline-workspace" / "staging" / sid
+    staging.mkdir(parents=True)
+    (staging / "source.md").write_text(
+        "<!-- block:b000001 page:1 type:table -->\n<table></table>\n\n", encoding="utf-8")
+    w = {"window_id": "w0000", "mode": "blocks", "heading_path": "T", "char_start": 0,
+         "char_end": 56, "overlap_before": 0, "block_ids": ["b000001"], "page_start": 1,
+         "page_end": 1, "token_estimate": 10, "contains": ["table", "equation"],
+         "assets": ["assets/fig1.jpg"], "risk_flags": ["table", "equation", "image"]}
+    (staging / "windows.jsonl").write_text(json.dumps(w), encoding="utf-8")
+    r = _run(["show-window", "--source", sid, "--window", "w0000"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "risk_flags=table,equation,image" in r.stdout
+    assert "assets=assets/fig1.jpg" in r.stdout
+    assert "contains=table,equation" in r.stdout      # 块类型信息
+
+
+def test_sync_assets_copies_jpg(tmp_path):
+    sid = "p2jpg"
+    sa_dir = tmp_path / "pipeline-workspace" / "staging" / sid / "assets"
+    sa_dir.mkdir(parents=True)
+    (sa_dir / "fig1.jpg").write_bytes(b"\xff\xd8jpg")
+    r = _run(["sync-assets", "--source", sid], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "wiki" / "assets" / sid / "fig1.jpg").exists()   # MinerU 图片(.jpg) 入 vault
