@@ -30,3 +30,44 @@ def test_write_read_blocks_roundtrip(tmp_path):
     assert len(got) == 2
     assert got[0]["block_id"] == "b000001" and got[0]["risk_flags"] == ["formula"]
     assert got[1]["text_level"] == 2 and got[1]["heading_path"] == "T"
+
+
+def test_routing_advice_defaults():
+    ra = sa.RoutingAdvice(recommended_backend="pymupdf",
+                          structured_reparse_recommended=False)
+    assert ra.advisory_only is True
+    assert ra.consumed_by_auto_router is False
+    assert ra.reasons == []
+
+
+def test_build_parse_report_envelope_constants():
+    ra = sa.RoutingAdvice(recommended_backend="mineru",
+                          structured_reparse_recommended=True,
+                          reasons=["scan_suspected"])
+    rep = sa.build_parse_report("pymupdf", input_hash="abc",
+                                routing_advice=ra, warnings=["w1"],
+                                page_count=10, block_count=10,
+                                needs_vision_pages=[3], risk_flag_counts={"formula": 2})
+    assert rep["selected_backend"] == "pymupdf"
+    assert rep["backend_policy"] == "contract_only"
+    assert rep["mineru_status"] == "not_checked"
+    assert "mineru_available" not in rep            # 禁止写真实探测字段
+    assert rep["routing_advice"]["advisory_only"] is True
+    assert rep["routing_advice"]["consumed_by_auto_router"] is False
+    assert rep["routing_advice"]["reasons"] == ["scan_suspected"]
+    assert rep["page_count"] == 10 and rep["risk_flag_counts"] == {"formula": 2}
+    assert rep["artifact_version"] == sa.ARTIFACT_VERSION
+
+
+def test_write_parse_report_roundtrip(tmp_path):
+    import json
+    ra = sa.RoutingAdvice(recommended_backend="markdown",
+                          structured_reparse_recommended=False)
+    rep = sa.build_parse_report("markdown", input_hash="h",
+                                routing_advice=ra, section_count=3,
+                                heading_count=2, block_count=3)
+    p = tmp_path / "parse_report.json"
+    sha = sa.write_parse_report(p, rep)
+    assert len(sha) == 64
+    loaded = json.loads(p.read_text(encoding="utf-8"))
+    assert loaded["selected_backend"] == "markdown" and loaded["section_count"] == 3

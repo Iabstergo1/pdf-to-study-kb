@@ -53,3 +53,39 @@ def read_blocks(path) -> list:
         if line.strip():
             out.append(json.loads(line))
     return out
+
+
+@dataclass
+class RoutingAdvice:
+    recommended_backend: str
+    structured_reparse_recommended: bool
+    reasons: list = field(default_factory=list)
+    advisory_only: bool = True             # Spec 1 恒 True
+    consumed_by_auto_router: bool = False  # Spec 1 恒 False（Spec 2 被 auto 读时才置 True）
+
+
+def build_parse_report(selected_backend: str, *, input_hash: str,
+                       routing_advice: "RoutingAdvice", warnings=None, **extra) -> dict:
+    """组装 parse_report.json（advisory-only）。强制信封常量，避免漏写/误写。
+
+    Spec 1 不探测 MinerU：mineru_status 恒 "not_checked"，绝不写 mineru_available。
+    extra：per-backend 附加字段（pymupdf: page_count/block_count/needs_vision_pages/
+    risk_flag_counts；markdown: section_count/heading_count/block_count）。
+    """
+    report = {
+        "selected_backend": selected_backend,
+        "backend_policy": "contract_only",
+        "artifact_version": ARTIFACT_VERSION,
+        "input_hash": input_hash,
+        "routing_advice": asdict(routing_advice),
+        "mineru_status": "not_checked",
+        "warnings": list(warnings or []),
+    }
+    report.update(extra)
+    return report
+
+
+def write_parse_report(path, report: dict) -> str:
+    text = json.dumps(report, ensure_ascii=False, indent=2)
+    Path(path).write_text(text, encoding="utf-8")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
