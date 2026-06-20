@@ -399,3 +399,32 @@ def test_pymupdf_backend_raises_backendunavailable_when_fitz_missing(tmp_path, m
     src.write_text("dummy", encoding="utf-8")
     with pytest.raises(BackendUnavailable):
         pb.convert(src, out_dir=tmp_path / "o", input_hash="h")
+
+
+def test_e2e_pdf_convert_then_block_windows(tmp_path):
+    # 端到端不变量（Task 12）：convert → blocks.jsonl → block windows，页标记一个不丢。
+    import importlib.util as u
+    if u.find_spec("fitz") is None:
+        import pytest; pytest.skip("pymupdf not installed")
+    import fitz
+    import importlib
+    windowing = importlib.import_module("windowing")
+    import source_artifacts
+    src = tmp_path / "e2e.pdf"
+    doc = fitz.open()
+    for _ in range(3):
+        doc.new_page().insert_text((72, 72), "some readable body text on this page")
+    doc.save(str(src)); doc.close()
+    out_dir = tmp_path / "staging" / "e2e"
+    res = source_convert.convert(src, out_dir=out_dir, fmt="pdf")
+    md = (out_dir / "source.md").read_text(encoding="utf-8")
+    blocks = source_artifacts.read_blocks(out_dir / "blocks.jsonl")
+    # 每个 PyMuPDF block 的 char slice 含对应 <!-- page N --> marker
+    for b in blocks:
+        seg = md[b["char_start"]:b["char_end"]]
+        assert f"<!-- page {b['page']} -->" in seg
+    # block windows 聚合后不丢页标记
+    ws = windowing.build_windows_from_blocks(blocks)
+    covered = "".join(md[w["char_start"]:w["char_end"]] for w in ws)
+    assert covered.count("<!-- page") == 3
+    assert res["backend"] == "pymupdf"
