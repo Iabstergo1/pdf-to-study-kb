@@ -80,3 +80,62 @@ def test_build_mineru_report_counts(tmp_path):
     assert rep["discarded_count"] == 2
     assert rep["routing_advice"]["advisory_only"] is True
     assert rep["routing_advice"]["consumed_by_auto_router"] is False
+
+
+class _FakeProc:
+    def __init__(self, returncode=0, stderr=""):
+        self.returncode = returncode
+        self.stdout = ""
+        self.stderr = stderr
+
+
+def test_run_mineru_command_uses_pipeline_no_vlm_hybrid(tmp_path, monkeypatch):
+    import subprocess
+    captured = {}
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kw: (captured.__setitem__("cmd", cmd), _FakeProc())[1])
+    mb._run_mineru(tmp_path / "x.pdf", tmp_path / "raw", timeout=10)
+    cmd = [str(c) for c in captured["cmd"]]
+    assert "-b" in cmd and cmd[cmd.index("-b") + 1] == "pipeline"   # 显式 pipeline
+    assert not any("vlm" in c for c in cmd)
+    assert not any("hybrid" in c for c in cmd)
+
+
+def test_run_mineru_nonzero_raises(tmp_path, monkeypatch):
+    import subprocess
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _FakeProc(returncode=2, stderr="boom"))
+    with pytest.raises(mb.MineruRunFailed):
+        mb._run_mineru(tmp_path / "x.pdf", tmp_path / "raw", timeout=10)
+
+
+def _fake_run_mineru_writes_output(tmp_path):
+    import json
+    def fake(src, raw_dir, *, timeout):
+        auto = Path(raw_dir) / "x" / "auto"
+        (auto / "images").mkdir(parents=True, exist_ok=True)
+        (auto / "images" / "fig1.jpg").write_bytes(b"\xff\xd8jpg")
+        (auto / "x_content_list.json").write_text(json.dumps(_fake_content_list()), encoding="utf-8")
+        return Path(raw_dir)
+    return fake
+
+
+def test_convert_success_with_fake_mineru_output(tmp_path, monkeypatch):
+    monkeypatch.setattr(mb, "mineru_available", lambda: True)
+    monkeypatch.setattr(mb, "_mineru_version", lambda: "x.y.z")
+    monkeypatch.setattr(mb, "_run_mineru", _fake_run_mineru_writes_output(tmp_path))
+    res = mb.convert(tmp_path / "x.pdf", out_dir=tmp_path / "o", input_hash="h")
+    assert res.report["selected_backend"] == "mineru" and res.report["mineru_status"] == "used"
+    assert res.report["mineru_version"] == "x.y.z" and res.report["mineru_backend"] == "pipeline"
+    assert [b.type for b in res.blocks] == ["heading", "text", "table", "equation", "image"]
+    assert (tmp_path / "o" / "assets" / "fig1.jpg").exists()
+    assert "<!-- block:" in res.source_md
+    assert res.needs_vision_pages == [2, 3]     # table/equation 在 p2，image 在 p3
+
+
+def test_convert_propagates_run_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(mb, "mineru_available", lambda: True)
+    def boom(src, raw_dir, *, timeout):
+        raise mb.MineruRunFailed("exited 1")
+    monkeypatch.setattr(mb, "_run_mineru", boom)
+    with pytest.raises(mb.MineruRunFailed):
+        mb.convert(tmp_path / "x.pdf", out_dir=tmp_path / "o", input_hash="h")

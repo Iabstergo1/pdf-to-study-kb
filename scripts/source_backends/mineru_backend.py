@@ -146,11 +146,68 @@ def build_mineru_report(blocks, *, input_hash, discarded_count, mineru_version="
         ocr_used=bool(ocr_used), scan_suspected=bool(scan_suspected))
 
 
+def _run_mineru(src_path, raw_dir, *, timeout):
+    """subprocess 调 MinerU CLI（恒 `-b pipeline`，禁 vlm/hybrid）。失败抛 MineruRunFailed。"""
+    import subprocess
+    raw_dir = Path(raw_dir)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    cmd = ["mineru", "-p", str(src_path), "-o", str(raw_dir), "-b", "pipeline"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        raise MineruRunFailed(f"mineru timeout after {timeout}s") from e
+    except Exception as e:                       # FileNotFoundError 等
+        raise MineruRunFailed(f"mineru invocation failed: {e}") from e
+    if proc.returncode != 0:
+        raise MineruRunFailed(f"mineru exited {proc.returncode}: {(proc.stderr or '').strip()[:500]}")
+    return raw_dir
+
+
+def _find_content_list(raw_dir):
+    matches = sorted(Path(raw_dir).rglob("*content_list*.json"))
+    if not matches:
+        raise MineruRunFailed("mineru output missing *_content_list.json")
+    return matches[0]
+
+
+def _mineru_version():
+    import subprocess
+    try:
+        r = subprocess.run(["mineru", "--version"], capture_output=True, text=True, timeout=30)
+        out = (r.stdout or r.stderr or "").strip()
+        return out.splitlines()[0] if out else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def failed_report(input_hash, reason: str) -> dict:
+    """MinerU 失败时的最小 parse_report（dispatcher 落盘以审计；不静默回退）。"""
+    advice = sa.RoutingAdvice(recommended_backend="mineru", structured_reparse_recommended=True)
+    return sa.build_parse_report("mineru", input_hash=input_hash, routing_advice=advice,
+                                 mineru_status="failed", mineru_backend="pipeline",
+                                 mineru_failed=True, failure_reason=str(reason),
+                                 warnings=[f"mineru_failed: {reason}"])
+
+
 def convert(src_path, *, out_dir, input_hash, timeout=DEFAULT_TIMEOUT_SECONDS):
     if not mineru_available():
         raise BackendUnavailable(
             "MinerU 未安装：--backend mineru 需要 MinerU（本项目仅用 pipeline 后端）。"
             "安装见 requirements-mineru.txt（pip install -r requirements-mineru.txt）；"
             "未安装时请用 --backend pymupdf，或 --backend auto 的轻量路径。")
-    # 子进程调用 + content_list 归一在 C2/C3 落地。
-    raise NotImplementedError("mineru convert 归一在 C2/C3 实现")
+    import json
+    out_dir = Path(out_dir)
+    raw_dir = out_dir / "mineru_raw"
+    _run_mineru(src_path, raw_dir, timeout=timeout)          # 失败抛 MineruRunFailed（不静默回退）
+    content_list_path = _find_content_list(raw_dir)
+    items = json.loads(content_list_path.read_text(encoding="utf-8"))
+    blocks, discarded = normalize_content_list(
+        items, assets_src_dir=content_list_path.parent, assets_out_dir=out_dir / "assets")
+    source_md = render_source_md(blocks)
+    page_count = max((b.page for b in blocks), default=0)
+    chapters = build_chapters(blocks, page_count)
+    report = build_mineru_report(blocks, input_hash=input_hash, discarded_count=discarded,
+                                 mineru_version=_mineru_version())
+    needs_vision_pages = sorted({b.page for b in blocks if b.risk_flags})
+    return sa.BackendResult(source_md=source_md, blocks=blocks, chapters=chapters,
+                            pages=[], report=report, needs_vision_pages=needs_vision_pages)
