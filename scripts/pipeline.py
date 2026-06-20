@@ -118,7 +118,6 @@ def cmd_source_convert(args):
     import state_store
     import source_convert
     import source_profile
-    import hashlib
     db = _vault_state_db()
     raw = _raw_path(db, state_store, args.source)
     src_row = state_store.get_source(db, args.source)

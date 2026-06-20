@@ -17,11 +17,6 @@ _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
 _PAGE_MARKER = re.compile(r"(?m)^<!-- page \d+ -->\s*$")
 
 
-def _est_tokens(text: str) -> int:
-    # 粗略：~4 字符/token；确定性即可，不依赖外部分词器
-    return max(1, len(text) // 4)
-
-
 def _sections(md: str):
     """切成 (heading_path, char_start, char_end) 段；首个 heading 前的前言归 ""。"""
     lines = md.splitlines(keepends=True)

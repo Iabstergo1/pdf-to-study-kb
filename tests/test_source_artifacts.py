@@ -71,3 +71,21 @@ def test_write_parse_report_roundtrip(tmp_path):
     assert len(sha) == 64
     loaded = json.loads(p.read_text(encoding="utf-8"))
     assert loaded["selected_backend"] == "markdown" and loaded["section_count"] == 3
+
+
+def test_build_parse_report_forces_advisory_constants():
+    # 即使调用方误传 advisory_only=False / consumed_by_auto_router=True，也被强制回安全值。
+    ra = sa.RoutingAdvice(recommended_backend="mineru", structured_reparse_recommended=True,
+                          advisory_only=False, consumed_by_auto_router=True)
+    rep = sa.build_parse_report("pymupdf", input_hash="h", routing_advice=ra)
+    assert rep["routing_advice"]["advisory_only"] is True
+    assert rep["routing_advice"]["consumed_by_auto_router"] is False
+
+
+def test_build_parse_report_allows_explicit_router_consumption():
+    # Spec 2 auto router 实际消费时，可显式置 consumed_by_auto_router=True（advisory_only 仍恒 True）。
+    ra = sa.RoutingAdvice(recommended_backend="mineru", structured_reparse_recommended=True)
+    rep = sa.build_parse_report("mineru", input_hash="h", routing_advice=ra,
+                                consumed_by_auto_router=True)
+    assert rep["routing_advice"]["advisory_only"] is True
+    assert rep["routing_advice"]["consumed_by_auto_router"] is True

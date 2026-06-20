@@ -65,19 +65,26 @@ class RoutingAdvice:
 
 
 def build_parse_report(selected_backend: str, *, input_hash: str,
-                       routing_advice: "RoutingAdvice", warnings=None, **extra) -> dict:
+                       routing_advice: "RoutingAdvice", warnings=None,
+                       consumed_by_auto_router: bool = False, **extra) -> dict:
     """组装 parse_report.json（advisory-only）。强制信封常量，避免漏写/误写。
 
-    Spec 1 不探测 MinerU：mineru_status 恒 "not_checked"，绝不写 mineru_available。
+    强制 advisory 契约：`routing_advice.advisory_only` 永远 True（即使调用方误传 False）；
+    `consumed_by_auto_router` 默认 False，**仅** auto router 实际据 advice/信号做路由时（Spec 2）
+    才由调用方显式置 True。
+    mineru_status 默认 "not_checked"（Spec 1）；MinerU backend 可经 extra 覆盖为 "used"/失败值。
     extra：per-backend 附加字段（pymupdf: page_count/block_count/needs_vision_pages/
-    risk_flag_counts；markdown: section_count/heading_count/block_count）。
+    risk_flag_counts；markdown: section_count/heading_count/block_count；mineru: 见 mineru_backend）。
     """
+    ra = asdict(routing_advice)
+    ra["advisory_only"] = True
+    ra["consumed_by_auto_router"] = bool(consumed_by_auto_router)
     report = {
         "selected_backend": selected_backend,
         "backend_policy": "contract_only",
         "artifact_version": ARTIFACT_VERSION,
         "input_hash": input_hash,
-        "routing_advice": asdict(routing_advice),
+        "routing_advice": ra,
         "mineru_status": "not_checked",
         "warnings": list(warnings or []),
     }
