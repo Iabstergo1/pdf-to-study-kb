@@ -327,3 +327,35 @@ def test_markdown_backend_section_blocks(tmp_path):
     assert res.report["routing_advice"]["recommended_backend"] == "markdown"
     assert res.report["section_count"] >= 2
     assert res.needs_vision_pages == []
+
+
+def test_pymupdf_backend_page_blocks_and_invariant(tmp_path):
+    import importlib.util as u
+    if u.find_spec("fitz") is None:
+        import pytest; pytest.skip("pymupdf not installed")
+    import fitz, importlib
+    pb = importlib.import_module("source_backends.pymupdf_backend")
+    src = tmp_path / "b.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "first page body")
+    page2 = doc.new_page()
+    page2.insert_text((72, 72), "second page")
+    for k in range(20):                       # 让第 2 页判难页（矢量图）
+        page2.draw_line(fitz.Point(72, 100 + k * 5), fitz.Point(300, 100 + k * 5))
+    doc.save(str(src)); doc.close()
+    res = pb.convert(src, out_dir=tmp_path / "o", input_hash="h")
+    assert len(res.blocks) == 2
+    assert all(b.type == "text" and b.text_level is None for b in res.blocks)
+    # char span 不变量：slice 含该页 marker 与 block.text
+    for b in res.blocks:
+        seg = res.source_md[b.char_start:b.char_end]
+        assert f"<!-- page {b.page} -->" in seg
+        assert b.text in seg
+    # 难页：第 2 页 asset_path 置位 + PNG 生成 + risk_flags
+    p2 = next(b for b in res.blocks if b.page == 2)
+    assert p2.asset_path == "assets/p0002.png"
+    assert (tmp_path / "o" / "assets" / "p0002.png").exists()
+    assert p2.risk_flags                       # 至少一个 reason
+    assert 2 in res.needs_vision_pages
+    assert res.report["selected_backend"] == "pymupdf"
+    assert res.report["page_count"] == 2 and res.report["block_count"] == 2
