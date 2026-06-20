@@ -50,19 +50,11 @@
 
 ```python
 from pathlib import Path
-import importlib.util
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def _load(name):
-    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
-
-
-sa = _load("source_artifacts")
+sys.path.insert(0, str(ROOT / "scripts"))  # 修正 A：普通 import，避免动态 _load 的 dataclass/双实例隐患
+import source_artifacts as sa
 
 
 def test_artifact_version_present():
@@ -1323,7 +1315,7 @@ Expected: 全绿（含 `test_legacy_removed.py`、skill 双树对等守卫、所
 
 - [ ] **Step 4: 确认 skill 双树零改动**
 
-Run: `git diff --name-only HEAD~12 -- .claude/skills .agents/skills`
+Run（修正 B：基于 base 分支，不用 HEAD~N）: `git diff --name-only "$(git merge-base main HEAD)"..HEAD -- .claude/skills .agents/skills`
 Expected: 空输出（本计划未触碰 skill 两树）。
 
 - [ ] **Step 5: 提交 + 完成分支**
