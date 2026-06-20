@@ -134,8 +134,9 @@ def cmd_source_convert(args):
                     "scanned_source / requires_ocr：本源近乎整本扫描件（≥80% 零文本+图像页），route B 不适用"
                     "——不让 LLM 临场 OCR 上千整页图。预处理停在 profile；请走 OCR route。"
                     "少数扫描页混在普通 PDF 不受影响。确要强行渲染：加 --force。")
-    # 同 profile：混入 profiler 版本，启发式升级时连带重渲难页 PNG。
-    ihash = hashlib.sha256(raw.read_bytes()).hexdigest() + ":" + source_profile.PROFILER_VERSION
+    # 版本化缓存键（单一真值，与 dispatcher 同源）：raw sha + PROFILER_VERSION（连带难页 PNG）
+    # + ARTIFACT_VERSION（blocks/parse_report 形状）。
+    ihash = source_convert.converted_input_hash(raw)
     if not state_store.should_run_stage(db, args.source, "converted", input_hash=ihash):
         print("[skip] converted up-to-date")
         return
@@ -146,6 +147,8 @@ def cmd_source_convert(args):
         # pages.jsonl 已由 profile 阶段产出；convert 内部用同一批纯函数复算 needs_vision，结果一致
         state_store.record_artifact(db, args.source, kind="source_md", path=res["source_md"], sha256=res["sha256"])
         state_store.record_artifact(db, args.source, kind="chapters", path=res["chapters_path"], sha256=res["chapters_sha"])
+        state_store.record_artifact(db, args.source, kind="blocks", path=res["blocks_path"], sha256=res["blocks_sha"])
+        state_store.record_artifact(db, args.source, kind="parse_report", path=res["parse_report_path"], sha256=res["parse_report_sha"])
         n_assets = _sync_assets(args.source)  # 难页 PNG 入 vault（公式嵌图依赖；任意源通用）
         state_store.complete_stage(db, args.source, "converted", output_hash=res["sha256"])
         print(f"[OK] converted → {res['source_md']} (needs_vision pages: {res['needs_vision_pages']}; "
