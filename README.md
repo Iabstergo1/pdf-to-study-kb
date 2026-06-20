@@ -81,7 +81,7 @@ python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yam
 
 > [!NOTE]
 > 必需依赖只有 **PyMuPDF + PyYAML**（见 [`requirements.txt`](requirements.txt)）。
-> 视觉保真走 route B：`source-convert` 用 PyMuPDF 抽文本，**难页（公式 / 矢量图 / 表 / 图表标题）高召回渲染整页 PNG**，由 ingest **读图**保真（公式写 KaTeX）。不依赖任何重型 OCR/ML 后端。
+> 默认 fast path 视觉保真走 route B：`source-convert` 用 PyMuPDF 抽文本，**难页（公式 / 矢量图 / 表 / 图表标题）高召回渲染整页 PNG**，由 ingest **读图**保真（公式写 KaTeX）。fast path 不依赖重型 OCR/ML；扫描 / 低文本密度 PDF、DOCX / PPTX 可走**可选 MinerU 结构化后端**（[`requirements-mineru.txt`](requirements-mineru.txt)，非默认依赖；`--backend auto` 自动路由）。
 
 ---
 
@@ -335,8 +335,7 @@ wiki/
 
 ### 暂不适用
 
-- **DOCX / PPTX 端到端**：适配器为后续期，当前只打通 `pdf` / `md`
-- **扫描件 / 纯图像 PDF 的高质量 OCR**：不内置任何重型 OCR / ML 后端（marker / surya 已评估并移除）
+- **DOCX / PPTX、扫描件 / 纯图像 PDF（fast path 默认不内置）**：轻量 fast path（PyMuPDF / Markdown）不支持；需安装**可选 MinerU 结构化后端**（`requirements-mineru.txt`，RTX 3050 Ti 4GB 仅 `pipeline`）。`--backend auto` 会自动把这些源路由到 MinerU，未装则 fail-closed、不伪装成功
 - **无人值守批量入库**：唯一的 LLM 是你**手动触发**的对话，不做自动批处理
 - **“导入即用”的零成本知识库**：每本书入库是一次需付费的 LLM 操作，交付时为空库
 
