@@ -428,3 +428,129 @@ def test_e2e_pdf_convert_then_block_windows(tmp_path):
     covered = "".join(md[w["char_start"]:w["char_end"]] for w in ws)
     assert covered.count("<!-- page") == 3
     assert res["backend"] == "pymupdf"
+
+
+# --- Spec 2 C4：dispatcher backend/policy 路由 + cache key ---
+
+def test_select_backend_explicit_pymupdf_does_not_consume_auto():
+    assert source_convert.select_backend("pdf", None, backend="pymupdf",
+                                         policy="conservative") == ("pymupdf", False)
+
+
+def test_select_backend_explicit_mineru():
+    assert source_convert.select_backend("pdf", None, backend="mineru",
+                                         policy="conservative") == ("mineru", False)
+
+
+def test_select_backend_auto_md_markdown():
+    assert source_convert.select_backend("md", None, backend="auto",
+                                         policy="conservative") == ("markdown", True)
+
+
+def test_select_backend_auto_docx_pptx_mineru():
+    assert source_convert.select_backend("docx", None, backend="auto", policy="conservative")[0] == "mineru"
+    assert source_convert.select_backend("pptx", None, backend="auto", policy="conservative")[0] == "mineru"
+
+
+def test_select_backend_auto_normal_pdf_pymupdf():
+    pages = [{"text_len": 800, "image_count": 0, "needs_vision_reason": []} for _ in range(5)]
+    assert source_convert.select_backend("pdf", pages, backend="auto", policy="conservative")[0] == "pymupdf"
+
+
+def test_select_backend_auto_scanned_pdf_mineru():
+    pages = [{"text_len": 0, "image_count": 1, "needs_vision_reason": ["scanned-or-image"]}
+             for _ in range(10)]
+    assert source_convert.select_backend("pdf", pages, backend="auto", policy="conservative")[0] == "mineru"
+
+
+def test_select_backend_auto_low_text_pdf_mineru():
+    pages = [{"text_len": 20, "image_count": 0, "needs_vision_reason": []} for _ in range(10)]
+    assert source_convert.select_backend("pdf", pages, backend="auto", policy="conservative")[0] == "mineru"
+
+
+def test_select_backend_dense_conservative_pymupdf_aggressive_mineru():
+    pages = [{"text_len": 800, "image_count": 0, "needs_vision_reason": ["formula"]} for _ in range(10)]
+    assert source_convert.select_backend("pdf", pages, backend="auto", policy="conservative")[0] == "pymupdf"
+    assert source_convert.select_backend("pdf", pages, backend="auto", policy="aggressive")[0] == "mineru"
+
+
+def test_converted_input_hash_varies_by_backend_policy(tmp_path):
+    src = tmp_path / "n.md"; src.write_text("x", encoding="utf-8")
+    h_auto = source_convert.converted_input_hash(src, backend="auto", policy="conservative")
+    h_mineru = source_convert.converted_input_hash(src, backend="mineru", policy="conservative")
+    h_aggr = source_convert.converted_input_hash(src, backend="auto", policy="aggressive")
+    assert h_auto != h_mineru and h_auto != h_aggr and h_mineru != h_aggr
+
+
+def test_convert_mineru_required_but_unavailable_fail_closed(tmp_path, monkeypatch):
+    import pytest
+    import source_backends.mineru_backend as _mb
+    monkeypatch.setattr(_mb, "mineru_available", lambda: False)
+    src = tmp_path / "s.pdf"; src.write_text("x", encoding="utf-8")
+    pages = [{"text_len": 0, "image_count": 1, "needs_vision_reason": ["scanned-or-image"]}
+             for _ in range(10)]
+    with pytest.raises(source_convert.BackendUnavailable):
+        source_convert.convert(src, out_dir=tmp_path / "o", fmt="pdf", backend="auto",
+                               mineru_policy="conservative", profile_pages=pages)
+
+
+def test_convert_mineru_success_marks_consumed_by_auto_router(tmp_path, monkeypatch):
+    import source_backends.mineru_backend as _mb
+    monkeypatch.setattr(_mb, "mineru_available", lambda: True)
+    monkeypatch.setattr(_mb, "_mineru_version", lambda: "x")
+
+    def fake_run(src, raw_dir, *, timeout):
+        import json
+        from pathlib import Path as _P
+        auto = _P(raw_dir) / "x" / "auto"
+        auto.mkdir(parents=True, exist_ok=True)
+        (auto / "x_content_list.json").write_text(
+            json.dumps([{"type": "text", "text": "hi", "page_idx": 0}]), encoding="utf-8")
+        return _P(raw_dir)
+    monkeypatch.setattr(_mb, "_run_mineru", fake_run)
+    src = tmp_path / "d.docx"; src.write_text("x", encoding="utf-8")
+    res = source_convert.convert(src, out_dir=tmp_path / "o", fmt="docx", backend="auto",
+                                 mineru_policy="conservative")
+    assert res["backend"] == "mineru"
+    import json
+    rep = json.loads((tmp_path / "o" / "parse_report.json").read_text(encoding="utf-8"))
+    assert rep["routing_advice"]["consumed_by_auto_router"] is True   # auto 实际据信号路由
+    assert rep["routing_advice"]["advisory_only"] is True
+
+
+def test_convert_explicit_mineru_not_marked_auto_consumed(tmp_path, monkeypatch):
+    import source_backends.mineru_backend as _mb
+    monkeypatch.setattr(_mb, "mineru_available", lambda: True)
+    monkeypatch.setattr(_mb, "_mineru_version", lambda: "x")
+
+    def fake_run(src, raw_dir, *, timeout):
+        import json
+        from pathlib import Path as _P
+        auto = _P(raw_dir) / "x" / "auto"
+        auto.mkdir(parents=True, exist_ok=True)
+        (auto / "x_content_list.json").write_text(
+            json.dumps([{"type": "text", "text": "hi", "page_idx": 0}]), encoding="utf-8")
+        return _P(raw_dir)
+    monkeypatch.setattr(_mb, "_run_mineru", fake_run)
+    src = tmp_path / "p.pdf"; src.write_text("x", encoding="utf-8")
+    res = source_convert.convert(src, out_dir=tmp_path / "o", fmt="pdf", backend="mineru")
+    import json
+    rep = json.loads((tmp_path / "o" / "parse_report.json").read_text(encoding="utf-8"))
+    assert res["backend"] == "mineru"
+    assert rep["routing_advice"]["consumed_by_auto_router"] is False  # 显式指定，非 auto 消费
+
+
+def test_convert_mineru_failure_writes_failed_report_and_raises(tmp_path, monkeypatch):
+    import pytest
+    import source_backends.mineru_backend as _mb
+    monkeypatch.setattr(_mb, "mineru_available", lambda: True)
+
+    def boom(src, raw_dir, *, timeout):
+        raise _mb.MineruRunFailed("exited 1")
+    monkeypatch.setattr(_mb, "_run_mineru", boom)
+    src = tmp_path / "p.pdf"; src.write_text("x", encoding="utf-8")
+    with pytest.raises(_mb.MineruRunFailed):
+        source_convert.convert(src, out_dir=tmp_path / "o", fmt="pdf", backend="mineru")
+    import json
+    rep = json.loads((tmp_path / "o" / "parse_report.json").read_text(encoding="utf-8"))
+    assert rep["mineru_failed"] is True and rep["mineru_status"] == "failed"
