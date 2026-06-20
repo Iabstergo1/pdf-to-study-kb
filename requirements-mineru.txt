@@ -1,0 +1,12 @@
+# Optional structured backend (Spec 2). 故意不在默认 requirements.txt 里，避免破坏轻量安装。
+# 仅在需要把扫描 PDF / 低文本密度 PDF / DOCX / PPTX / 复杂表格·公式·图片做结构化解析时安装。
+#
+# 硬件约束（RTX 3050 Ti 4GB 显存）：本项目默认只用 MinerU 的 pipeline 后端，
+# CLI 调用恒显式 `-b pipeline`，禁用 vlm-engine / hybrid-engine / 本地 VLM。
+#
+# 安装：
+#   conda activate study-kb
+#   pip install -r requirements-mineru.txt
+#
+# [all] 亦可（更重）；pipeline-only 用 [core] 足够。版本按实测固定。
+mineru[core]
