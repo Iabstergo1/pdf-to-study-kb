@@ -87,3 +87,15 @@ def test_source_convert_records_blocks_and_parse_report(tmp_path):
     assert "blocks" in kinds and "parse_report" in kinds
     assert (staging / "blocks.jsonl").exists()
     assert (staging / "parse_report.json").exists()
+
+
+def test_windows_block_mode_when_blocks_present(tmp_path):
+    import json
+    sid = "p2win"
+    _preprocess_md(tmp_path, sid, "# A\n\naaa\n\n# B\n\nbbb\n")
+    assert _run(["windows", "--source", sid], tmp_path).returncode == 0
+    staging = tmp_path / "pipeline-workspace" / "staging" / sid
+    ws = [json.loads(l) for l in
+          (staging / "windows.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert ws and all(w["mode"] == "blocks" for w in ws)
+    assert all("block_ids" in w for w in ws)

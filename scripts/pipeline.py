@@ -186,32 +186,40 @@ def cmd_sync_assets(args):
 
 
 def cmd_windows(args):
-    """确定性 processing windows：source.md → windows.jsonl。"""
+    """确定性 processing windows：有 blocks.jsonl 走 block-aware，否则退回旧 char 窗。"""
     import state_store
     import windowing
+    import source_artifacts
     import json
     import hashlib
     db = _vault_state_db()
     out = _staging_dir(args.source)
+    blocks_path = out / "blocks.jsonl"
     source_md = out / "source.md"
     if not source_md.exists():
         raise SystemExit("run source-convert first")
-    md = source_md.read_text(encoding="utf-8")
+    # 有 blocks → 以 blocks.jsonl 为切窗依据（block-aware）；无 → 退回 source.md char 窗。
+    if blocks_path.exists():
+        basis = blocks_path.read_bytes()
+        build = lambda: windowing.build_windows_from_blocks(source_artifacts.read_blocks(blocks_path))
+    else:
+        basis = source_md.read_text(encoding="utf-8").encode("utf-8")
+        build = lambda: windowing.build_windows(source_md.read_text(encoding="utf-8"))
     # 混入窗口算法版本：切分逻辑升级即失效缓存（对任意来源通用）。
-    ihash = hashlib.sha256(md.encode("utf-8")).hexdigest() + ":" + windowing.WINDOWING_VERSION
+    ihash = hashlib.sha256(basis).hexdigest() + ":" + windowing.WINDOWING_VERSION
     if not state_store.should_run_stage(db, args.source, "windowed", input_hash=ihash):
         print("[skip] windowed up-to-date")
         return
     state_store.start_stage(db, args.source, "windowed", input_hash=ihash)
     try:
-        ws = windowing.build_windows(md)
+        ws = build()
         (out / "windows.jsonl").write_text(
             "\n".join(json.dumps(w, ensure_ascii=False) for w in ws), encoding="utf-8")
         ohash = hashlib.sha256((out / "windows.jsonl").read_bytes()).hexdigest()
         state_store.record_artifact(db, args.source, kind="windows",
                                     path=str(out / "windows.jsonl"), sha256=ohash)
         state_store.complete_stage(db, args.source, "windowed", output_hash=ohash)
-        print(f"[OK] windowed → {len(ws)} windows")
+        print(f"[OK] windowed → {len(ws)} windows ({'blocks' if blocks_path.exists() else 'chars'})")
     except Exception as e:
         state_store.fail_stage(db, args.source, "windowed", error=str(e))
         raise
