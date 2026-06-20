@@ -114,35 +114,40 @@ def cmd_profile(args):
 
 
 def cmd_source_convert(args):
-    """source-convert：raw → staging/<source>/source.md + 难页 PNG。"""
+    """source-convert：raw → staging/<source>/ 全 artifact。按 --backend/--mineru-policy 选后端。"""
     import state_store
     import source_convert
     import source_profile
+    import json as _json
     db = _vault_state_db()
     raw = _raw_path(db, state_store, args.source)
     src_row = state_store.get_source(db, args.source)
-    # 整本扫描件 fail-closed：route B 不适合让 LLM 临场 OCR 上千整页图；停在 profile，需 OCR route。
-    # 少数扫描页混在普通 PDF（比值<0.8）不触发，仍按 route B 处理。--force 可强行渲染（慎用）。
-    if not getattr(args, "force", False):
-        import json as _json
-        pj = _staging_dir(args.source) / "pages.jsonl"
-        if pj.exists():
-            _pages = [_json.loads(l) for l in pj.read_text(encoding="utf-8").splitlines() if l.strip()]
-            if source_profile.is_scanned_source(_pages):
-                raise SystemExit(
-                    "scanned_source / requires_ocr：本源近乎整本扫描件（≥80% 零文本+图像页），route B 不适用"
-                    "——不让 LLM 临场 OCR 上千整页图。预处理停在 profile；请走 OCR route。"
-                    "少数扫描页混在普通 PDF 不受影响。确要强行渲染：加 --force。")
-    # 版本化缓存键（单一真值，与 dispatcher 同源）：raw sha + PROFILER_VERSION（连带难页 PNG）
-    # + ARTIFACT_VERSION（blocks/parse_report 形状）。
-    ihash = source_convert.converted_input_hash(raw)
+    fmt = src_row["format"]
+    backend = getattr(args, "backend", "auto")
+    policy = getattr(args, "mineru_policy", "conservative")
+    # profile pages（供 auto 路由 + 扫描件再协调）；docx/pptx 为空。
+    pj = _staging_dir(args.source) / "pages.jsonl"
+    pages = ([_json.loads(l) for l in pj.read_text(encoding="utf-8").splitlines() if l.strip()]
+             if pj.exists() else [])
+    name, _consumed = source_convert.select_backend(fmt, pages, backend=backend, policy=policy)
+    # route-B 仅适合 born-digital 少数难页：整本扫描件若仍要走 PyMuPDF 且未 --force → 阻断，
+    # 引导用 MinerU（默认 auto 已把扫描件路由给 MinerU；仅在选定后端确为 pymupdf 时才探测此条）。
+    if name == "pymupdf" and not getattr(args, "force", False) and source_profile.is_scanned_source(pages):
+        raise SystemExit(
+            "scanned_source / requires_ocr：整本扫描件不适合 PyMuPDF route B。"
+            "用 --backend auto（默认，扫描件走 MinerU）或安装 MinerU（requirements-mineru.txt）；"
+            "确要 PyMuPDF 渲染加 --force。")
+    # 版本化缓存键（单一真值，与 dispatcher 同源）：raw sha + PROFILER_VERSION + ARTIFACT_VERSION
+    # + backend + policy + MINERU_ADAPTER_VERSION（切后端/策略不复用彼此产物）。
+    ihash = source_convert.converted_input_hash(raw, backend=backend, policy=policy)
     if not state_store.should_run_stage(db, args.source, "converted", input_hash=ihash):
         print("[skip] converted up-to-date")
         return
     state_store.start_stage(db, args.source, "converted", input_hash=ihash)
     try:
         out = _staging_dir(args.source)
-        res = source_convert.convert(raw, out_dir=out, fmt=src_row["format"])
+        res = source_convert.convert(raw, out_dir=out, fmt=fmt, backend=backend,
+                                     mineru_policy=policy, profile_pages=pages)
         # pages.jsonl 已由 profile 阶段产出；convert 内部用同一批纯函数复算 needs_vision，结果一致
         state_store.record_artifact(db, args.source, kind="source_md", path=res["source_md"], sha256=res["sha256"])
         state_store.record_artifact(db, args.source, kind="chapters", path=res["chapters_path"], sha256=res["chapters_sha"])
@@ -150,8 +155,8 @@ def cmd_source_convert(args):
         state_store.record_artifact(db, args.source, kind="parse_report", path=res["parse_report_path"], sha256=res["parse_report_sha"])
         n_assets = _sync_assets(args.source)  # 难页 PNG 入 vault（公式嵌图依赖；任意源通用）
         state_store.complete_stage(db, args.source, "converted", output_hash=res["sha256"])
-        print(f"[OK] converted → {res['source_md']} (needs_vision pages: {res['needs_vision_pages']}; "
-              f"synced {n_assets} PNG → vault assets)")
+        print(f"[OK] converted → {res['source_md']} (backend={res['backend']}; "
+              f"needs_vision pages: {res['needs_vision_pages']}; synced {n_assets} PNG → vault assets)")
     except Exception as e:
         state_store.fail_stage(db, args.source, "converted", error=str(e))
         raise
@@ -1019,10 +1024,14 @@ def main():
                             ("windows", "生成确定性 processing windows")]:
         p = subparsers.add_parser(name, help=help_text)
         p.add_argument("--source", required=True, help="source_id")
-    scp = subparsers.add_parser("source-convert", help="转成 staging/<source>/source.md + 难页 PNG")
+    scp = subparsers.add_parser("source-convert", help="转成 staging/<source>/ 全 artifact（按 backend 选后端）")
     scp.add_argument("--source", required=True, help="source_id")
     scp.add_argument("--force", action="store_true",
-                     help="强行转换扫描件（绕过 scanned_source fail-closed，慎用）")
+                     help="强行用 PyMuPDF 转扫描件（绕过 scanned_source fail-closed，慎用）")
+    scp.add_argument("--backend", choices=["auto", "pymupdf", "mineru"], default="auto",
+                     help="选后端：auto（默认）/ pymupdf 强制轻量 / mineru 强制结构化（未装则 fail-closed）")
+    scp.add_argument("--mineru-policy", choices=["conservative", "aggressive"], default="conservative",
+                     help="auto 路由策略：conservative（默认，密集 born-digital 仍 PyMuPDF）/ aggressive（密集也走 MinerU）")
     subparsers.add_parser("init-vault", help="建 wiki/ 脚手架 + overview/log/purpose 种子（幂等）")
     subparsers.add_parser("apply-obsidian-style",
                           help="落地学习库观感 CSS snippet + merge appearance.json（幂等，纯配置层零内容改动）")

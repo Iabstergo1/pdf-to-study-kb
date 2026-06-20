@@ -112,17 +112,21 @@ def test_show_window_plain_suppresses_assets_header(tmp_path):
 
 
 def test_source_convert_fail_closed_on_scanned_source(tmp_path):
-    # 整本扫描件：source-convert 应 fail-closed（不渲染、不生成可 ingest 产物），提示需 OCR route
-    note = tmp_path / "raw" / "s.md"
+    # Spec 2 重新协调：整本扫描件 PDF 仍 fail-closed（不生成可 ingest 产物），但路径分两条——
+    #   --backend pymupdf（route B）未 --force → 阻断（scanned_source）；
+    #   默认 auto → 路由 MinerU，本机未装 → fail-closed（requirements-mineru）。
+    note = tmp_path / "raw" / "s.pdf"
     note.parent.mkdir(parents=True)
     note.write_text("body", encoding="utf-8")
-    _run(["add-source", "--source", "scan", "--domain", "misc", "--path", str(note), "--fmt", "md"], tmp_path)
+    _run(["add-source", "--source", "scan", "--domain", "misc", "--path", str(note), "--fmt", "pdf"], tmp_path)
     staging = tmp_path / "pipeline-workspace" / "staging" / "scan"
     staging.mkdir(parents=True)
     (staging / "pages.jsonl").write_text(
         "\n".join('{"page":%d,"text_len":0,"image_count":1,"needs_vision":true}' % i
                   for i in range(1, 11)), encoding="utf-8")
-    r = _run(["source-convert", "--source", "scan"], tmp_path)
+    # PyMuPDF route B 路径：整本扫描件未 --force → 阻断（auto→MinerU-unavailable 的 fail-closed
+    # 见 test_p2_cli::test_source_convert_docx_auto_mineru_unavailable_fail_closed）。
+    r = _run(["source-convert", "--source", "scan", "--backend", "pymupdf"], tmp_path)
     assert r.returncode != 0, r.stdout
     assert "scanned_source" in (r.stdout + r.stderr)
 

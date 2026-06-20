@@ -109,3 +109,61 @@ def test_show_window_block_header(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "window-meta" in r.stdout and "heading_path=A" in r.stdout
     assert "block_ids=" in r.stdout and "aaa" in r.stdout      # 块头 + 原窗正文都在
+
+
+# --- Spec 2 C5：pipeline CLI auto 路由（MinerU 本机未装 → 天然 fail-closed） ---
+
+def _preprocess_pdf(tmp_path, sid):
+    import importlib.util as u
+    if u.find_spec("fitz") is None:
+        import pytest; pytest.skip("pymupdf not installed")
+    import fitz
+    raw = tmp_path / f"{sid}.pdf"
+    doc = fitz.open()
+    for _ in range(2):
+        doc.new_page().insert_text((72, 72), "readable body text on this page here")
+    doc.save(str(raw)); doc.close()
+    assert _run(["add-source", "--source", sid, "--domain", "d",
+                 "--path", str(raw), "--fmt", "pdf"], tmp_path).returncode == 0
+    assert _run(["profile", "--source", sid], tmp_path).returncode == 0
+    return raw
+
+
+def test_source_convert_backend_pymupdf(tmp_path):
+    import json
+    sid = "p2bp"
+    _preprocess_pdf(tmp_path, sid)
+    r = _run(["source-convert", "--source", sid, "--backend", "pymupdf"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    rep = json.loads((tmp_path / "pipeline-workspace" / "staging" / sid / "parse_report.json"
+                      ).read_text(encoding="utf-8"))
+    assert rep["selected_backend"] == "pymupdf"
+
+
+def test_source_convert_backend_mineru_unavailable_fail_closed(tmp_path):
+    sid = "p2bm"
+    _preprocess_pdf(tmp_path, sid)
+    r = _run(["source-convert", "--source", sid, "--backend", "mineru"], tmp_path)
+    assert r.returncode != 0
+    assert "requirements-mineru" in (r.stdout + r.stderr)
+
+
+def test_source_convert_default_auto_md_stays_markdown(tmp_path):
+    import json
+    sid = "p2am"
+    _preprocess_md(tmp_path, sid, "# A\n\nbody\n")   # _preprocess_md 已跑 source-convert（默认 auto）
+    rep = json.loads((tmp_path / "pipeline-workspace" / "staging" / sid / "parse_report.json"
+                      ).read_text(encoding="utf-8"))
+    assert rep["selected_backend"] == "markdown"
+
+
+def test_source_convert_docx_auto_mineru_unavailable_fail_closed(tmp_path):
+    sid = "p2docx"
+    raw = tmp_path / f"{sid}.docx"
+    raw.write_bytes(b"PK\x03\x04 fake docx")
+    assert _run(["add-source", "--source", sid, "--domain", "d",
+                 "--path", str(raw), "--fmt", "docx"], tmp_path).returncode == 0
+    assert _run(["profile", "--source", sid], tmp_path).returncode == 0   # docx profile → [] 不崩
+    r = _run(["source-convert", "--source", sid], tmp_path)               # auto → mineru → 不可用
+    assert r.returncode != 0
+    assert "requirements-mineru" in (r.stdout + r.stderr)

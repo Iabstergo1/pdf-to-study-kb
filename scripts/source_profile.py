@@ -224,4 +224,8 @@ def profile_source(src_path, *, fmt: str) -> list[dict]:
                                       n_draw=sig["n_draw"], n_tables=sig["n_tables"]))
         doc.close()
         return pages
+    if fmt in ("docx", "pptx"):
+        # Spec 2：docx/pptx 由 MinerU 结构化解析；profile 不逐页扫（无等价轻量后端）。
+        # 返回空 pages，使 profile 阶段不崩；auto 路由据 fmt 直接选 mineru。
+        return []
     raise ValueError(f"no P1 profile backend for fmt={fmt}")
