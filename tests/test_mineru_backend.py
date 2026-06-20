@@ -139,3 +139,29 @@ def test_convert_propagates_run_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(mb, "_run_mineru", boom)
     with pytest.raises(mb.MineruRunFailed):
         mb.convert(tmp_path / "x.pdf", out_dir=tmp_path / "o", input_hash="h")
+
+
+def test_e2e_mineru_convert_to_block_windows(tmp_path, monkeypatch):
+    # C10 端到端（mock MinerU）：docx --backend auto → mineru → artifact → block windows 风险元数据
+    import importlib
+    import json
+    import source_convert
+    windowing = importlib.import_module("windowing")
+    import source_artifacts
+    monkeypatch.setattr(mb, "mineru_available", lambda: True)
+    monkeypatch.setattr(mb, "_mineru_version", lambda: "x")
+    monkeypatch.setattr(mb, "_run_mineru", _fake_run_mineru_writes_output(tmp_path))
+    src = tmp_path / "doc.docx"
+    src.write_text("x", encoding="utf-8")
+    res = source_convert.convert(src, out_dir=tmp_path / "o", fmt="docx", backend="auto")
+    assert res["backend"] == "mineru"
+    blocks = source_artifacts.read_blocks(tmp_path / "o" / "blocks.jsonl")
+    ws = windowing.build_windows_from_blocks(blocks)
+    flags = set()
+    for w in ws:
+        flags.update(w.get("risk_flags") or [])
+    assert {"table", "equation", "image"} <= flags          # 风险类型进窗
+    assert any(w.get("assets") for w in ws)                  # 图片 asset 进窗
+    rep = json.loads((tmp_path / "o" / "parse_report.json").read_text(encoding="utf-8"))
+    assert rep["mineru_status"] == "used" and rep["table_count"] == 1 and rep["image_count"] == 1
+    assert rep["routing_advice"]["consumed_by_auto_router"] is True
