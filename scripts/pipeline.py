@@ -461,14 +461,10 @@ def cmd_reopen(args):
 
 
 def _page_ranges_for_md(md: str) -> dict:
-    """source.md 各 `<!-- page N -->` 页的 char 范围 {page: (start, end)}（纯函数，显示时即时算）。"""
-    import re
-    markers = [(int(m.group(1)), m.start()) for m in re.finditer(r"<!-- page (\d+) -->", md)]
-    ranges = {}
-    for i, (page, start) in enumerate(markers):
-        end = markers[i + 1][1] if i + 1 < len(markers) else len(md)
-        ranges[page] = (start, end)
-    return ranges
+    """source.md 各 `<!-- page N -->` 页的 char 范围 {page: (start, end)}。
+    复用 windowing.page_char_ranges（与 PyMuPDF page block 同一套 marker 扫描真值）。"""
+    import windowing
+    return windowing.page_char_ranges(md)
 
 
 def _pages_overlapping_range(page_ranges: dict, start: int, end: int) -> list:
@@ -494,6 +490,15 @@ def cmd_show_window(args):
     if selected is None:
         raise SystemExit(f"window not found: {args.window}")
     start, end = selected["char_start"], selected["char_end"]
+    if selected.get("mode") == "blocks" and not getattr(args, "plain", False):
+        # block-aware 窗的结构化头（纯加法；不改下方原窗正文输出语义）。
+        hp = selected.get("heading_path", "")
+        bids = ",".join(selected.get("block_ids") or [])
+        rf = ",".join(selected.get("risk_flags") or [])
+        assets = ",".join(selected.get("assets") or [])
+        print(f"<!-- window-meta: heading_path={hp} "
+              f"pages={selected.get('page_start')}-{selected.get('page_end')} "
+              f"block_ids={bids} risk_flags={rf} assets={assets} -->")
     if not getattr(args, "plain", False):
         pages = _pages_overlapping_range(_page_ranges_for_md(md), start, end)
         page_meta = {}

@@ -99,3 +99,13 @@ def test_windows_block_mode_when_blocks_present(tmp_path):
           (staging / "windows.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
     assert ws and all(w["mode"] == "blocks" for w in ws)
     assert all("block_ids" in w for w in ws)
+
+
+def test_show_window_block_header(tmp_path):
+    sid = "p2show"
+    _preprocess_md(tmp_path, sid, "# A\n\naaa\n")
+    assert _run(["windows", "--source", sid], tmp_path).returncode == 0
+    r = _run(["show-window", "--source", sid, "--window", "w0000"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "window-meta" in r.stdout and "heading_path=A" in r.stdout
+    assert "block_ids=" in r.stdout and "aaa" in r.stdout      # 块头 + 原窗正文都在
