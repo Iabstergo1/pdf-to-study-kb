@@ -59,6 +59,19 @@ def test_normalize_content_list_types_and_discard(tmp_path):
     assert all("header" not in (b.text or "") for b in blocks)
 
 
+def test_normalize_handles_chart_as_image(tmp_path):
+    # MinerU 3.4.0 真实存在 type='chart'（ContentType.CHART）；归一为 image（带图 asset + risk）。
+    assets_src = tmp_path / "raw"
+    (assets_src / "images").mkdir(parents=True)
+    (assets_src / "images" / "c1.jpg").write_bytes(b"\xff\xd8jpg")
+    items = [{"type": "chart", "img_path": "images/c1.jpg", "chart_caption": ["Chart 1"], "page_idx": 0}]
+    blocks, _ = mb.normalize_content_list(items, assets_src_dir=assets_src,
+                                          assets_out_dir=tmp_path / "o" / "assets")
+    assert blocks[0].type == "image" and blocks[0].risk_flags == ["image"]
+    assert blocks[0].asset_path == "assets/c1.jpg"
+    assert "Chart 1" in blocks[0].text
+
+
 def test_render_source_md_assigns_char_spans(tmp_path):
     blocks, _ = mb.normalize_content_list(_fake_content_list(),
                                           assets_src_dir=tmp_path, assets_out_dir=tmp_path / "a")

@@ -80,8 +80,9 @@ def normalize_content_list(items, *, assets_src_dir, assets_out_dir):
         elif t in ("equation", "formula"):
             latex = it.get("text") or it.get("latex") or ""
             blocks.append(sa.SourceBlock(type="equation", text=latex, risk_flags=["equation"], **common))
-        elif t in ("image", "figure"):
-            cap = it.get("img_caption") or it.get("image_caption") or []
+        elif t in ("image", "figure", "chart"):   # MinerU 3.x：chart 与 image 同类（ContentType.CHART='chart'）
+            cap = (it.get("img_caption") or it.get("image_caption")
+                   or it.get("chart_caption") or [])
             cap_text = " ".join(cap) if isinstance(cap, list) else str(cap or "")
             asset_path = _copy_asset(it.get("img_path"), assets_src_dir, assets_out_dir)
             blocks.append(sa.SourceBlock(type="image", text=cap_text, risk_flags=["image"],
