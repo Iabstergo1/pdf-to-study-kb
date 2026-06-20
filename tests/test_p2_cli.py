@@ -140,7 +140,8 @@ def test_source_convert_backend_pymupdf(tmp_path):
     assert rep["selected_backend"] == "pymupdf"
 
 
-def test_source_convert_backend_mineru_unavailable_fail_closed(tmp_path):
+def test_source_convert_backend_mineru_unavailable_fail_closed(tmp_path, monkeypatch):
+    monkeypatch.setenv("MINERU_DISABLE", "1")   # 确定性禁用 MinerU（不依赖是否真装）
     sid = "p2bm"
     _preprocess_pdf(tmp_path, sid)
     r = _run(["source-convert", "--source", sid, "--backend", "mineru"], tmp_path)
@@ -157,7 +158,8 @@ def test_source_convert_default_auto_md_stays_markdown(tmp_path):
     assert rep["selected_backend"] == "markdown"
 
 
-def test_source_convert_docx_auto_mineru_unavailable_fail_closed(tmp_path):
+def test_source_convert_docx_auto_mineru_unavailable_fail_closed(tmp_path, monkeypatch):
+    monkeypatch.setenv("MINERU_DISABLE", "1")   # 确定性禁用 MinerU（不依赖是否真装）
     sid = "p2docx"
     raw = tmp_path / f"{sid}.docx"
     raw.write_bytes(b"PK\x03\x04 fake docx")

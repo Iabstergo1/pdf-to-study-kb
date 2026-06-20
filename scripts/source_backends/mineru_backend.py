@@ -25,8 +25,17 @@ class MineruRunFailed(RuntimeError):
 
 
 def mineru_available() -> bool:
-    """是否可调用 MinerU CLI（subprocess 探测，不 import 内部 API）。"""
-    return shutil.which("mineru") is not None
+    """MinerU 是否可用：读包元数据（不 import MinerU、不依赖 CLI/PATH，保持主进程隔离）。
+    MINERU_DISABLE=1 可强制禁用（测试/运维逃生开关）。"""
+    import os
+    if os.environ.get("MINERU_DISABLE") == "1":
+        return False
+    try:
+        import importlib.metadata as _md
+        _md.version("mineru")
+        return True
+    except Exception:
+        return False
 
 
 # header/footer/page_number/discarded：不进正文块，仅计数（避免污染 source view 与窗口）。
@@ -148,19 +157,24 @@ def build_mineru_report(blocks, *, input_hash, discarded_count, mineru_version="
 
 
 def _run_mineru(src_path, raw_dir, *, timeout):
-    """subprocess 调 MinerU CLI（恒 `-b pipeline`，禁 vlm/hybrid）。失败抛 MineruRunFailed。"""
+    """用当前解释器在**隔离子进程**里跑 mineru_runner.py（do_parse backend=pipeline，禁 vlm/hybrid）。
+    主进程不 import MinerU。失败（非零/超时/调用异常）抛 MineruRunFailed（不静默回退）。"""
     import subprocess
+    import sys
     raw_dir = Path(raw_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
-    cmd = ["mineru", "-p", str(src_path), "-o", str(raw_dir), "-b", "pipeline"]
+    runner = str(Path(__file__).with_name("mineru_runner.py"))
+    cmd = [sys.executable, runner, "--input", str(src_path),
+           "--output", str(raw_dir), "--backend", "pipeline"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as e:
-        raise MineruRunFailed(f"mineru timeout after {timeout}s") from e
-    except Exception as e:                       # FileNotFoundError 等
-        raise MineruRunFailed(f"mineru invocation failed: {e}") from e
+        raise MineruRunFailed(f"mineru runner timeout after {timeout}s") from e
+    except Exception as e:
+        raise MineruRunFailed(f"mineru runner invocation failed: {e}") from e
     if proc.returncode != 0:
-        raise MineruRunFailed(f"mineru exited {proc.returncode}: {(proc.stderr or '').strip()[:500]}")
+        raise MineruRunFailed(
+            f"mineru runner exited {proc.returncode}: {(proc.stderr or '').strip()[:500]}")
     return raw_dir
 
 
@@ -172,11 +186,10 @@ def _find_content_list(raw_dir):
 
 
 def _mineru_version():
-    import subprocess
+    """读已安装 mineru 包版本（不依赖 CLI）；失败 → "unknown"。"""
     try:
-        r = subprocess.run(["mineru", "--version"], capture_output=True, text=True, timeout=30)
-        out = (r.stdout or r.stderr or "").strip()
-        return out.splitlines()[0] if out else "unknown"
+        import importlib.metadata as _md
+        return _md.version("mineru")
     except Exception:
         return "unknown"
 

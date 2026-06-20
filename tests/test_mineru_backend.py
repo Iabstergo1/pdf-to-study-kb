@@ -102,16 +102,53 @@ class _FakeProc:
         self.stderr = stderr
 
 
-def test_run_mineru_command_uses_pipeline_no_vlm_hybrid(tmp_path, monkeypatch):
+def test_run_mineru_uses_isolated_python_runner_pipeline(tmp_path, monkeypatch):
     import subprocess
+    import sys
     captured = {}
     monkeypatch.setattr(subprocess, "run",
                         lambda cmd, **kw: (captured.__setitem__("cmd", cmd), _FakeProc())[1])
     mb._run_mineru(tmp_path / "x.pdf", tmp_path / "raw", timeout=10)
     cmd = [str(c) for c in captured["cmd"]]
-    assert "-b" in cmd and cmd[cmd.index("-b") + 1] == "pipeline"   # 显式 pipeline
+    assert cmd[0] == sys.executable                 # 隔离子进程跑 python（非 mineru CLI、非主进程 do_parse）
+    assert cmd[1].endswith("mineru_runner.py")
+    assert "--backend" in cmd and cmd[cmd.index("--backend") + 1] == "pipeline"   # 强制 pipeline
     assert not any("vlm" in c for c in cmd)
     assert not any("hybrid" in c for c in cmd)
+
+
+def test_mineru_runner_calls_do_parse_pipeline(tmp_path):
+    from source_backends import mineru_runner
+    calls = {}
+
+    def fake_do_parse(out, names, pdfs, langs, backend="pipeline", parse_method="auto"):
+        calls.update(out=out, names=names, backend=backend, n=len(pdfs), method=parse_method)
+    src = tmp_path / "x.pdf"
+    src.write_bytes(b"%PDF-1.4 dummy")
+    mineru_runner.run(str(src), str(tmp_path / "o"), backend="pipeline", _do_parse=fake_do_parse)
+    assert calls["backend"] == "pipeline" and calls["n"] == 1 and calls["names"] == ["x"]
+
+
+def test_mineru_runner_rejects_non_pipeline(tmp_path):
+    from source_backends import mineru_runner
+    src = tmp_path / "x.pdf"
+    src.write_bytes(b"%PDF dummy")
+    with pytest.raises(SystemExit):
+        mineru_runner.run(str(src), str(tmp_path / "o"), backend="vlm-engine",
+                          _do_parse=lambda *a, **k: None)
+
+
+def test_mineru_available_and_version_via_metadata(monkeypatch):
+    import importlib.metadata as md
+    monkeypatch.delenv("MINERU_DISABLE", raising=False)
+    monkeypatch.setattr(md, "version", lambda name: "9.9.9")
+    assert mb.mineru_available() is True
+    assert mb._mineru_version() == "9.9.9"
+
+
+def test_mineru_disable_env_forces_unavailable(monkeypatch):
+    monkeypatch.setenv("MINERU_DISABLE", "1")
+    assert mb.mineru_available() is False
 
 
 def test_run_mineru_nonzero_raises(tmp_path, monkeypatch):
