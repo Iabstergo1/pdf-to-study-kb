@@ -1,91 +1,67 @@
-"""source-convert：把来源转成 staging/<source>/source.md + 逐页 profile + 难页 PNG。
+"""source-convert dispatcher（Spec 1）：按 fmt 选后端，落盘 source.md + blocks.jsonl +
+chapters.json + parse_report.json + assets/，返回 ConvertResult（旧键超集 + 新键）。
 
-后端：md 直通；pdf 用 PyMuPDF 抽纯文本 + 逐页 profile。
-
-公式保真走 route B（读图兜底）：PyMuPDF 纯文本会把上/下标与分数拍平失真（公式密集书严重），
-故每个公式风险页（needs_vision）始终渲染整页 PNG，由 ingest 时 LLM 读图写 KaTeX 保真
-（lint 硬规则强制 lesson 内嵌源图）。不依赖任何重型 OCR/ML 后端（marker/surya 已评估，4GB 显存太慢弃用）。
+后端在 source_backends/；本文件不含解析业务，只做选后端 + 持久化 + 拼返回 dict。
+source.md 是 LLM 顺读视图；blocks.jsonl 是定位事实层；两者由后端同源产出。
+扫描件 fail-closed 边界在 pipeline.cmd_source_convert（进入本 dispatcher 之前），本文件不重复。
 """
 from __future__ import annotations
 
 import hashlib
 import json
 from pathlib import Path
-import importlib.util as _ilu
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import source_profile
-import chaptering
+import source_artifacts
+from source_backends import get_backend, BackendUnavailable  # 对外重新导出 BackendUnavailable
 
-class BackendUnavailable(RuntimeError):
-    pass
+__all__ = ["convert", "converted_input_hash", "BackendUnavailable"]
 
 
 def _sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
+def converted_input_hash(raw_path) -> str:
+    """converted 阶段缓存键（单一真值，pipeline 与 convert 共用）：
+    raw sha + PROFILER_VERSION（连带难页 PNG）+ ARTIFACT_VERSION（artifact 形状）。"""
+    raw = Path(raw_path).read_bytes()
+    return (hashlib.sha256(raw).hexdigest() + ":" + source_profile.PROFILER_VERSION
+            + ":" + source_artifacts.ARTIFACT_VERSION)
+
+
 def convert(src_path, *, out_dir, fmt: str) -> dict:
-    """返回 {source_md, sha256, assets_dir, pages, needs_vision_pages, chapters, chapters_path, chapters_sha}。"""
+    """返回旧键 + 新键（blocks_path/blocks_sha/parse_report_path/parse_report_sha/backend）。"""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    assets_dir = out_dir / "assets"
-    if fmt == "md":
-        md, pages, chapters = _convert_markdown(Path(src_path))
-    elif fmt == "pdf":
-        md, pages, chapters = _convert_pdf_text(Path(src_path), assets_dir)
-    else:
-        raise BackendUnavailable(f"no P1 backend for fmt={fmt} (docx/pptx 适配器后续期实现)")
+    backend = get_backend(fmt)                       # 未知 fmt → BackendUnavailable
+    ihash = converted_input_hash(src_path)
+    res = backend.convert(src_path, out_dir=out_dir, input_hash=ihash)
+
     source_md = out_dir / "source.md"
-    source_md.write_text(md, encoding="utf-8")
-    # 确定性章节计划（Stage 2 锚点）：与 source.md 同步落盘，由 record_artifact 以 sha256 冻结。
-    chapters_json = json.dumps(chapters, ensure_ascii=False, indent=2)
+    source_md.write_text(res.source_md, encoding="utf-8")
+    blocks_path = out_dir / "blocks.jsonl"
+    blocks_sha = source_artifacts.write_blocks(blocks_path, res.blocks)
+    chapters_json = json.dumps(res.chapters, ensure_ascii=False, indent=2)
     chapters_path = out_dir / "chapters.json"
     chapters_path.write_text(chapters_json, encoding="utf-8")
+    report_path = out_dir / "parse_report.json"
+    report_sha = source_artifacts.write_parse_report(report_path, res.report)
+
     return {
         "source_md": str(source_md),
-        "sha256": _sha256_text(md),
-        "assets_dir": str(assets_dir),
-        "pages": pages,
-        "needs_vision_pages": [p["page"] for p in pages if p.get("needs_vision")],
-        "chapters": chapters,
+        "sha256": _sha256_text(res.source_md),
+        "assets_dir": str(out_dir / "assets"),
+        "pages": res.pages,
+        "needs_vision_pages": res.needs_vision_pages,
+        "chapters": res.chapters,
         "chapters_path": str(chapters_path),
         "chapters_sha": _sha256_text(chapters_json),
+        "blocks_path": str(blocks_path),
+        "blocks_sha": blocks_sha,
+        "parse_report_path": str(report_path),
+        "parse_report_sha": report_sha,
+        "backend": res.report["selected_backend"],
     }
-
-
-def _convert_markdown(src: Path):
-    text = src.read_text(encoding="utf-8")
-    pages = [source_profile.profile_page(1, text, image_count=0)]
-    chapters = chaptering.chapters_from_toc([], n_pages=1)  # md 无 TOC → 整书一章（窗口仍按标题切读）
-    return text, pages, chapters
-
-
-def _convert_pdf_text(src: Path, assets_dir: Path):
-    if _ilu.find_spec("fitz") is None:
-        raise BackendUnavailable("pymupdf (fitz) not installed")
-    import fitz  # PyMuPDF（已装）
-    doc = fitz.open(str(src))
-    parts, pages = [], []
-    for i in range(len(doc)):
-        page = doc[i]
-        text = page.get_text()
-        sig = source_profile.visual_signals(page)
-        prof = source_profile.profile_page(i + 1, text, image_count=sig["image_count"],
-                                           n_draw=sig["n_draw"], n_tables=sig["n_tables"])
-        pages.append(prof)
-        parts.append(f"\n\n<!-- page {i + 1} -->\n\n{text.strip()}\n")
-        if prof["needs_vision"]:
-            assets_dir.mkdir(parents=True, exist_ok=True)
-            pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
-            pix.save(str(assets_dir / f"p{i + 1:04d}.png"))
-    chapters = chaptering.chapters_from_toc(doc.get_toc(), len(doc))  # 确定性章节单元（取自 PDF 书签）
-    doc.close()
-    n_vision = sum(1 for p in pages if p.get("needs_vision"))
-    if n_vision:
-        print(f"[info] source-convert：本源约 {n_vision} 个难页（公式 / 矢量图 / 表 / 图表标题）"
-              f"已渲染整页 PNG（assets/pXXXX.png），由 ingest 读图保真（route B）。"
-              f"纯文本抽取会拍平上/下标与分数、且看不见矢量图与无框线表，故以源图为准。",
-              file=sys.stderr)
-    return "".join(parts).strip() + "\n", pages, chapters

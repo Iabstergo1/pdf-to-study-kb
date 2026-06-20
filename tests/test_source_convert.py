@@ -359,3 +359,27 @@ def test_pymupdf_backend_page_blocks_and_invariant(tmp_path):
     assert 2 in res.needs_vision_pages
     assert res.report["selected_backend"] == "pymupdf"
     assert res.report["page_count"] == 2 and res.report["block_count"] == 2
+
+
+def test_convert_emits_blocks_and_parse_report_md(tmp_path):
+    src = tmp_path / "n.md"
+    src.write_text("# Title\n\nbody\n", encoding="utf-8")
+    out_dir = tmp_path / "staging" / "n"
+    res = source_convert.convert(src, out_dir=out_dir, fmt="md")
+    # 旧键保留
+    assert res["source_md"].endswith("source.md") and res["pages"]
+    assert res["chapters_path"].endswith("chapters.json")
+    # 新键 + 新文件
+    assert (out_dir / "blocks.jsonl").exists()
+    assert (out_dir / "parse_report.json").exists()
+    assert res["backend"] == "markdown"
+    assert len(res["blocks_sha"]) == 64 and len(res["parse_report_sha"]) == 64
+
+
+def test_converted_input_hash_includes_versions(tmp_path):
+    src = tmp_path / "n.md"
+    src.write_text("x", encoding="utf-8")
+    h = source_convert.converted_input_hash(src)
+    import source_profile as _sp
+    import source_artifacts as _sa
+    assert _sp.PROFILER_VERSION in h and _sa.ARTIFACT_VERSION in h
