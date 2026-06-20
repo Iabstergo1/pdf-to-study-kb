@@ -54,3 +54,24 @@ def test_window_ids_stable_and_unique():
     ws = windowing.build_windows(md)
     ids = [w["window_id"] for w in ws]
     assert len(ids) == len(set(ids))
+
+
+def test_page_char_ranges_basic():
+    md = "<!-- page 1 -->\n\nAAA\n\n<!-- page 2 -->\n\nBBB\n"
+    r = windowing.page_char_ranges(md)
+    assert set(r.keys()) == {1, 2}
+    s1, e1 = r[1]
+    assert md[s1:e1].startswith("<!-- page 1 -->")
+    assert "AAA" in md[s1:e1]
+    s2, e2 = r[2]
+    assert e2 == len(md)
+
+
+def test_build_windows_has_chars_mode():
+    md = "# A\n\naaa\n"
+    ws = windowing.build_windows(md)
+    assert all(w["mode"] == "chars" for w in ws)
+
+
+def test_windowing_version_bumped():
+    assert windowing.WINDOWING_VERSION == "3"
