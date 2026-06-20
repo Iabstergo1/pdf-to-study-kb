@@ -113,6 +113,13 @@ def convert(src_path, *, out_dir, fmt: str, backend: str = "auto",
     # 仅 auto 实际据信号路由时标记 consumed_by_auto_router；显式 --backend 不算。
     if isinstance(res.report.get("routing_advice"), dict):
         res.report["routing_advice"]["consumed_by_auto_router"] = bool(consumed)
+    # MinerU 报告的 scan/OCR 信号由 profile 派生（MinerU pipeline auto-method 对扫描/图像页走 OCR）：
+    # 整本扫描件 → scan_suspected/ocr_used=True；born-digital → False。MinerU 输出未显式暴露 per-page
+    # parse type，故用 profile 的 is_scanned_source 作准确近似，避免扫描件报告里 scan/OCR 恒为 False。
+    if name == "mineru" and isinstance(res.report, dict):
+        scanned = source_profile.is_scanned_source(profile_pages or [])
+        res.report["scan_suspected"] = scanned
+        res.report["ocr_used"] = scanned
 
     source_md = out_dir / "source.md"
     source_md.write_text(res.source_md, encoding="utf-8")

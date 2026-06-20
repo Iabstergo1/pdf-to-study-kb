@@ -540,6 +540,36 @@ def test_convert_explicit_mineru_not_marked_auto_consumed(tmp_path, monkeypatch)
     assert rep["routing_advice"]["consumed_by_auto_router"] is False  # 显式指定，非 auto 消费
 
 
+def _fake_run_mineru_minimal(src, raw_dir, *, timeout):
+    import json
+    from pathlib import Path as _P
+    auto = _P(raw_dir) / "x" / "auto"
+    auto.mkdir(parents=True, exist_ok=True)
+    (auto / "x_content_list.json").write_text(
+        json.dumps([{"type": "text", "text": "hi", "page_idx": 0}]), encoding="utf-8")
+    return _P(raw_dir)
+
+
+def test_convert_mineru_report_scan_ocr_from_profile(tmp_path, monkeypatch):
+    # smoke 暴露的缺口：MinerU 报告的 scan/OCR 应据 profile（扫描件→scan/OCR True；born-digital→False）。
+    import json
+    import source_backends.mineru_backend as _mb
+    monkeypatch.setattr(_mb, "mineru_available", lambda: True)
+    monkeypatch.setattr(_mb, "_mineru_version", lambda: "x")
+    monkeypatch.setattr(_mb, "_run_mineru", _fake_run_mineru_minimal)
+    src = tmp_path / "s.pdf"; src.write_text("x", encoding="utf-8")
+    scanned = [{"text_len": 0, "image_count": 1} for _ in range(10)]
+    res = source_convert.convert(src, out_dir=tmp_path / "o1", fmt="pdf", backend="mineru",
+                                 profile_pages=scanned)
+    rep = json.loads((tmp_path / "o1" / "parse_report.json").read_text(encoding="utf-8"))
+    assert rep["scan_suspected"] is True and rep["ocr_used"] is True
+    born = [{"text_len": 800, "image_count": 0} for _ in range(10)]
+    source_convert.convert(src, out_dir=tmp_path / "o2", fmt="pdf", backend="mineru",
+                           profile_pages=born)
+    rep2 = json.loads((tmp_path / "o2" / "parse_report.json").read_text(encoding="utf-8"))
+    assert rep2["scan_suspected"] is False and rep2["ocr_used"] is False
+
+
 def test_convert_mineru_failure_writes_failed_report_and_raises(tmp_path, monkeypatch):
     import pytest
     import source_backends.mineru_backend as _mb
