@@ -304,3 +304,127 @@ def test_pdf_vector_drawing_page_rendered(tmp_path):
     assert 1 in res["needs_vision_pages"]
     assert (out_dir / "assets" / "p0001.png").exists()
     assert "vector-figure" in res["pages"][0]["needs_vision_reason"]
+
+
+# --- Spec 1：source_backends 拆分（Task 5/6） ---
+import sys as _sys
+_sys.path.insert(0, str(ROOT / "scripts"))
+
+
+def test_markdown_backend_section_blocks(tmp_path):
+    import importlib
+    mb = importlib.import_module("source_backends.markdown_backend")
+    src = tmp_path / "n.md"
+    src.write_text("# A\n\naaa\n\n## B\n\nbbb\n", encoding="utf-8")
+    res = mb.convert(src, out_dir=tmp_path / "o", input_hash="h")
+    # 块为 section 级，heading 块带 text_level/heading_path，text 含整段
+    headings = [b for b in res.blocks if b.type == "heading"]
+    assert any(b.heading_path == "A" and b.text_level == 1 for b in headings)
+    a_block = next(b for b in res.blocks if b.heading_path == "A")
+    assert "aaa" in a_block.text                     # 正文未被丢
+    assert res.source_md[a_block.char_start:a_block.char_end] == a_block.text  # 逐字一致
+    assert res.report["selected_backend"] == "markdown"
+    assert res.report["routing_advice"]["recommended_backend"] == "markdown"
+    assert res.report["section_count"] >= 2
+    assert res.needs_vision_pages == []
+
+
+def test_pymupdf_backend_page_blocks_and_invariant(tmp_path):
+    import importlib.util as u
+    if u.find_spec("fitz") is None:
+        import pytest; pytest.skip("pymupdf not installed")
+    import fitz, importlib
+    pb = importlib.import_module("source_backends.pymupdf_backend")
+    src = tmp_path / "b.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "first page body")
+    page2 = doc.new_page()
+    page2.insert_text((72, 72), "second page")
+    for k in range(20):                       # 让第 2 页判难页（矢量图）
+        page2.draw_line(fitz.Point(72, 100 + k * 5), fitz.Point(300, 100 + k * 5))
+    doc.save(str(src)); doc.close()
+    res = pb.convert(src, out_dir=tmp_path / "o", input_hash="h")
+    assert len(res.blocks) == 2
+    assert all(b.type == "text" and b.text_level is None for b in res.blocks)
+    # char span 不变量：slice 含该页 marker 与 block.text
+    for b in res.blocks:
+        seg = res.source_md[b.char_start:b.char_end]
+        assert f"<!-- page {b.page} -->" in seg
+        assert b.text in seg
+    # 难页：第 2 页 asset_path 置位 + PNG 生成 + risk_flags
+    p2 = next(b for b in res.blocks if b.page == 2)
+    assert p2.asset_path == "assets/p0002.png"
+    assert (tmp_path / "o" / "assets" / "p0002.png").exists()
+    assert p2.risk_flags                       # 至少一个 reason
+    assert 2 in res.needs_vision_pages
+    assert res.report["selected_backend"] == "pymupdf"
+    assert res.report["page_count"] == 2 and res.report["block_count"] == 2
+
+
+def test_convert_emits_blocks_and_parse_report_md(tmp_path):
+    src = tmp_path / "n.md"
+    src.write_text("# Title\n\nbody\n", encoding="utf-8")
+    out_dir = tmp_path / "staging" / "n"
+    res = source_convert.convert(src, out_dir=out_dir, fmt="md")
+    # 旧键保留
+    assert res["source_md"].endswith("source.md") and res["pages"]
+    assert res["chapters_path"].endswith("chapters.json")
+    # 新键 + 新文件
+    assert (out_dir / "blocks.jsonl").exists()
+    assert (out_dir / "parse_report.json").exists()
+    assert res["backend"] == "markdown"
+    assert len(res["blocks_sha"]) == 64 and len(res["parse_report_sha"]) == 64
+
+
+def test_converted_input_hash_includes_versions(tmp_path):
+    src = tmp_path / "n.md"
+    src.write_text("x", encoding="utf-8")
+    h = source_convert.converted_input_hash(src)
+    import source_profile as _sp
+    import source_artifacts as _sa
+    assert _sp.PROFILER_VERSION in h and _sa.ARTIFACT_VERSION in h
+
+
+def test_pymupdf_backend_raises_backendunavailable_when_fitz_missing(tmp_path, monkeypatch):
+    # parity（Task 7b）：fitz 缺失时抛 BackendUnavailable，而非裸 ImportError/fitz 错误。
+    import importlib
+    import importlib.util as u
+    import pytest
+    pb = importlib.import_module("source_backends.pymupdf_backend")
+    from source_backends import BackendUnavailable
+    real = u.find_spec
+    monkeypatch.setattr(u, "find_spec",
+                        lambda name, *a, **k: None if name == "fitz" else real(name, *a, **k))
+    src = tmp_path / "x.pdf"
+    src.write_text("dummy", encoding="utf-8")
+    with pytest.raises(BackendUnavailable):
+        pb.convert(src, out_dir=tmp_path / "o", input_hash="h")
+
+
+def test_e2e_pdf_convert_then_block_windows(tmp_path):
+    # 端到端不变量（Task 12）：convert → blocks.jsonl → block windows，页标记一个不丢。
+    import importlib.util as u
+    if u.find_spec("fitz") is None:
+        import pytest; pytest.skip("pymupdf not installed")
+    import fitz
+    import importlib
+    windowing = importlib.import_module("windowing")
+    import source_artifacts
+    src = tmp_path / "e2e.pdf"
+    doc = fitz.open()
+    for _ in range(3):
+        doc.new_page().insert_text((72, 72), "some readable body text on this page")
+    doc.save(str(src)); doc.close()
+    out_dir = tmp_path / "staging" / "e2e"
+    res = source_convert.convert(src, out_dir=out_dir, fmt="pdf")
+    md = (out_dir / "source.md").read_text(encoding="utf-8")
+    blocks = source_artifacts.read_blocks(out_dir / "blocks.jsonl")
+    # 每个 PyMuPDF block 的 char slice 含对应 <!-- page N --> marker
+    for b in blocks:
+        seg = md[b["char_start"]:b["char_end"]]
+        assert f"<!-- page {b['page']} -->" in seg
+    # block windows 聚合后不丢页标记
+    ws = windowing.build_windows_from_blocks(blocks)
+    covered = "".join(md[w["char_start"]:w["char_end"]] for w in ws)
+    assert covered.count("<!-- page") == 3
+    assert res["backend"] == "pymupdf"

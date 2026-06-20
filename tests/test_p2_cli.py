@@ -17,6 +17,19 @@ def _load(name):
 
 mdpage = _load("mdpage")
 concept_store = _load("concept_store")
+state_store = _load("state_store")
+
+
+def _preprocess_md(tmp_path, sid, body):
+    """真实 CLI 预处理到 converted：add-source → profile → source-convert，返回 staging 目录。"""
+    raw = tmp_path / f"{sid}.md"
+    raw.write_text(body, encoding="utf-8")
+    assert _run(["add-source", "--source", sid, "--domain", "d",
+                 "--path", str(raw), "--fmt", "md"], tmp_path).returncode == 0
+    assert _run(["profile", "--source", sid], tmp_path).returncode == 0
+    r = _run(["source-convert", "--source", sid], tmp_path)
+    assert r.returncode == 0, r.stderr
+    return tmp_path / "pipeline-workspace" / "staging" / sid
 
 
 def _run(args, cwd):
@@ -62,3 +75,37 @@ def test_rebuild_registry_no_vault_yet(tmp_path):
     r = _run(["rebuild-registry"], tmp_path)
     assert r.returncode == 0
     assert "no wiki" in r.stdout.lower()
+
+
+# --- Spec 1：pipeline 升级（Task 8/9/10） ---
+
+def test_source_convert_records_blocks_and_parse_report(tmp_path):
+    sid = "p2blk"
+    staging = _preprocess_md(tmp_path, sid, "# A\n\nbody\n")
+    db = tmp_path / "pipeline-workspace" / "state" / "study-kb.sqlite"
+    kinds = {a["kind"] for a in state_store.list_artifacts(db, sid)}
+    assert "blocks" in kinds and "parse_report" in kinds
+    assert (staging / "blocks.jsonl").exists()
+    assert (staging / "parse_report.json").exists()
+
+
+def test_windows_block_mode_when_blocks_present(tmp_path):
+    import json
+    sid = "p2win"
+    _preprocess_md(tmp_path, sid, "# A\n\naaa\n\n# B\n\nbbb\n")
+    assert _run(["windows", "--source", sid], tmp_path).returncode == 0
+    staging = tmp_path / "pipeline-workspace" / "staging" / sid
+    ws = [json.loads(l) for l in
+          (staging / "windows.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert ws and all(w["mode"] == "blocks" for w in ws)
+    assert all("block_ids" in w for w in ws)
+
+
+def test_show_window_block_header(tmp_path):
+    sid = "p2show"
+    _preprocess_md(tmp_path, sid, "# A\n\naaa\n")
+    assert _run(["windows", "--source", sid], tmp_path).returncode == 0
+    r = _run(["show-window", "--source", sid, "--window", "w0000"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "window-meta" in r.stdout and "heading_path=A" in r.stdout
+    assert "block_ids=" in r.stdout and "aaa" in r.stdout      # 块头 + 原窗正文都在

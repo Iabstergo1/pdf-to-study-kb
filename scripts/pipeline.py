@@ -134,8 +134,9 @@ def cmd_source_convert(args):
                     "scanned_source / requires_ocr：本源近乎整本扫描件（≥80% 零文本+图像页），route B 不适用"
                     "——不让 LLM 临场 OCR 上千整页图。预处理停在 profile；请走 OCR route。"
                     "少数扫描页混在普通 PDF 不受影响。确要强行渲染：加 --force。")
-    # 同 profile：混入 profiler 版本，启发式升级时连带重渲难页 PNG。
-    ihash = hashlib.sha256(raw.read_bytes()).hexdigest() + ":" + source_profile.PROFILER_VERSION
+    # 版本化缓存键（单一真值，与 dispatcher 同源）：raw sha + PROFILER_VERSION（连带难页 PNG）
+    # + ARTIFACT_VERSION（blocks/parse_report 形状）。
+    ihash = source_convert.converted_input_hash(raw)
     if not state_store.should_run_stage(db, args.source, "converted", input_hash=ihash):
         print("[skip] converted up-to-date")
         return
@@ -146,6 +147,8 @@ def cmd_source_convert(args):
         # pages.jsonl 已由 profile 阶段产出；convert 内部用同一批纯函数复算 needs_vision，结果一致
         state_store.record_artifact(db, args.source, kind="source_md", path=res["source_md"], sha256=res["sha256"])
         state_store.record_artifact(db, args.source, kind="chapters", path=res["chapters_path"], sha256=res["chapters_sha"])
+        state_store.record_artifact(db, args.source, kind="blocks", path=res["blocks_path"], sha256=res["blocks_sha"])
+        state_store.record_artifact(db, args.source, kind="parse_report", path=res["parse_report_path"], sha256=res["parse_report_sha"])
         n_assets = _sync_assets(args.source)  # 难页 PNG 入 vault（公式嵌图依赖；任意源通用）
         state_store.complete_stage(db, args.source, "converted", output_hash=res["sha256"])
         print(f"[OK] converted → {res['source_md']} (needs_vision pages: {res['needs_vision_pages']}; "
@@ -183,32 +186,40 @@ def cmd_sync_assets(args):
 
 
 def cmd_windows(args):
-    """确定性 processing windows：source.md → windows.jsonl。"""
+    """确定性 processing windows：有 blocks.jsonl 走 block-aware，否则退回旧 char 窗。"""
     import state_store
     import windowing
+    import source_artifacts
     import json
     import hashlib
     db = _vault_state_db()
     out = _staging_dir(args.source)
+    blocks_path = out / "blocks.jsonl"
     source_md = out / "source.md"
     if not source_md.exists():
         raise SystemExit("run source-convert first")
-    md = source_md.read_text(encoding="utf-8")
+    # 有 blocks → 以 blocks.jsonl 为切窗依据（block-aware）；无 → 退回 source.md char 窗。
+    if blocks_path.exists():
+        basis = blocks_path.read_bytes()
+        build = lambda: windowing.build_windows_from_blocks(source_artifacts.read_blocks(blocks_path))
+    else:
+        basis = source_md.read_text(encoding="utf-8").encode("utf-8")
+        build = lambda: windowing.build_windows(source_md.read_text(encoding="utf-8"))
     # 混入窗口算法版本：切分逻辑升级即失效缓存（对任意来源通用）。
-    ihash = hashlib.sha256(md.encode("utf-8")).hexdigest() + ":" + windowing.WINDOWING_VERSION
+    ihash = hashlib.sha256(basis).hexdigest() + ":" + windowing.WINDOWING_VERSION
     if not state_store.should_run_stage(db, args.source, "windowed", input_hash=ihash):
         print("[skip] windowed up-to-date")
         return
     state_store.start_stage(db, args.source, "windowed", input_hash=ihash)
     try:
-        ws = windowing.build_windows(md)
+        ws = build()
         (out / "windows.jsonl").write_text(
             "\n".join(json.dumps(w, ensure_ascii=False) for w in ws), encoding="utf-8")
         ohash = hashlib.sha256((out / "windows.jsonl").read_bytes()).hexdigest()
         state_store.record_artifact(db, args.source, kind="windows",
                                     path=str(out / "windows.jsonl"), sha256=ohash)
         state_store.complete_stage(db, args.source, "windowed", output_hash=ohash)
-        print(f"[OK] windowed → {len(ws)} windows")
+        print(f"[OK] windowed → {len(ws)} windows ({'blocks' if blocks_path.exists() else 'chars'})")
     except Exception as e:
         state_store.fail_stage(db, args.source, "windowed", error=str(e))
         raise
@@ -450,14 +461,10 @@ def cmd_reopen(args):
 
 
 def _page_ranges_for_md(md: str) -> dict:
-    """source.md 各 `<!-- page N -->` 页的 char 范围 {page: (start, end)}（纯函数，显示时即时算）。"""
-    import re
-    markers = [(int(m.group(1)), m.start()) for m in re.finditer(r"<!-- page (\d+) -->", md)]
-    ranges = {}
-    for i, (page, start) in enumerate(markers):
-        end = markers[i + 1][1] if i + 1 < len(markers) else len(md)
-        ranges[page] = (start, end)
-    return ranges
+    """source.md 各 `<!-- page N -->` 页的 char 范围 {page: (start, end)}。
+    复用 windowing.page_char_ranges（与 PyMuPDF page block 同一套 marker 扫描真值）。"""
+    import windowing
+    return windowing.page_char_ranges(md)
 
 
 def _pages_overlapping_range(page_ranges: dict, start: int, end: int) -> list:
@@ -483,6 +490,15 @@ def cmd_show_window(args):
     if selected is None:
         raise SystemExit(f"window not found: {args.window}")
     start, end = selected["char_start"], selected["char_end"]
+    if selected.get("mode") == "blocks" and not getattr(args, "plain", False):
+        # block-aware 窗的结构化头（纯加法；不改下方原窗正文输出语义）。
+        hp = selected.get("heading_path", "")
+        bids = ",".join(selected.get("block_ids") or [])
+        rf = ",".join(selected.get("risk_flags") or [])
+        assets = ",".join(selected.get("assets") or [])
+        print(f"<!-- window-meta: heading_path={hp} "
+              f"pages={selected.get('page_start')}-{selected.get('page_end')} "
+              f"block_ids={bids} risk_flags={rf} assets={assets} -->")
     if not getattr(args, "plain", False):
         pages = _pages_overlapping_range(_page_ranges_for_md(md), start, end)
         page_meta = {}
