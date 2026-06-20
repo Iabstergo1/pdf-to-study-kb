@@ -102,6 +102,11 @@ def cmd_profile(args):
         state_store.record_artifact(db, args.source, kind="pages", path=str(pages_path), sha256=ohash)
         state_store.complete_stage(db, args.source, "profiled", output_hash=ohash)
         n_vision = sum(1 for p in pages if p.get("needs_vision"))
+        if source_profile.is_scanned_source(pages):
+            import sys as _sys
+            print(f"[WARN] scanned_source / requires_ocr：{len(pages)} 页近乎整本零文本+图像——"
+                  f"route B 不适用（不让 LLM 临场 OCR 上千整页图）；source-convert 将 fail-closed，需 OCR route。",
+                  file=_sys.stderr)
         print(f"[OK] profiled → {len(pages)} pages ({n_vision} needs_vision)")
     except Exception as e:
         state_store.fail_stage(db, args.source, "profiled", error=str(e))
@@ -117,6 +122,18 @@ def cmd_source_convert(args):
     db = _vault_state_db()
     raw = _raw_path(db, state_store, args.source)
     src_row = state_store.get_source(db, args.source)
+    # 整本扫描件 fail-closed：route B 不适合让 LLM 临场 OCR 上千整页图；停在 profile，需 OCR route。
+    # 少数扫描页混在普通 PDF（比值<0.8）不触发，仍按 route B 处理。--force 可强行渲染（慎用）。
+    if not getattr(args, "force", False):
+        import json as _json
+        pj = _staging_dir(args.source) / "pages.jsonl"
+        if pj.exists():
+            _pages = [_json.loads(l) for l in pj.read_text(encoding="utf-8").splitlines() if l.strip()]
+            if source_profile.is_scanned_source(_pages):
+                raise SystemExit(
+                    "scanned_source / requires_ocr：本源近乎整本扫描件（≥80% 零文本+图像页），route B 不适用"
+                    "——不让 LLM 临场 OCR 上千整页图。预处理停在 profile；请走 OCR route。"
+                    "少数扫描页混在普通 PDF 不受影响。确要强行渲染：加 --force。")
     # 同 profile：混入 profiler 版本，启发式升级时连带重渲难页 PNG。
     ihash = hashlib.sha256(raw.read_bytes()).hexdigest() + ":" + source_profile.PROFILER_VERSION
     if not state_store.should_run_stage(db, args.source, "converted", input_hash=ihash):
@@ -432,17 +449,66 @@ def cmd_reopen(args):
           "next: ingest-start → window-start/写页/window-done → ingest-done → lint（增量 promote）")
 
 
+def _page_ranges_for_md(md: str) -> dict:
+    """source.md 各 `<!-- page N -->` 页的 char 范围 {page: (start, end)}（纯函数，显示时即时算）。"""
+    import re
+    markers = [(int(m.group(1)), m.start()) for m in re.finditer(r"<!-- page (\d+) -->", md)]
+    ranges = {}
+    for i, (page, start) in enumerate(markers):
+        end = markers[i + 1][1] if i + 1 < len(markers) else len(md)
+        ranges[page] = (start, end)
+    return ranges
+
+
+def _pages_overlapping_range(page_ranges: dict, start: int, end: int) -> list:
+    """与窗口 char 区间 [start,end) 有交叠的页号（含窗起所在页）。"""
+    return [page for page, (ps, pe) in sorted(page_ranges.items())
+            if not (pe <= start or ps >= end)]
+
+
 def cmd_show_window(args):
-    """打印指定 processing window 的源文本（/ingest 逐窗读取用）。"""
+    """打印指定 processing window 的源文本；默认在窗文本前列出本窗覆盖的难页资产头（route B 读图锚点）。
+
+    资产头消除"ingest agent 须自行把 pages.jsonl 难页与页标对上再开图"的漏读风险（不改 windowing，
+    显示时即时算本窗覆盖页）。`--plain` 仅打印纯文本（调试用）。"""
     import json
     staging = _staging_dir(args.source)
     md = (staging / "source.md").read_text(encoding="utf-8")
+    selected = None
     for line in (staging / "windows.jsonl").read_text(encoding="utf-8").splitlines():
         w = json.loads(line)
         if w["window_id"] == args.window:
-            print(md[w["char_start"]:w["char_end"]])
-            return
-    raise SystemExit(f"window not found: {args.window}")
+            selected = w
+            break
+    if selected is None:
+        raise SystemExit(f"window not found: {args.window}")
+    start, end = selected["char_start"], selected["char_end"]
+    if not getattr(args, "plain", False):
+        pages = _pages_overlapping_range(_page_ranges_for_md(md), start, end)
+        page_meta = {}
+        pages_path = staging / "pages.jsonl"
+        if pages_path.exists():
+            for line in pages_path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    obj = json.loads(line)
+                    page_meta[int(obj["page"])] = obj
+        asset_lines = []
+        for page in pages:
+            meta = page_meta.get(page)
+            if not meta or not meta.get("needs_vision"):
+                continue
+            png = staging / "assets" / f"p{page:04d}.png"
+            tier = meta.get("vision_tier", "?")
+            reasons = ",".join(meta.get("needs_vision_reason") or [])
+            asset_lines.append(
+                f"- page={page} tier={tier} reason={reasons} "
+                f"staging={png.as_posix()} vault=![[assets/{args.source}/p{page:04d}.png]]")
+        if asset_lines:
+            print("<!-- route-b-assets：本窗难页，读图保真（must 必读；nice 至少快速查看；公式写 KaTeX、图嵌原图、表 markdown+源图） -->")
+            for ln in asset_lines:
+                print(ln)
+            print("<!-- /route-b-assets -->")
+    print(md[start:end])
 
 
 def cmd_ingest_start(args):
@@ -935,10 +1001,13 @@ def main():
     asp.add_argument("--path", required=True, help="原始文件路径")
     asp.add_argument("--fmt", required=True, choices=["pdf", "md", "docx", "pptx"], help="来源格式")
     for name, help_text in [("profile", "逐页 profile + needs_vision 标记"),
-                            ("source-convert", "转成 staging/<source>/source.md + 难页 PNG"),
                             ("windows", "生成确定性 processing windows")]:
         p = subparsers.add_parser(name, help=help_text)
         p.add_argument("--source", required=True, help="source_id")
+    scp = subparsers.add_parser("source-convert", help="转成 staging/<source>/source.md + 难页 PNG")
+    scp.add_argument("--source", required=True, help="source_id")
+    scp.add_argument("--force", action="store_true",
+                     help="强行转换扫描件（绕过 scanned_source fail-closed，慎用）")
     subparsers.add_parser("init-vault", help="建 wiki/ 脚手架 + overview/log/purpose 种子（幂等）")
     subparsers.add_parser("apply-obsidian-style",
                           help="落地学习库观感 CSS snippet + merge appearance.json（幂等，纯配置层零内容改动）")
@@ -949,9 +1018,10 @@ def main():
     rop.add_argument("--source", required=True)
     sap = subparsers.add_parser("sync-assets", help="把本源 staging 难页 PNG 同步进 wiki/assets/<src>/")
     sap.add_argument("--source", required=True)
-    swp = subparsers.add_parser("show-window", help="打印指定 window 的源文本")
+    swp = subparsers.add_parser("show-window", help="打印指定 window 的源文本（默认含难页资产头）")
     swp.add_argument("--source", required=True)
     swp.add_argument("--window", required=True)
+    swp.add_argument("--plain", action="store_true", help="只打印窗口文本，不打印 route B 难页资产头（调试用）")
     for name, help_text in [("ingest-start", "/ingest 开工：锁 + stale registry 校验 + ingesting"),
                             ("ingest-done", "/ingest 收工：ingested(proposed) + 释放锁")]:
         p = subparsers.add_parser(name, help=help_text)

@@ -63,6 +63,70 @@ def test_windows_artifact_records_windows_jsonl_hash(tmp_path):
     assert rows and rows[0]["sha256"] == expected
 
 
+def _make_show_window_staging(tmp_path):
+    staging = tmp_path / "pipeline-workspace" / "staging" / "book"
+    staging.mkdir(parents=True)
+    source_md = "<!-- page 1 -->\n\nplain text page one\n\n<!-- page 2 -->\n\nformula text page two\n"
+    (staging / "source.md").write_text(source_md, encoding="utf-8")
+    cs2 = source_md.index("<!-- page 2 -->")
+    (staging / "windows.jsonl").write_text(
+        f'{{"window_id":"w0000","heading_path":"","char_start":0,"char_end":{cs2},"overlap_before":0}}\n'
+        f'{{"window_id":"w0001","heading_path":"","char_start":{cs2},"char_end":{len(source_md)},"overlap_before":0}}\n',
+        encoding="utf-8")
+    (staging / "pages.jsonl").write_text(
+        '{"page":1,"needs_vision":false,"needs_vision_reason":[],"vision_tier":"none"}\n'
+        '{"page":2,"needs_vision":true,"needs_vision_reason":["formula-borderline"],"vision_tier":"nice"}\n',
+        encoding="utf-8")
+    (staging / "assets").mkdir()
+    (staging / "assets" / "p0002.png").write_bytes(b"png")
+    return staging
+
+
+def test_show_window_prints_assets_header_by_default(tmp_path):
+    _make_show_window_staging(tmp_path)
+    r = _run(["show-window", "--source", "book", "--window", "w0001"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "<!-- route-b-assets" in r.stdout
+    assert "page=2" in r.stdout
+    assert "formula-borderline" in r.stdout
+    assert "pipeline-workspace/staging/book/assets/p0002.png" in r.stdout
+    assert "![[assets/book/p0002.png]]" in r.stdout
+    assert "formula text page two" in r.stdout
+
+
+def test_show_window_no_header_when_no_needs_vision_page(tmp_path):
+    _make_show_window_staging(tmp_path)
+    # w0000 只覆盖 page 1（needs_vision=false）→ 无资产头，纯文本
+    r = _run(["show-window", "--source", "book", "--window", "w0000"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "<!-- route-b-assets" not in r.stdout
+    assert "plain text page one" in r.stdout
+
+
+def test_show_window_plain_suppresses_assets_header(tmp_path):
+    _make_show_window_staging(tmp_path)
+    r = _run(["show-window", "--source", "book", "--window", "w0001", "--plain"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "<!-- route-b-assets" not in r.stdout
+    assert "formula text page two" in r.stdout
+
+
+def test_source_convert_fail_closed_on_scanned_source(tmp_path):
+    # 整本扫描件：source-convert 应 fail-closed（不渲染、不生成可 ingest 产物），提示需 OCR route
+    note = tmp_path / "raw" / "s.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("body", encoding="utf-8")
+    _run(["add-source", "--source", "scan", "--domain", "misc", "--path", str(note), "--fmt", "md"], tmp_path)
+    staging = tmp_path / "pipeline-workspace" / "staging" / "scan"
+    staging.mkdir(parents=True)
+    (staging / "pages.jsonl").write_text(
+        "\n".join('{"page":%d,"text_len":0,"image_count":1,"needs_vision":true}' % i
+                  for i in range(1, 11)), encoding="utf-8")
+    r = _run(["source-convert", "--source", "scan"], tmp_path)
+    assert r.returncode != 0, r.stdout
+    assert "scanned_source" in (r.stdout + r.stderr)
+
+
 def test_fail_command_unsticks_crashed_running_stage(tmp_path):
     note = tmp_path / "raw" / "note.md"
     note.parent.mkdir(parents=True)

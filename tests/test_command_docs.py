@@ -70,6 +70,13 @@ def test_ingest_skill_whole_book_chapter_map_and_typed_embed():
         assert must in text, f"ingest 缺 Stage2/3 协议要素: {must}"
 
 
+def test_ingest_skill_window_asset_header():
+    # Phase 2：show-window 默认难页资产头（route-b-assets + tier）须进 ingest 协议（双树同源）
+    text = _skill_all("ingest")
+    for must in ["route-b-assets", "tier=must"]:
+        assert must in text, f"ingest 缺窗口难页资产头协议: {must}"
+
+
 def test_ingest_skill_split_into_references():
     # 工程标准：复杂 skill 主文件做编排，阶段细节拆到 references/*.md
     refs = SKILLS / "ingest" / "references"

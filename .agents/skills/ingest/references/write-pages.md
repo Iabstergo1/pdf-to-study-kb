@@ -30,8 +30,7 @@
 
 子单元命令细节：
 - U1：`python scripts/pipeline.py window-start --source <src> --window <id> --hash <窗 sha 或 char 范围串>`；
-  `python scripts/pipeline.py show-window --source <src> --window <id>` 读本窗；先读 `staging/<src>/digest.md`（首窗不存在则跳过）。
-  涉及 `needs_vision` 页时直接读 `staging/<src>/assets/pXXXX.png`，公式写 KaTeX `$$…$$`。
+  `python scripts/pipeline.py show-window --source <src> --window <id>` 读本窗：输出顶部若出现 `<!-- route-b-assets`，其中每行形如 `- page=26 tier=must reason=formula staging=.../assets/p0026.png vault=![[assets/<src>/p0026.png]]`，是本窗**必须核对的视觉证据**——`tier=must` 必读图、`tier=nice` 至少快速查看；写到对应公式/表/图时内嵌该行 `vault=` 给的 `![[assets/<src>/pXXXX.png]]`（公式写 KaTeX `$$…$$`、图嵌原图、表 markdown+源图，照阶段 D 分轨）。先读 `staging/<src>/digest.md`（首窗不存在则跳过）。仅调试纯文本切片时才加 `--plain`。
 - U3：`python scripts/pipeline.py resolve-concept --mention "<提及>" --domain <domain> [--alias "<英文名>"] --ref-source <src> --ref-sections "<5.2>"`，编辑它返回的页填充正文。
 - U5：自检原语 `scripts/page_rules.py`（见下「lint 硬规则」）。
 - U6：`python scripts/pipeline.py window-done --source <src> --window <id> --writes '["<写过的页>"]'`（失败改 `window-fail --error "<原因>"`）。

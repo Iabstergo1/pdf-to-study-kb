@@ -125,12 +125,116 @@ def test_table_page_flagged():
     assert "table" in source_profile.needs_vision_reasons(page)
 
 
-def test_caption_page_flagged():
-    # 图标题命中(get_drawings 漏的小图靠标题兜)
-    p = source_profile.profile_page(5, "图 4.1 古诺均衡的反应函数图解\n正文若干。", image_count=0)
+def test_caption_page_flagged_when_visual_signal_present():
+    # 真图题(行首"图 4.2")+ 视觉信号(n_draw)→ 仍触发 caption；caption 不再单凭文本触发
+    p = source_profile.profile_page(77, "图 4.2 古诺均衡的反应函数图解\n正文若干。",
+                                    image_count=0, n_draw=14, n_tables=0)
     assert p["has_caption"] is True
     assert p["needs_vision"] is True
     assert "caption" in p["needs_vision_reason"]
+
+
+def test_caption_compound_word_and_prose_not_flagged():
+    # p0006 目录 "分析框架地图 57"：地图≠图题（图前接 CJK）且页无视觉信号 → 不触发 caption
+    toc = source_profile.profile_page(6, "分析框架地图 57\n博弈论的故事 60\n", image_count=0,
+                                      n_draw=0, n_tables=0)
+    assert toc["has_caption"] is False
+    assert "caption" not in toc["needs_vision_reason"]
+    # p0027 普通句 "代表10块钱"：代表≠表题（表前接 CJK）
+    prose = source_profile.profile_page(27, "这里的 10 代表10块钱的收益。", image_count=0,
+                                        n_draw=0, n_tables=0)
+    assert "caption" not in prose["needs_vision_reason"]
+    # p0179/p0180 写作示例 "图1/表1"：散文提到图表、页无真实图表 → 不触发
+    ex = source_profile.profile_page(179, "撰写论文时，图1 应在正文首次提及处附近。", image_count=0,
+                                     n_draw=0, n_tables=0)
+    assert "caption" not in ex["needs_vision_reason"]
+
+
+def test_equation_lines_recover_subthreshold_formula():
+    # p0042 类：拍平后残留符号低，但有多行方程（域无关 = 信号）→ 召回 formula-borderline
+    text = "对目标函数求一阶导数：\nMR = a - 2*b*q\nMC = c\n令 MR = MC 解得 q* = (a-c)/(2*b)"
+    p = source_profile.profile_page(42, text, image_count=0, n_draw=6, n_tables=0)
+    assert p["formula_symbols"] < 12
+    assert p["needs_vision"] is True
+    assert "formula-borderline" in p["needs_vision_reason"] or "formula" in p["needs_vision_reason"]
+
+
+def test_prose_without_equations_not_flagged():
+    # 纯散文（无方程行、无网格、无符号）→ 不召回（防过召回到普通正文）
+    p = source_profile.profile_page(3, "这一章讲博弈论的发展简史与人物故事，没有公式或图表。",
+                                    image_count=0, n_draw=2, n_tables=0)
+    assert p["needs_vision"] is False
+    assert p["needs_vision_reason"] == []
+
+
+def test_numeric_grid_recovers_payoff_matrix():
+    # p0164：find_tables 漏（n_tables=0），但数字网格（≥3 行数字为主）→ 召回 table（域无关，不靠"支付矩阵"关键词）
+    grid = "策略 合作 背叛\n合作 3,3 0,5\n背叛 5,0 1,1\n"
+    p = source_profile.profile_page(164, grid, image_count=0, n_draw=0, n_tables=0)
+    assert "table" in p["needs_vision_reason"]
+
+
+def test_normal_prose_not_numeric_grid():
+    p = source_profile.profile_page(3, "正文一段散文，没有任何数字网格或矩阵结构。", image_count=0)
+    assert "table" not in p["needs_vision_reason"]
+
+
+def test_toc_section_numbers_not_numeric_grid():
+    # 真书回归暴露的过召回：目录抽取后层级编号(3.3.2)/页码(35)单独成行 + 点导线 → 不得当 table
+    toc = source_profile.profile_page(
+        6, "3.3.2\n关键一步：收益函数\n35\n3.4.1\n成本的两大组成\n38\n"
+           "5.1.1\n古诺(Cournot) 模型 . . . . . . . . . 72\n", image_count=0, n_draw=0)
+    assert "table" not in toc["needs_vision_reason"]
+    prose = source_profile.profile_page(
+        179, "你的文档可以由图1、表1、图2、表2 搭建逻辑框架，在正文首次提及处附近放置。",
+        image_count=0, n_draw=8)
+    assert "table" not in prose["needs_vision_reason"]
+
+
+def test_vision_tier_must_nice_none():
+    strong = source_profile.profile_page(
+        26, "σ_i = (p1, p2)，∑_{j} p_j = 1 且 p_j ≥ 0，α β γ δ ∈ ≤ ≥ ≠ ∇ √ ± ∞",
+        image_count=0, n_draw=7, n_tables=0)
+    assert strong["needs_vision"] is True
+    assert strong["vision_tier"] == "must"
+    border = source_profile.profile_page(
+        42, "对目标函数求导：\nMR = a - 2*b*q\n令 q* = (a-c)/(2*b)", image_count=0, n_draw=6)
+    assert border["vision_tier"] == "nice"
+    plain = source_profile.profile_page(3, "只讲研究背景，没有公式、图表或这种结构。", image_count=0, n_draw=2)
+    assert plain["needs_vision"] is False
+    assert plain["vision_tier"] == "none"
+
+
+def test_symbolic_matrix_recovered_by_matrix_word_and_structure():
+    # p0164 类：符号化支付矩阵（用变量非数字，数字网格抓不到），含"矩阵"通用词 + 结构证据(n_draw≥6) → table
+    text = "双方的支付结构可表示为如下矩阵：\n−CA, V−CD\nV, −L\n0, −CD\n0, 0"
+    p = source_profile.profile_page(164, text, image_count=0, n_draw=9, n_tables=0)
+    assert p["has_matrix_word"] is True
+    assert "table" in p["needs_vision_reason"]
+
+
+def test_matrix_word_without_structure_not_flagged():
+    # 纯文本"讨论矩阵思想"无结构证据（无图、公式符号不足）→ 不召回（避免纯文本误报）
+    p = source_profile.profile_page(3, "本节讨论矩阵思想在分析中的意义，不含任何表或图。",
+                                    image_count=0, n_draw=0, n_tables=0)
+    assert p["has_matrix_word"] is True
+    assert "table" not in p["needs_vision_reason"]
+    assert p["needs_vision"] is False
+
+
+def test_is_scanned_source_true_for_full_scan():
+    pages = [{"text_len": 0, "image_count": 1} for _ in range(100)]
+    assert source_profile.is_scanned_source(pages) is True
+
+
+def test_is_scanned_source_false_for_few_scanned_in_normal_pdf():
+    pages = ([{"text_len": 800, "image_count": 0} for _ in range(90)]
+             + [{"text_len": 0, "image_count": 1} for _ in range(10)])
+    assert source_profile.is_scanned_source(pages) is False
+
+
+def test_is_scanned_source_false_empty():
+    assert source_profile.is_scanned_source([]) is False
 
 
 def test_subthreshold_formula_now_flagged():
