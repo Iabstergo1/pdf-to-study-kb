@@ -300,7 +300,7 @@ def convert(src_path, *, out_dir, input_hash, timeout=DEFAULT_TIMEOUT_SECONDS):
     if not mineru_available():
         raise BackendUnavailable(
             "MinerU 未安装：--backend mineru 需要 MinerU（本项目仅用 pipeline 后端）。"
-            "安装见 requirements-mineru.txt（pip install -r requirements-mineru.txt）；"
+            "一键安装：python scripts/install_mineru.py（按机型选 torch；见 requirements.txt 可选段）；"
             "未安装时请用 --backend pymupdf，或 --backend auto 的轻量路径。")
     import json
     out_dir = Path(out_dir)

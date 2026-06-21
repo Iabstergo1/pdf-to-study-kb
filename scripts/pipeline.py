@@ -135,7 +135,7 @@ def cmd_source_convert(args):
     if name == "pymupdf" and not getattr(args, "force", False) and source_profile.is_scanned_source(pages):
         raise SystemExit(
             "scanned_source / requires_ocr：整本扫描件不适合 PyMuPDF route B。"
-            "用 --backend auto（默认，扫描件走 MinerU）或安装 MinerU（requirements-mineru.txt）；"
+            "用 --backend auto（默认，扫描件走 MinerU）或安装 MinerU（python scripts/install_mineru.py）；"
             "确要 PyMuPDF 渲染加 --force。")
     # 版本化缓存键（单一真值，与 dispatcher 同源）：raw sha + PROFILER_VERSION + ARTIFACT_VERSION
     # + backend + policy + MINERU_ADAPTER_VERSION（切后端/策略不复用彼此产物）。

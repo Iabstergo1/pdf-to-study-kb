@@ -90,7 +90,7 @@ python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yam
 > python scripts/install_mineru.py        # 装 mineru[core]，再据 nvidia-smi 自动换匹配的 CUDA torch；无 GPU 则保留 CPU
 > python scripts/install_mineru.py --dry-run   # 先看将执行的命令
 > ```
-> 仅用 MinerU 的 `pipeline` 后端，**低显存 GPU（约 4GB 即可）**；详见 [`requirements-mineru.txt`](requirements-mineru.txt)。
+> 仅用 MinerU 的 `pipeline` 后端，**低显存 GPU（约 4GB 即可）**；详见 [`requirements.txt`](requirements.txt) 末尾的可选 MinerU 段。
 
 ---
 

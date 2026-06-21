@@ -138,7 +138,7 @@ def test_show_window_plain_suppresses_assets_header(tmp_path):
 def test_source_convert_fail_closed_on_scanned_source(tmp_path):
     # Spec 2 重新协调：整本扫描件 PDF 仍 fail-closed（不生成可 ingest 产物），但路径分两条——
     #   --backend pymupdf（route B）未 --force → 阻断（scanned_source）；
-    #   默认 auto → 路由 MinerU，本机未装 → fail-closed（requirements-mineru）。
+    #   默认 auto → 路由 MinerU，本机未装 → fail-closed（install_mineru.py）。
     note = tmp_path / "raw" / "s.pdf"
     note.parent.mkdir(parents=True)
     note.write_text("body", encoding="utf-8")

@@ -15,7 +15,7 @@ def test_mineru_convert_fail_closed_when_unavailable(tmp_path, monkeypatch):
     src.write_text("dummy", encoding="utf-8")
     with pytest.raises(BackendUnavailable) as ei:
         mb.convert(src, out_dir=tmp_path / "o", input_hash="h")
-    assert "requirements-mineru" in str(ei.value)
+    assert "install_mineru" in str(ei.value)
 
 
 def test_get_backend_by_name_mineru():

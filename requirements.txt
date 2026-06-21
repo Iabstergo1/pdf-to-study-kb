@@ -15,3 +15,16 @@ pyyaml>=6.0          # YAML（registry / workorder / frontmatter）
 
 # ── 测试 ─────────────────────────────────────────────────
 pytest>=7.0
+
+# ── 可选：MinerU 结构化后端（非默认依赖，`pip install -r requirements.txt` 默认不装）──────
+# 用于扫描 PDF / 低文本密度 PDF / DOCX / PPTX / 复杂表格·公式·图片的结构化解析。装它后
+# `source-convert --backend auto` 会把这些源自动路由给 MinerU（未装则 fail-closed、不伪装成功）。
+# 仅用 MinerU 的 pipeline 后端（CLI 恒 `-b pipeline`，禁 vlm/hybrid），低显存 GPU（约 4GB 即可）。
+#
+# 推荐一键安装（按机型自动选 torch 构建，不固定 CPU 版本）：
+#   python scripts/install_mineru.py            # 装 mineru[core] + 据 nvidia-smi 换匹配 CUDA torch；无 GPU 保留 CPU
+#   python scripts/install_mineru.py --dry-run  # 先看将执行的命令
+# 纯手动：`pip install mineru[core]`（只装 CPU torch；GPU 加速见 scripts/install_mineru.py）。
+#
+# 下面这行默认注释以保持默认安装轻量；要让 pip 直接装 MinerU 可取消注释（更重）：
+# mineru[core]

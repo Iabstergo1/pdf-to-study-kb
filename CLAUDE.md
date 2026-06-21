@@ -37,12 +37,12 @@ LLM 能力 = `.claude/skills/{ingest,kb-query,kb-save,kb-review,kb-qa,wiki-lint-
 - **同一时刻同一 vault 只允许一个 ingest**（`source_locks` 强制）。Claude 与 Codex **不得同时对同一库 ingest**；崩溃残留锁用 `python scripts/pipeline.py unlock` 回收。
 - **共享 CLI 是唯一契约**：两 agent 都只调 `scripts/pipeline.py`，**业务逻辑只改这里**，不在各自 skill 里重复实现；改了 CLI 行为要保证两边 skill 仍一致。
 - **续跑锚点 = `pipeline.py next` + digest `## ⏩ RESUME` 块**（不依赖任何会话级 hook）：中断后（上下文压缩 / 模型不可用）说“继续”或由 `scripts/resume-ingest.ps1`（OS 定时器触发，prompt 自带定位逻辑）续跑，都从下一个未完成 window 接上。两 agent 的**共享契约始终是 `pipeline.py` + `digest.md`（含 RESUME 块）+ 字节对等的 skill 双树**，对 Claude / Codex 一致。
-- **解释器统一用项目指定的 `study-kb` conda 环境**（`conda create -n study-kb python=3.12` 后安装 `requirements.txt`：PyMuPDF / PyYAML / pytest；可选 MinerU 结构化后端见 `requirements-mineru.txt`，非默认依赖）；**请勿改用其他解释器**。
+- **解释器统一用项目指定的 `study-kb` conda 环境**（`conda create -n study-kb python=3.12` 后安装 `requirements.txt`：PyMuPDF / PyYAML / pytest；可选 MinerU 结构化后端见 `requirements.txt` 末尾可选段 / `scripts/install_mineru.py`，非默认依赖）；**请勿改用其他解释器**。
 - **生成物非 git**：`wiki/`、`pipeline-workspace/` 已 gitignore，不提交——它们是每机运行时状态。
 
 ## 6. 真实能力边界（开工前知悉）
 
-- **视觉保真 / 结构化解析（两条路径，默认轻量）**：fast path——PDF 经 PyMuPDF 抽纯文本，会拍平上/下标/分数、且看不见矢量图与无框线表；`source-convert` 把每个难页（`needs_vision` 高召回判定：公式页 / 矢量图页[`get_drawings`] / 表格页[`find_tables`] / 图表标题页）渲染为整页 PNG（route B），由 ingest 时 LLM **读图**保真（公式写 KaTeX；lint 硬规则强制 lesson 内嵌源图），`pages.jsonl` 记 `needs_vision_reason` 可审计。**可选 structured backend：MinerU**（`requirements-mineru.txt`，非默认依赖，subprocess 调 CLI）——用于扫描 PDF / 低文本密度 PDF / DOCX / PPTX / 复杂表格·公式·图片，归一成同一套 `source.md + blocks.jsonl + chapters.json + parse_report.json + assets/`；硬件 RTX 3050 Ti 4GB → 默认仅 MinerU `pipeline` 后端（CLI 恒 `-b pipeline`，禁 vlm/hybrid），未装则 fail-closed、绝不静默回退 PyMuPDF。
+- **视觉保真 / 结构化解析（两条路径，默认轻量）**：fast path——PDF 经 PyMuPDF 抽纯文本，会拍平上/下标/分数、且看不见矢量图与无框线表；`source-convert` 把每个难页（`needs_vision` 高召回判定：公式页 / 矢量图页[`get_drawings`] / 表格页[`find_tables`] / 图表标题页）渲染为整页 PNG（route B），由 ingest 时 LLM **读图**保真（公式写 KaTeX；lint 硬规则强制 lesson 内嵌源图），`pages.jsonl` 记 `needs_vision_reason` 可审计。**可选 structured backend：MinerU**（见 `requirements.txt` 可选段 / `scripts/install_mineru.py`，非默认依赖，subprocess 调 CLI）——用于扫描 PDF / 低文本密度 PDF / DOCX / PPTX / 复杂表格·公式·图片，归一成同一套 `source.md + blocks.jsonl + chapters.json + parse_report.json + assets/`；低显存 GPU（约 4GB）→ 默认仅 MinerU `pipeline` 后端（CLI 恒 `-b pipeline`，禁 vlm/hybrid），未装则 fail-closed、绝不静默回退 PyMuPDF。
 - **格式覆盖**：`pdf`/`md` 走 fast path 已端到端打通；`docx`/`pptx` 与扫描/低文本 PDF 经可选 MinerU 结构化后端（`--backend auto` 自动路由，`--backend mineru` 强制；未装 fail-closed）。
 - **每本书的入库都是一次需付费的 LLM 操作**，并非导入即用；项目交付时为空库，内容通过运行 ingest 逐步生成。
 - **lint 硬规则**：wikilink 必须全 vault 相对路径（非 Obsidian basename）、必需小节标题逐字、非 source 页（topic/comparison/synthesis/overview）必须进某 window 的 `--writes` 记账——见 ingest skill 阶段 D 速查；未遵守将被门禁拦截。

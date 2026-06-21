@@ -146,7 +146,7 @@ def test_source_convert_backend_mineru_unavailable_fail_closed(tmp_path, monkeyp
     _preprocess_pdf(tmp_path, sid)
     r = _run(["source-convert", "--source", sid, "--backend", "mineru"], tmp_path)
     assert r.returncode != 0
-    assert "requirements-mineru" in (r.stdout + r.stderr)
+    assert "install_mineru" in (r.stdout + r.stderr)
 
 
 def test_source_convert_default_auto_md_stays_markdown(tmp_path):
@@ -168,7 +168,7 @@ def test_source_convert_docx_auto_mineru_unavailable_fail_closed(tmp_path, monke
     assert _run(["profile", "--source", sid], tmp_path).returncode == 0   # docx profile → [] 不崩
     r = _run(["source-convert", "--source", sid], tmp_path)               # auto → mineru → 不可用
     assert r.returncode != 0
-    assert "requirements-mineru" in (r.stdout + r.stderr)
+    assert "install_mineru" in (r.stdout + r.stderr)
 
 
 # --- Spec 2 C6：windows/show-window MinerU 风险元数据 ---
