@@ -14,7 +14,8 @@ from pathlib import Path
 # artifact 格式版本：blocks/parse_report 形状实质改动就 +1，折进 converted 阶段 input_hash，
 # 使格式升级失效缓存、强制对任意来源重产（与 PROFILER_VERSION/WINDOWING_VERSION 同规）。
 # v2: SourceBlock 增 chapter_id（page→章映射）+ parse_report 增 source_type/backend_reason。
-ARTIFACT_VERSION = "2"
+# v3: SourceBlock 增 element_id（table→t{n} / image·chart→f{n}，稳定 id；跨页表片段共享）。
+ARTIFACT_VERSION = "3"
 
 
 @dataclass
@@ -31,6 +32,7 @@ class SourceBlock:
     risk_flags: list = field(default_factory=list)
     source_ref: str = ""            # f"p{page:04d}#{block_id}"
     chapter_id: str = ""            # block.page 落入的章（chapters.json 的 chapter_id）；落不到 → ""
+    element_id: str = ""            # 稳定元素 id：table→"t{n}"、image/chart→"f{n}"；跨页表片段共享；其余 ""
 
 
 def block_source_ref(page: int, block_id: str) -> str:

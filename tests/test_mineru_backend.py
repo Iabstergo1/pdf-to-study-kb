@@ -90,6 +90,49 @@ def test_normalize_table_captures_caption_and_image(tmp_path):
     assert "![table](assets/tbl.jpg)" in md      # 源表图进 source view 供 LLM 核验 HTML
 
 
+def test_normalize_assigns_table_figure_element_ids(tmp_path):
+    # C1：table → t{n}、image/chart → f{n}（稳定、按类型计数）
+    items = [{"type": "table", "table_body": "<table>1</table>", "page_idx": 0},
+             {"type": "image", "img_path": "i.jpg", "page_idx": 0},
+             {"type": "chart", "img_path": "c.jpg", "page_idx": 0},
+             {"type": "table", "table_body": "<table>2</table>", "page_idx": 0}]
+    (tmp_path / "i.jpg").write_bytes(b"\xff\xd8j"); (tmp_path / "c.jpg").write_bytes(b"\xff\xd8j")
+    blocks, _ = mb.normalize_content_list(items, assets_src_dir=tmp_path,
+                                          assets_out_dir=tmp_path / "o" / "assets")
+    assert [b.element_id for b in blocks] == ["t0001", "f0001", "f0002", "t0002"]
+
+
+def test_normalize_cross_page_table_shares_element_id(tmp_path):
+    # C1 跨页表：相邻跨页表片段共享 element_id（保守链接，非合并）
+    items = [{"type": "table", "table_body": "<table>top</table>", "page_idx": 0},
+             {"type": "table", "table_body": "<table>cont</table>", "page_idx": 1}]
+    blocks, _ = mb.normalize_content_list(items, assets_src_dir=tmp_path,
+                                          assets_out_dir=tmp_path / "o" / "assets")
+    assert blocks[0].element_id == "t0001" and blocks[1].element_id == "t0001"
+    assert blocks[0].page == 1 and blocks[1].page == 2          # 同一逻辑表跨两页
+
+
+def test_normalize_cross_page_table_ignores_discarded_between(tmp_path):
+    # 页眉/页脚/页码（discarded）夹在跨页表片段之间不打断续接
+    items = [{"type": "table", "table_body": "<table>a</table>", "page_idx": 0},
+             {"type": "footer", "text": "pg 1", "page_idx": 0},
+             {"type": "page_number", "text": "1", "page_idx": 1},
+             {"type": "table", "table_body": "<table>b</table>", "page_idx": 1}]
+    blocks, _ = mb.normalize_content_list(items, assets_src_dir=tmp_path,
+                                          assets_out_dir=tmp_path / "o" / "assets")
+    assert [b.element_id for b in blocks] == ["t0001", "t0001"]
+
+
+def test_normalize_separate_tables_text_between_get_different_ids(tmp_path):
+    # 跨页表片段之间有正文 → 不是续表 → 不同 element_id（保守，不误连）
+    items = [{"type": "table", "table_body": "<table>a</table>", "page_idx": 0},
+             {"type": "text", "text": "段落", "page_idx": 1},
+             {"type": "table", "table_body": "<table>b</table>", "page_idx": 1}]
+    blocks, _ = mb.normalize_content_list(items, assets_src_dir=tmp_path,
+                                          assets_out_dir=tmp_path / "o" / "assets")
+    assert [b.element_id for b in blocks if b.type == "table"] == ["t0001", "t0002"]
+
+
 def test_render_source_md_assigns_char_spans(tmp_path):
     blocks, _ = mb.normalize_content_list(_fake_content_list(),
                                           assets_src_dir=tmp_path, assets_out_dir=tmp_path / "a")

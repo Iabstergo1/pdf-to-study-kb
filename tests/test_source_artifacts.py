@@ -32,9 +32,20 @@ def test_write_read_blocks_roundtrip(tmp_path):
     assert got[1]["text_level"] == 2 and got[1]["heading_path"] == "T"
 
 
-def test_artifact_version_bumped_to_2():
-    # L2：blocks 新增 chapter_id + report 新增 source_type/backend_reason → bump "1"→"2"
-    assert sa.ARTIFACT_VERSION == "2"
+def test_artifact_version_bumped():
+    # L2 bump "1"→"2"(chapter_id + source_type/backend_reason)；C1 bump "2"→"3"(element_id)
+    assert sa.ARTIFACT_VERSION == "3"
+
+
+def test_source_block_element_id_default_and_roundtrip(tmp_path):
+    b = sa.SourceBlock(block_id="b1", type="text", text="x", page=1, char_start=0, char_end=1)
+    assert b.element_id == ""                       # 非 table/figure 块默认空
+    tb = sa.SourceBlock(block_id="b2", type="table", text="<table/>", page=1,
+                        char_start=1, char_end=2, element_id="t0001")
+    p = tmp_path / "blocks.jsonl"
+    sa.write_blocks(p, [b, tb])
+    rt = sa.read_blocks(p)
+    assert rt[0]["element_id"] == "" and rt[1]["element_id"] == "t0001"   # 落盘/回读保真
 
 
 def test_source_block_has_chapter_id_default_empty():

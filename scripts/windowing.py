@@ -11,7 +11,7 @@ import re
 
 # 窗口算法版本：切分逻辑每次实质改动就 +1，折进 windowed 阶段 input_hash 使缓存失效。
 # v2: 页标记存在时关闭 `#` 标题分段（修代码注释被误当标题导致的过度碎片化）。
-WINDOWING_VERSION = "4"  # v4: 窗口增 source_id/chapter_title/chapter_ids/source_refs（L3 切片层溯源）。
+WINDOWING_VERSION = "5"  # v5: 含原子块(table/image/chart)的 section 整块打包（长表不切，任何块不切到两窗）。
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
 _PAGE_MARKER = re.compile(r"(?m)^<!-- page \d+ -->\s*$")
@@ -136,17 +136,45 @@ def _chapter_title_for_page(page: int, chapters: list) -> str:
     return ""
 
 
+# 原子块：内容不可在窗间切分（长表不切；图/图表是单一视觉单元）。
+_ATOMIC_TYPES = {"table", "image", "chart"}
+
+
+def _pack_blocks(sec_blocks: list, *, target_chars: int, max_chars: int):
+    """整块打包（任何块不切）：累加整块到「加下一块会超 target」就开新窗；单块超 max 也独占一窗
+    （不切）。用于含原子块的 section —— 长表/大图绝不被切到两窗。返回 (c0, c1, overlap=0)。"""
+    out: list = []
+    cur: list = []
+    for b in sec_blocks:
+        if cur and (b["char_end"] - cur[0]["char_start"]) > target_chars:
+            out.append((cur[0]["char_start"], cur[-1]["char_end"], 0))
+            cur = [b]
+        else:
+            cur.append(b)
+    if cur:
+        out.append((cur[0]["char_start"], cur[-1]["char_end"], 0))
+    return out
+
+
 def build_windows_from_blocks(blocks: list, *, source_id: str = "", chapters=None,
                               target_tokens: int = 2000, max_tokens: int = 4000,
                               overlap_tokens: int = 200) -> list[dict]:
-    """block-aware windows：按 section 切（与 char 窗共用 _slice_section 保等价），
-    再用窗 char 区间回挂块元数据（block_ids/page 范围/contains/assets/risk_flags/source_refs/
-    chapter_ids）。L3：每窗注入 source_id；按 page_start 从 chapters 查 chapter_title。"""
+    """block-aware windows：按 section 切，再回挂块元数据（block_ids/page 范围/contains/assets/
+    risk_flags/source_refs/chapter_ids）。L3：每窗注入 source_id；按 page_start 查 chapter_title。
+
+    含原子块(table/image/chart)的 section → 整块打包（长表不切）；纯文本 section → 与 char 窗
+    共用 _slice_section 保等价（含超大文本块仍按 token 滑窗切，与历史行为一致）。"""
     out: list[dict] = []
     idx = 0
     for path, s, e in _sections_from_blocks(blocks):
-        for c0, c1, ov in _slice_section(s, e, target_tokens=target_tokens,
-                                         max_tokens=max_tokens, overlap_tokens=overlap_tokens):
+        sec_blocks = [b for b in blocks if not (b["char_end"] <= s or b["char_start"] >= e)]
+        if any(b.get("type") in _ATOMIC_TYPES for b in sec_blocks):
+            slices = _pack_blocks(sec_blocks, target_chars=target_tokens * 4,
+                                  max_chars=max_tokens * 4)
+        else:
+            slices = _slice_section(s, e, target_tokens=target_tokens,
+                                    max_tokens=max_tokens, overlap_tokens=overlap_tokens)
+        for c0, c1, ov in slices:
             w = _win(idx, path, c0, c1, ov, mode="blocks")
             _attach_block_meta(w, blocks, c0, c1)
             w["source_id"] = source_id

@@ -74,7 +74,7 @@ def test_build_windows_has_chars_mode():
 
 
 def test_windowing_version_bumped():
-    assert windowing.WINDOWING_VERSION == "4"
+    assert windowing.WINDOWING_VERSION == "5"
 
 
 def _md_blocks():
@@ -136,6 +136,35 @@ def test_block_windows_oversize_block_subsplit():
     assert len(ws) >= 2
     assert all(w["mode"] == "blocks" and w["block_ids"] == ["b000001"] for w in ws)
     assert ws[1]["char_start"] < ws[0]["char_end"]   # overlap
+
+
+def _blk(bid, typ, cs, ce, *, page=1, rf=None, eid=""):
+    return {"block_id": bid, "type": typ, "text": "x", "page": page, "char_start": cs,
+            "char_end": ce, "text_level": None, "heading_path": "S", "asset_path": None,
+            "risk_flags": rf or [], "source_ref": f"p{page:04d}#{bid}", "chapter_id": "",
+            "element_id": eid}
+
+
+def test_block_windows_long_table_not_split():
+    # C2 长表不切：含原子块的 section，超大表块整块独占一窗（不被 token 预算切到两窗）。
+    tlen = 6000
+    blocks = [_blk("b000001", "text", 0, 20),
+              _blk("b000002", "table", 20, 20 + tlen, rf=["table"], eid="t0001")]
+    ws = windowing.build_windows_from_blocks(blocks, target_tokens=300, max_tokens=400,
+                                             overlap_tokens=50)
+    tab_ws = [w for w in ws if "b000002" in w["block_ids"]]
+    assert len(tab_ws) == 1                                  # 表块只在一个窗（未被切开）
+    tw = tab_ws[0]
+    assert tw["char_start"] <= 20 and tw["char_end"] >= 20 + tlen   # 窗 char 区间完整包住整张表
+    assert tw["block_ids"] == ["b000002"]                    # 超大表独占其窗
+
+
+def test_block_windows_small_table_stays_inline_with_text():
+    # 小表 + 文本（section 短）→ 整块打包进同一窗（不因含原子块就碎片化）。
+    blocks = [_blk("b000001", "text", 0, 30), _blk("b000002", "table", 30, 60, rf=["table"], eid="t0001"),
+              _blk("b000003", "text", 60, 90)]
+    ws = windowing.build_windows_from_blocks(blocks, target_tokens=1000, max_tokens=2000)
+    assert len(ws) == 1 and ws[0]["block_ids"] == ["b000001", "b000002", "b000003"]
 
 
 def test_block_windows_md_equivalent_to_char_windows():

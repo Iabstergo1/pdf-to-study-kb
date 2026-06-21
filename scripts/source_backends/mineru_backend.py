@@ -18,7 +18,8 @@ from source_backends import BackendUnavailable
 # adapter 版本：归一逻辑实质变化就 +1，折进 converted 缓存键（与 PROFILER/ARTIFACT/WINDOWING 同规）。
 # v2：middle.json 深解析（per-page 识别置信度 → ocr_low_confidence 旗标 + parse_report.pages）。
 # v3：table 块并入 caption/footnote + 复制表区域源图 asset（HTML 可能有误，留源图供 LLM 核验）。
-MINERU_ADAPTER_VERSION = "3"
+# v4：table→t{n} / image·chart→f{n} 稳定 element_id；相邻跨页表片段共享 element_id（保守链接）。
+MINERU_ADAPTER_VERSION = "4"
 DEFAULT_TIMEOUT_SECONDS = 1800
 
 
@@ -74,11 +75,12 @@ def normalize_content_list(items, *, assets_src_dir, assets_out_dir):
     header/footer/page_number/discarded 丢弃并计数；char_start/char_end 由 render_source_md 写。
     """
     blocks, discarded, seq, current_path = [], 0, 0, ""
+    table_seq, figure_seq, prev_table = 0, 0, None  # prev_table=(page, element_id) 若上一 append 块是表
     for it in items:
         t = (it.get("type") or "").lower()
         if t in _DISCARD_TYPES:
             discarded += 1
-            continue
+            continue                              # 页眉/页脚/页码 跳过，不打断跨页续表
         page = int(it.get("page_idx", 0)) + 1
         seq += 1
         block_id = f"b{seq:06d}"
@@ -90,28 +92,41 @@ def normalize_content_list(items, *, assets_src_dir, assets_out_dir):
         if is_heading:
             blocks.append(sa.SourceBlock(type="heading", text=it.get("text", ""),
                                          text_level=int(it.get("text_level")), risk_flags=[], **common))
+            prev_table = None
         elif t in ("text", "list"):
             blocks.append(sa.SourceBlock(type="text", text=it.get("text", ""), risk_flags=[], **common))
+            prev_table = None
         elif t == "table":
             body = it.get("table_body") or it.get("html") or it.get("text") or ""
             cap = _join_caption(it.get("table_caption"))
             foot = _join_caption(it.get("table_footnote"))
             text = "\n".join(p for p in (cap, body, foot) if p)   # caption + HTML + footnote
+            # 跨页续表（保守链接，非合并）：上一 append 块是表且本表在其下一页相邻 → 共享 element_id。
+            if prev_table is not None and page == prev_table[0] + 1:
+                element_id = prev_table[1]
+            else:
+                table_seq += 1
+                element_id = f"t{table_seq:04d}"
             # 表区域原图（HTML 结构可能有误）→ 复制为 asset，留源图供 LLM 核验
             asset_path = _copy_asset(it.get("img_path"), assets_src_dir, assets_out_dir)
             blocks.append(sa.SourceBlock(type="table", text=text, risk_flags=["table"],
-                                         asset_path=asset_path, **common))
+                                         asset_path=asset_path, element_id=element_id, **common))
+            prev_table = (page, element_id)
         elif t in ("equation", "formula"):
             latex = it.get("text") or it.get("latex") or ""
             blocks.append(sa.SourceBlock(type="equation", text=latex, risk_flags=["equation"], **common))
+            prev_table = None
         elif t in ("image", "figure", "chart"):   # MinerU 3.x：chart 与 image 同类（ContentType.CHART='chart'）
             cap_text = _join_caption(it.get("img_caption") or it.get("image_caption")
                                      or it.get("chart_caption"))
             asset_path = _copy_asset(it.get("img_path"), assets_src_dir, assets_out_dir)
+            figure_seq += 1
             blocks.append(sa.SourceBlock(type="image", text=cap_text, risk_flags=["image"],
-                                         asset_path=asset_path, **common))
+                                         asset_path=asset_path, element_id=f"f{figure_seq:04d}", **common))
+            prev_table = None
         else:
             blocks.append(sa.SourceBlock(type="text", text=it.get("text", ""), risk_flags=[], **common))
+            prev_table = None
     return blocks, discarded
 
 
