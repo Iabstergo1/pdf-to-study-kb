@@ -13,13 +13,60 @@ import json
 from pathlib import Path
 
 # 严重度排序：high > warn > info（strict 判定取 high）。状态：ok / warn / fail。
-__all__ = ["evaluate", "check_page_coverage", "check_window_monotonic",
-           "check_asset_traceability", "check_risk_signals", "check_orphan_blocks",
-           "check_source_ref_integrity"]
+__all__ = ["evaluate", "check_artifact_schema", "check_page_coverage",
+           "check_window_monotonic", "check_window_contract", "check_asset_traceability",
+           "check_risk_signals", "check_orphan_blocks", "check_source_ref_integrity"]
+
+# 四层必备字段契约（artifact contract gate）：
+_REQUIRED_REPORT = ("source_type", "selected_backend", "backend_reason")   # L1
+_REQUIRED_BLOCK = ("block_id", "type", "page", "source_ref", "chapter_id")  # L2（键存在即可，值可空）
+_REQUIRED_WINDOW = ("window_id", "source_id")                              # L3 所有窗最小契约
+# L3 block-aware 窗额外必备（char-fallback 降级窗豁免，由 check_window_contract 标记）：
+_REQUIRED_BLOCK_WINDOW = ("page_start", "page_end", "chapter_title", "chapter_ids",
+                          "source_refs", "block_ids")
 
 
 def _check(name: str, severity: str, status: str, detail: str) -> dict:
     return {"name": name, "severity": severity, "status": status, "detail": detail}
+
+
+def check_artifact_schema(report: dict, blocks: list, windows: list) -> dict:
+    """四层必备字段契约：parse_report 的 L1 字段、block 的 L2 字段、window 的 L3 字段齐全。
+
+    source_type/selected_backend/backend_reason 缺失或为 ""/"unknown" → 视为缺失（strict 不放行）。
+    block 字段查键存在（chapter_id 可为空串）。block-aware 窗须有全套 L3 字段；char-fallback 窗
+    只需最小契约（降级由 check_window_contract 标记）。任一缺 → high/fail。"""
+    problems: list = []
+    for k in _REQUIRED_REPORT:
+        if report.get(k) in (None, "", "unknown"):
+            problems.append(f"parse_report.{k} 缺失/unknown")
+    miss_b: dict = {}
+    for b in blocks:
+        for k in _REQUIRED_BLOCK:
+            if k not in b:
+                miss_b[k] = miss_b.get(k, 0) + 1
+    for k, n in miss_b.items():
+        problems.append(f"block 缺字段 {k}（{n} 块）")
+    miss_w: dict = {}
+    for w in windows:
+        required = _REQUIRED_WINDOW + (_REQUIRED_BLOCK_WINDOW if w.get("mode") == "blocks" else ())
+        for k in required:
+            if k not in w:
+                miss_w[k] = miss_w.get(k, 0) + 1
+    for k, n in miss_w.items():
+        problems.append(f"window 缺字段 {k}（{n} 窗）")
+    if problems:
+        return _check("artifact_schema", "high", "fail", "; ".join(problems[:20]))
+    return _check("artifact_schema", "high", "ok", "四层必备字段齐全")
+
+
+def check_window_contract(windows: list) -> dict:
+    """显式标记 char-fallback 降级窗（mode != 'blocks'，缺 L3 块级字段）。warn，不硬阻断。"""
+    degraded = [w.get("window_id", "?") for w in windows if w.get("mode") != "blocks"]
+    if degraded:
+        return _check("window_contract", "warn", "warn",
+                      f"{len(degraded)} 个 char-fallback 降级窗（缺 L3 块字段）：" + ",".join(degraded[:20]))
+    return _check("window_contract", "warn", "ok", "全部 block-aware 窗（满足 L3 契约）")
 
 
 def check_page_coverage(blocks: list, *, page_count: int) -> dict:
@@ -78,29 +125,44 @@ def check_asset_traceability(staging_dir, blocks: list, windows: list) -> dict:
     """每个 table/image/chart block 的 asset_path 文件在 staging 存在；每个 window assets
     存在（缺失 → high/fail）。"""
     asset_types = {"table", "image", "chart"}
-    missing: list = []
+    broken: list = []        # asset_path 指向的文件缺失（断链）
+    untraceable: list = []   # 视觉块既无可用 asset 也无可追溯内容（修死逻辑：无 asset_path 不再被跳过）
     for b in blocks:
         ap = b.get("asset_path")
-        if (b.get("type") in asset_types or ap) and ap:
+        t = b.get("type")
+        bid = b.get("block_id", "?")
+        if ap:
             if not _staging_has(staging_dir, ap):
-                missing.append(f"block {b.get('block_id', '?')} → {ap}")
+                broken.append(f"block {bid} → {ap}（文件缺失）")
+        elif t in asset_types:
+            # image/chart 的内容就是图，缺图=丢内容；table 有 HTML 文本可兜底，无文本才算丢失。
+            if t in ("image", "chart") or not (b.get("text") or "").strip():
+                untraceable.append(f"block {bid}（{t}）无 asset 且无可追溯内容")
     for w in windows:
         for ap in w.get("assets", []) or []:
             if not _staging_has(staging_dir, ap):
-                missing.append(f"window {w.get('window_id', '?')} → {ap}")
-    if missing:
+                broken.append(f"window {w.get('window_id', '?')} → {ap}")
+    problems = broken + untraceable
+    if problems:
         return _check("asset_traceability", "high", "fail",
-                      f"缺资产 {len(missing)} 处：" + "; ".join(missing[:20]))
-    return _check("asset_traceability", "high", "ok", "全部 asset_path 在 staging 命中")
+                      f"资产不可追溯 {len(problems)} 处：" + "; ".join(problems[:20]))
+    return _check("asset_traceability", "high", "ok", "全部视觉块可追溯到 asset 或文本")
 
 
 def check_risk_signals(report: dict, *, low_confidence_pages: list) -> dict:
-    """汇报 scan_suspected / ocr_used / low_confidence_pages（信息性）。
-    low_confidence_pages 非空 → warn（不阻断，仅提示人复核）；否则 ok。"""
+    """OCR/扫描风险。**硬规则**：扫描件/疑似扫描却没走 OCR（ocr_used=False）→ 扫描内容可能被当
+    文本悄悄丢失（最危险）→ high/fail。其余：low_confidence_pages 非空 → warn（提示复核）；否则 ok。"""
     scan = bool(report.get("scan_suspected"))
     ocr = bool(report.get("ocr_used"))
+    stype = report.get("source_type", "")
+    backend = report.get("selected_backend", "")
     lcp = list(low_confidence_pages or [])
-    detail = f"scan_suspected={scan}, ocr_used={ocr}, low_confidence_pages={lcp[:20]}"
+    detail = (f"source_type={stype}, scan_suspected={scan}, ocr_used={ocr}, "
+              f"low_confidence_pages={lcp[:20]}")
+    if (stype == "scanned_pdf" or scan) and not ocr:
+        return _check("risk_signals", "high", "fail",
+                      f"scanned/scan_suspected 但 ocr_used=False（backend={backend}）：扫描内容可能未被识别。"
+                      + detail)
     if lcp:
         return _check("risk_signals", "info", "warn", detail)
     return _check("risk_signals", "info", "ok", detail)
@@ -171,8 +233,10 @@ def evaluate(staging_dir) -> dict:
         page_count = max((int(b.get("page", 0)) for b in blocks), default=0)
 
     checks = [
+        check_artifact_schema(report, blocks, windows),
         check_page_coverage(blocks, page_count=page_count),
         check_window_monotonic(windows),
+        check_window_contract(windows),
         check_asset_traceability(d, blocks, windows),
         check_risk_signals(report, low_confidence_pages=report.get("low_confidence_pages", [])),
         check_orphan_blocks(blocks, windows),

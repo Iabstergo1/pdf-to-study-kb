@@ -60,10 +60,17 @@ def _write_staging(d, *, blocks, windows, report, pages=None, assets=None):
 
 
 def _ok_report(**extra):
-    r = {"selected_backend": "pymupdf", "source_type": "native_pdf", "page_count": 2,
+    r = {"selected_backend": "pymupdf", "source_type": "native_pdf",
+         "backend_reason": "default native pdf→pymupdf", "page_count": 2,
          "scan_suspected": False, "ocr_used": False}
     r.update(extra)
     return r
+
+
+def _char_window(wid, cs, ce):
+    # char-fallback 降级窗：只有 source_id，缺 L3 块级字段（page/chapter/source_refs/block_ids）。
+    return {"window_id": wid, "mode": "chars", "heading_path": "", "char_start": cs,
+            "char_end": ce, "overlap_before": 0, "source_id": "s"}
 
 
 # ---- check_page_coverage ----
@@ -151,6 +158,82 @@ def test_check_asset_traceability_missing_window_asset_fails(tmp_path):
     assert c["status"] == "fail"
 
 
+def test_check_asset_traceability_image_without_asset_fails(tmp_path):
+    # 视觉块（image/chart）无 asset_path：内容即图，缺图=丢内容 → high/fail（修死逻辑）。
+    blocks = [_block("b1", 1, 0, 10, typ="image", asset=None)]
+    ws = [_window("w0", 0, 200, ["b1"])]
+    d = _write_staging(tmp_path / "s", blocks=blocks, windows=ws, report=_ok_report())
+    c = pe.check_asset_traceability(d, blocks, ws)
+    assert c["status"] == "fail" and c["severity"] == "high"
+
+
+def test_check_asset_traceability_table_html_without_asset_ok(tmp_path):
+    # table 无 asset 但有 HTML 文本 → 可追溯（HTML 兜底）→ ok。
+    blocks = [_block("b1", 1, 0, 10, typ="table", asset=None)]
+    blocks[0]["text"] = "<table><tr><td>a</td></tr></table>"
+    ws = [_window("w0", 0, 200, ["b1"])]
+    d = _write_staging(tmp_path / "s", blocks=blocks, windows=ws, report=_ok_report())
+    c = pe.check_asset_traceability(d, blocks, ws)
+    assert c["status"] == "ok"
+
+
+# ---- check_artifact_schema（四层必备字段契约，item 2）----
+
+def test_check_artifact_schema_ok():
+    blocks = [_block("b1", 1, 0, 10)]
+    ws = [_window("w0", 0, 200, ["b1"])]
+    c = pe.check_artifact_schema(_ok_report(), blocks, ws)
+    assert c["name"] == "artifact_schema" and c["status"] == "ok"
+
+
+def test_check_artifact_schema_unknown_source_type_fails():
+    c = pe.check_artifact_schema(_ok_report(source_type="unknown"),
+                                 [_block("b1", 1, 0, 10)], [_window("w0", 0, 200, ["b1"])])
+    assert c["status"] == "fail" and c["severity"] == "high"
+    assert "source_type" in c["detail"]
+
+
+def test_check_artifact_schema_missing_backend_reason_fails():
+    rep = _ok_report()
+    del rep["backend_reason"]
+    c = pe.check_artifact_schema(rep, [_block("b1", 1, 0, 10)], [_window("w0", 0, 200, ["b1"])])
+    assert c["status"] == "fail" and "backend_reason" in c["detail"]
+
+
+def test_check_artifact_schema_missing_block_chapter_id_fails():
+    b = _block("b1", 1, 0, 10)
+    del b["chapter_id"]
+    c = pe.check_artifact_schema(_ok_report(), [b], [_window("w0", 0, 200, ["b1"])])
+    assert c["status"] == "fail" and "chapter_id" in c["detail"]
+
+
+def test_check_artifact_schema_missing_window_l3_fails():
+    w = _window("w0", 0, 200, ["b1"])
+    del w["source_refs"]                       # block 窗缺 L3 字段
+    c = pe.check_artifact_schema(_ok_report(), [_block("b1", 1, 0, 10)], [w])
+    assert c["status"] == "fail" and "source_refs" in c["detail"]
+
+
+def test_check_artifact_schema_char_window_needs_only_minimal():
+    # char-fallback 窗只需 window_id/source_id，不因缺块级 L3 字段而 schema-fail（由 window_contract 标降级）。
+    c = pe.check_artifact_schema(_ok_report(), [_block("b1", 1, 0, 10)],
+                                 [_char_window("w0", 0, 100)])
+    assert c["status"] == "ok"
+
+
+# ---- check_window_contract（char-fallback 显式降级，item 3）----
+
+def test_check_window_contract_ok_all_block_windows():
+    c = pe.check_window_contract([_window("w0", 0, 200, ["b1"])])
+    assert c["status"] == "ok"
+
+
+def test_check_window_contract_flags_char_fallback():
+    c = pe.check_window_contract([_char_window("w0", 0, 100), _window("w1", 100, 200, ["b1"])])
+    assert c["status"] == "warn" and c["severity"] == "warn"
+    assert "w0" in c["detail"]
+
+
 # ---- check_risk_signals ----
 
 def test_check_risk_signals_info_when_clean():
@@ -163,6 +246,21 @@ def test_check_risk_signals_warn_on_low_confidence():
                               low_confidence_pages=[3, 5])
     assert c["status"] == "warn" and c["severity"] == "info"
     assert "scan_suspected" in c["detail"] or "3" in c["detail"]
+
+
+def test_check_risk_signals_scanned_without_ocr_fails():
+    # item 4 硬规则：扫描件/疑似扫描但 ocr_used=False → 内容可能被当文本悄悄丢失 → high/fail。
+    c = pe.check_risk_signals(_ok_report(source_type="scanned_pdf", scan_suspected=True,
+                                         ocr_used=False), low_confidence_pages=[])
+    assert c["status"] == "fail" and c["severity"] == "high"
+    assert "ocr_used=False" in c["detail"]
+
+
+def test_check_risk_signals_scanned_with_ocr_ok():
+    # 扫描件正确走了 OCR → 不触发硬规则。
+    c = pe.check_risk_signals(_ok_report(source_type="scanned_pdf", scan_suspected=True,
+                                         ocr_used=True), low_confidence_pages=[])
+    assert c["status"] == "ok"
 
 
 # ---- check_orphan_blocks ----
@@ -228,10 +326,10 @@ def test_evaluate_all_ok(tmp_path):
     assert rep["source_type"] == "native_pdf"
     assert rep["selected_backend"] == "pymupdf"
     names = {c["name"] for c in rep["checks"]}
-    assert names == {"page_coverage", "window_monotonic", "asset_traceability",
-                     "risk_signals", "orphan_blocks", "source_ref_integrity"}
+    assert names == {"artifact_schema", "page_coverage", "window_monotonic", "window_contract",
+                     "asset_traceability", "risk_signals", "orphan_blocks", "source_ref_integrity"}
     assert rep["summary"]["fail"] == 0
-    assert rep["summary"]["ok"] >= 5
+    assert rep["summary"]["ok"] >= 7
 
 
 def test_evaluate_flags_missing_page_as_fail(tmp_path):
@@ -316,4 +414,20 @@ def test_cli_preflight_eval_custom_json_path(tmp_path):
 
 def test_cli_preflight_eval_missing_staging_errors(tmp_path):
     r = _run(["preflight-eval", "--source", "nope"], tmp_path)
+    assert r.returncode != 0
+
+
+def test_cli_preflight_eval_help(tmp_path):
+    r = _run(["preflight-eval", "--help"], tmp_path)
+    assert r.returncode == 0 and "--strict" in r.stdout and "--source" in r.stdout
+
+
+def test_cli_preflight_eval_strict_nonzero_on_scanned_without_ocr(tmp_path):
+    # 端到端：扫描件但 ocr_used=False（schema/字段齐全）→ strict 非零退出（OCR 契约硬规则）。
+    blocks = [_block("b1", 1, 0, 200)]
+    ws = [_window("w0", 0, 200, ["b1"], ps=1, pe_=1, refs=["p0001#b1"])]
+    _staging_under_root(tmp_path, "scn", blocks=blocks, windows=ws,
+                        report=_ok_report(page_count=1, source_type="scanned_pdf",
+                                          scan_suspected=True, ocr_used=False))
+    r = _run(["preflight-eval", "--source", "scn", "--strict"], tmp_path)
     assert r.returncode != 0
