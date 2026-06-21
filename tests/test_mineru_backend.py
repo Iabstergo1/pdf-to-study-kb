@@ -182,6 +182,52 @@ def test_convert_success_with_fake_mineru_output(tmp_path, monkeypatch):
     assert res.needs_vision_pages == [2, 3]     # table/equation 在 p2，image 在 p3
 
 
+def _fake_run_mineru_with_middle(tmp_path, low_conf_page_idx=1):
+    import json
+    def fake(src, raw_dir, *, timeout):
+        auto = Path(raw_dir) / "x" / "auto"
+        (auto / "images").mkdir(parents=True, exist_ok=True)
+        (auto / "images" / "fig1.jpg").write_bytes(b"\xff\xd8jpg")
+        (auto / "x_content_list.json").write_text(json.dumps(_fake_content_list()), encoding="utf-8")
+        pdf_info = [{  # 3 页，low_conf_page_idx 页 text span score 0.40（低置信）
+            "page_idx": idx, "discarded_blocks": [],
+            "para_blocks": [{"type": "text", "lines": [
+                {"spans": [{"type": "text", "score": 0.40 if idx == low_conf_page_idx else 0.99}]}]}],
+        } for idx in range(3)]
+        (auto / "x_middle.json").write_text(json.dumps({"pdf_info": pdf_info}), encoding="utf-8")
+        return Path(raw_dir)
+    return fake
+
+
+def test_convert_tags_ocr_low_confidence_from_middle(tmp_path, monkeypatch):
+    monkeypatch.setattr(mb, "mineru_available", lambda: True)
+    monkeypatch.setattr(mb, "_mineru_version", lambda: "x")
+    monkeypatch.setattr(mb, "_run_mineru", _fake_run_mineru_with_middle(tmp_path, low_conf_page_idx=1))
+    res = mb.convert(tmp_path / "x.pdf", out_dir=tmp_path / "o", input_hash="h")
+    # 低置信页 = 1-based 2（content_list 的 table/equation 在此页）→ blocks 追加 ocr_low_confidence
+    p2 = [b for b in res.blocks if b.page == 2]
+    assert p2 and all("ocr_low_confidence" in b.risk_flags for b in p2)
+    assert all("ocr_low_confidence" not in b.risk_flags
+               for b in res.blocks if b.page in (1, 3))      # 高置信页不带
+    assert res.report["low_confidence_pages"] == [2]
+    assert len(res.report["pages"]) == 3 and res.report["pages"][1]["low_confidence"] is True
+
+
+def test_ocr_low_confidence_propagates_to_windows(tmp_path, monkeypatch):
+    import importlib
+    from dataclasses import asdict
+    windowing = importlib.import_module("windowing")
+    monkeypatch.setattr(mb, "mineru_available", lambda: True)
+    monkeypatch.setattr(mb, "_mineru_version", lambda: "x")
+    monkeypatch.setattr(mb, "_run_mineru", _fake_run_mineru_with_middle(tmp_path, low_conf_page_idx=1))
+    res = mb.convert(tmp_path / "x.pdf", out_dir=tmp_path / "o", input_hash="h")
+    ws = windowing.build_windows_from_blocks([asdict(b) for b in res.blocks])
+    flags = set()
+    for w in ws:
+        flags.update(w.get("risk_flags") or [])
+    assert "ocr_low_confidence" in flags        # 低置信旗标进窗 → 经 cmd_lint 触发 risk-traceability
+
+
 def test_convert_propagates_run_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(mb, "mineru_available", lambda: True)
     def boom(src, raw_dir, *, timeout):
@@ -189,6 +235,68 @@ def test_convert_propagates_run_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(mb, "_run_mineru", boom)
     with pytest.raises(mb.MineruRunFailed):
         mb.convert(tmp_path / "x.pdf", out_dir=tmp_path / "o", input_hash="h")
+
+
+def _fake_middle_pdf_info():
+    return [
+        {  # page 1：文本层高分 + 标题 + 整图块；1 个 discarded
+            "page_idx": 0,
+            "discarded_blocks": [{"type": "discarded"}],
+            "para_blocks": [
+                {"type": "title", "lines": [{"spans": [{"type": "text", "score": 1.0, "content": "T"}]}]},
+                {"type": "text", "lines": [
+                    {"spans": [{"type": "text", "score": 1.0}, {"type": "text", "score": 0.95}]}]},
+                {"type": "image", "blocks": []},
+            ],
+        },
+        {  # page 2：低置信（text span min 0.40）+ interline_equation；0 discarded
+            "page_idx": 1,
+            "discarded_blocks": [],
+            "para_blocks": [
+                {"type": "text", "lines": [
+                    {"spans": [{"type": "text", "score": 0.40}, {"type": "inline_equation", "score": 0.88}]}]},
+                {"type": "interline_equation",
+                 "lines": [{"spans": [{"type": "interline_equation", "score": 0.9}]}]},
+            ],
+        },
+    ]
+
+
+def test_per_page_signals_confidence_and_low_conf():
+    sig = mb.per_page_signals(_fake_middle_pdf_info())
+    assert [s["page"] for s in sig] == [1, 2]                 # 1-based
+    p1, p2 = sig
+    assert p1["block_types"] == {"title": 1, "text": 1, "image": 1}
+    assert p1["discarded"] == 1
+    assert p1["text_spans"] == 3 and p1["min_score"] == 0.95
+    assert p1["low_confidence"] is False                      # 高分页不标低置信
+    # interline_equation span 不计入文本置信（只算 text / inline_equation）
+    assert p2["block_types"] == {"text": 1, "interline_equation": 1}
+    assert p2["discarded"] == 0
+    assert p2["text_spans"] == 2 and p2["min_score"] == 0.40
+    assert p2["low_confidence"] is True                       # min 0.40 < 0.60
+
+
+def test_per_page_signals_no_text_spans_not_low_conf():
+    # 整图页（无 text/inline_equation span）：mean/min=None，不误判低置信
+    pdf_info = [{"page_idx": 0, "para_blocks": [{"type": "image", "lines": []}], "discarded_blocks": []}]
+    s = mb.per_page_signals(pdf_info)[0]
+    assert s["text_spans"] == 0 and s["mean_score"] is None and s["min_score"] is None
+    assert s["low_confidence"] is False
+
+
+def test_parse_middle_json_finds_and_parses(tmp_path):
+    import json
+    auto = tmp_path / "x" / "auto"
+    auto.mkdir(parents=True)
+    (auto / "x_middle.json").write_text(
+        json.dumps({"pdf_info": _fake_middle_pdf_info()}), encoding="utf-8")
+    sig = mb.parse_middle_json(tmp_path)
+    assert sig is not None and len(sig) == 2 and sig[1]["low_confidence"] is True
+
+
+def test_parse_middle_json_missing_returns_none(tmp_path):
+    assert mb.parse_middle_json(tmp_path) is None             # middle.json 可选，缺失不阻塞
 
 
 def test_e2e_mineru_convert_to_block_windows(tmp_path, monkeypatch):

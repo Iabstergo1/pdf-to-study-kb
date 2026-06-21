@@ -16,7 +16,8 @@ import source_artifacts as sa  # noqa: F401（C2/C3 归一用）
 from source_backends import BackendUnavailable
 
 # adapter 版本：归一逻辑实质变化就 +1，折进 converted 缓存键（与 PROFILER/ARTIFACT/WINDOWING 同规）。
-MINERU_ADAPTER_VERSION = "1"
+# v2：middle.json 深解析（per-page 识别置信度 → ocr_low_confidence 旗标 + parse_report.pages）。
+MINERU_ADAPTER_VERSION = "2"
 DEFAULT_TIMEOUT_SECONDS = 1800
 
 
@@ -101,6 +102,60 @@ def normalize_content_list(items, *, assets_src_dir, assets_out_dir):
     return blocks, discarded
 
 
+# ── middle.json 结构信号（深解析）：per-page 识别置信度 + 块类型/discarded ──────────
+# MinerU 不把 per-page parse 方法(txt/ocr)写进输出，且 span score 在 OCR/文本层页范围重叠，
+# 故不做"per-page OCR 二值"；改据 span score 算每页识别置信度，低分页打 ocr_low_confidence。
+_TEXT_SPAN_TYPES = ("text", "inline_equation")
+
+
+def per_page_signals(pdf_info, *, low_conf_min=0.60, low_conf_mean=0.85):
+    """middle.json 的 pdf_info（逐页）→ per-page 结构信号（纯函数，无 IO）。
+
+    每页产 {page(1-based), block_types, discarded, text_spans, mean_score, min_score,
+    low_confidence}。low_confidence = 有文本 span 且 (min<low_conf_min 或 mean<low_conf_mean)。
+    """
+    out = []
+    for p in pdf_info or []:
+        page = int(p.get("page_idx", 0)) + 1
+        btypes, scores = {}, []
+        for blk in p.get("para_blocks", []):
+            t = blk.get("type")
+            btypes[t] = btypes.get(t, 0) + 1
+            for ln in blk.get("lines", []):
+                for sp in ln.get("spans", []):
+                    if sp.get("type") in _TEXT_SPAN_TYPES and isinstance(sp.get("score"), (int, float)):
+                        scores.append(float(sp["score"]))
+        n = len(scores)
+        mean_s = sum(scores) / n if n else None
+        min_s = min(scores) if n else None
+        low = bool(n and (min_s < low_conf_min or mean_s < low_conf_mean))
+        out.append({
+            "page": page,
+            "block_types": btypes,
+            "discarded": len(p.get("discarded_blocks", [])),
+            "text_spans": n,
+            "mean_score": round(mean_s, 4) if mean_s is not None else None,
+            "min_score": round(min_s, 4) if min_s is not None else None,
+            "low_confidence": low,
+        })
+    return out
+
+
+def _find_middle_json(raw_dir):
+    matches = sorted(Path(raw_dir).rglob("*middle*.json"))
+    return matches[0] if matches else None
+
+
+def parse_middle_json(raw_dir, **kw):
+    """读 MinerU middle.json → per_page_signals；缺失返回 None（middle.json 可选，不阻塞）。"""
+    import json
+    mj = _find_middle_json(raw_dir)
+    if mj is None:
+        return None
+    d = json.loads(Path(mj).read_text(encoding="utf-8"))
+    return per_page_signals(d.get("pdf_info", []), **kw)
+
+
 def render_source_md(blocks) -> str:
     """从归一 blocks 渲染统一 source view（三后端形态一致），并就地写每块 char_start/char_end。
 
@@ -138,13 +193,21 @@ def build_chapters(blocks, page_count):
 
 def build_mineru_report(blocks, *, input_hash, discarded_count, mineru_version="unknown",
                         ocr_used=False, scan_suspected=False, routing_advice=None,
-                        consumed_by_auto_router=False, warnings=None):
-    """MinerU parse_report：selected_backend=mineru、mineru_status=used、pipeline、各类 counts。"""
+                        consumed_by_auto_router=False, warnings=None, page_signals=None):
+    """MinerU parse_report：selected_backend=mineru、mineru_status=used、pipeline、各类 counts。
+
+    page_signals（middle.json 深解析，可选）→ 报告附 `pages`(逐页结构信号) + `low_confidence_pages`。
+    """
     counts = {}
     for b in blocks:
         counts[b.type] = counts.get(b.type, 0) + 1
     advice = routing_advice or sa.RoutingAdvice(recommended_backend="mineru",
                                                 structured_reparse_recommended=False)
+    structural = {}
+    if page_signals is not None:
+        structural["pages"] = page_signals
+        structural["low_confidence_pages"] = sorted(s["page"] for s in page_signals
+                                                    if s["low_confidence"])
     return sa.build_parse_report(
         "mineru", input_hash=input_hash, routing_advice=advice,
         consumed_by_auto_router=consumed_by_auto_router, warnings=warnings,
@@ -153,7 +216,7 @@ def build_mineru_report(blocks, *, input_hash, discarded_count, mineru_version="
         text_block_count=counts.get("text", 0), heading_count=counts.get("heading", 0),
         table_count=counts.get("table", 0), equation_count=counts.get("equation", 0),
         image_count=counts.get("image", 0), discarded_count=discarded_count,
-        ocr_used=bool(ocr_used), scan_suspected=bool(scan_suspected))
+        ocr_used=bool(ocr_used), scan_suspected=bool(scan_suspected), **structural)
 
 
 def _run_mineru(src_path, raw_dir, *, timeout):
@@ -217,11 +280,18 @@ def convert(src_path, *, out_dir, input_hash, timeout=DEFAULT_TIMEOUT_SECONDS):
     items = json.loads(content_list_path.read_text(encoding="utf-8"))
     blocks, discarded = normalize_content_list(
         items, assets_src_dir=content_list_path.parent, assets_out_dir=out_dir / "assets")
+    # middle.json 深解析（可选）：低识别置信度页 → 给该页 blocks 追加 ocr_low_confidence 风险旗标
+    page_signals = parse_middle_json(raw_dir)
+    if page_signals:
+        low_pages = {s["page"] for s in page_signals if s["low_confidence"]}
+        for b in blocks:
+            if b.page in low_pages and "ocr_low_confidence" not in b.risk_flags:
+                b.risk_flags.append("ocr_low_confidence")
     source_md = render_source_md(blocks)
     page_count = max((b.page for b in blocks), default=0)
     chapters = build_chapters(blocks, page_count)
     report = build_mineru_report(blocks, input_hash=input_hash, discarded_count=discarded,
-                                 mineru_version=_mineru_version())
+                                 mineru_version=_mineru_version(), page_signals=page_signals)
     needs_vision_pages = sorted({b.page for b in blocks if b.risk_flags})
     return sa.BackendResult(source_md=source_md, blocks=blocks, chapters=chapters,
                             pages=[], report=report, needs_vision_pages=needs_vision_pages)
