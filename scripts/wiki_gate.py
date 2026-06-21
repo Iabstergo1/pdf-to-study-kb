@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import concept_store
 import mdpage
 import page_rules
+import thresholds  # 门禁阈值单一真值（env 可覆盖）
 
 _EXCLUDE_TOP = {"Review-Queue", "_meta", "assets"}
 _DERIVED = {"index.generated.md", "aliases.md"}
@@ -43,8 +44,8 @@ def concepts_without_synthesis(pages: list[dict]) -> int:
     return n_concept if (n_concept and not has_synth) else 0
 
 
-# 概念多的源必须有 topic 主题页做分类层（扁平概念之上的导航）；阈值以下的小源不强制
-_TOPIC_THRESHOLD = 6
+# 概念多的源必须有 topic 主题页做分类层（扁平概念之上的导航）；阈值以下的小源不强制。
+# 阈值见 thresholds.TOPIC_THRESHOLD（env 可覆盖）。
 
 
 def concept_heavy_without_topic(pages: list[dict]) -> int:
@@ -55,7 +56,7 @@ def concept_heavy_without_topic(pages: list[dict]) -> int:
     types = [p.get("meta", {}).get("type") for p in pages]
     n_concept = sum(t == "concept" for t in types)
     has_topic = any(t == "topic" for t in types)
-    return n_concept if (n_concept >= _TOPIC_THRESHOLD and not has_topic) else 0
+    return n_concept if (n_concept >= thresholds.TOPIC_THRESHOLD and not has_topic) else 0
 
 
 def belongs_to_source(rel_path: str, meta: dict, source_id: str, written: set[str]) -> bool:
@@ -105,7 +106,7 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
             hit(rel, "formula-table-pipe",
                 f"公式内未转义的 | 落在表格单元格（用 \\lvert\\rvert 或 \\| 或把公式移出表格）：{snip}")
         # L6 代理：lesson 去占位后过短 = 疑似空课/封面页产物（精确 L6 需源页映射，见 plan 取舍）
-        if ptype == "lesson" and len(_PLACEHOLDER.sub("", body).strip()) < 80:
+        if ptype == "lesson" and len(_PLACEHOLDER.sub("", body).strip()) < thresholds.LESSON_MIN_BODY:
             hit(rel, "L6-empty-lesson", "lesson body too short (proxy for cover/blank/toc)")
         # 断链（从散文取——代码里的 [[ 不是 wikilink）
         for target in _WIKILINK.findall(prose):
@@ -123,7 +124,7 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
     n_flat = concept_heavy_without_topic(pages)
     if n_flat:
         hit("(topics)", "topics-missing",
-            f"本批产出 {n_flat} 个 concept 却无 topic 主题页（≥{_TOPIC_THRESHOLD} 概念须按主题聚成 topic 页做分类层）；"
+            f"本批产出 {n_flat} 个 concept 却无 topic 主题页（≥{thresholds.TOPIC_THRESHOLD} 概念须按主题聚成 topic 页做分类层）；"
             "阶段 E 必做——把概念按主题分组")
     # 重复 canonical_id（vault 级，阻断）
     _reg, errors, _warn = concept_store.build_registry(concept_store.scan_concept_pages(vault))

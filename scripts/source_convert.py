@@ -15,13 +15,13 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import source_profile
 import source_artifacts
+import thresholds  # 路由阈值单一真值（env 可覆盖）
 from source_backends import get_backend, get_backend_by_name, BackendUnavailable  # noqa: F401
 
 __all__ = ["convert", "converted_input_hash", "select_backend", "classify_source",
            "BackendUnavailable"]
 
-_LOW_TEXT_MEAN = 100
-_DENSE_RATIO = 0.30
+# 低文本/密集阈值见 thresholds.LOW_TEXT_MEAN / thresholds.DENSE_RATIO（env 可覆盖）。
 # 密集/扫描信号取值（profile 已算的 per-page needs_vision_reason）
 _DENSE_FLAGS = {"formula", "formula-borderline", "table", "vector-figure", "caption"}
 
@@ -40,7 +40,7 @@ def _scan_or_low_text(pages) -> bool:
     mean_text = sum(p.get("text_len", 0) for p in pages) / n
     scan_ratio = sum(1 for p in pages
                      if "scanned-or-image" in (p.get("needs_vision_reason") or [])) / n
-    return mean_text < _LOW_TEXT_MEAN or scan_ratio >= _DENSE_RATIO
+    return mean_text < thresholds.LOW_TEXT_MEAN or scan_ratio >= thresholds.DENSE_RATIO
 
 
 def _dense(pages) -> bool:
@@ -50,7 +50,7 @@ def _dense(pages) -> bool:
     n = len(pages)
     dense = sum(1 for p in pages
                 if _DENSE_FLAGS & set(p.get("needs_vision_reason") or [])) / n
-    return dense >= _DENSE_RATIO
+    return dense >= thresholds.DENSE_RATIO
 
 
 def _assign_chapter_ids(blocks, chapters) -> None:
@@ -102,7 +102,7 @@ def classify_source(fmt, profile_pages, *, backend, policy) -> dict:
 
     source_type ∈ {native_pdf, scanned_pdf, low_text_pdf, mixed_pdf, docx, pptx, markdown}：
     - fmt==md → markdown；fmt==docx → docx；fmt==pptx → pptx（profile_pages 为空也按 fmt）。
-    - fmt==pdf：扫描件 → scanned_pdf；否则 mean_text<_LOW_TEXT_MEAN → low_text_pdf；
+    - fmt==pdf：扫描件 → scanned_pdf；否则 mean_text<thresholds.LOW_TEXT_MEAN → low_text_pdf；
       否则密集（表/图/公式）→ mixed_pdf；否则 → native_pdf。pages 为空 → 保守 native_pdf。
     - 未知 fmt → source_type="unknown"（不伪造；与 select_backend 的 fail-closed 分工，不抛错）。
 
@@ -121,7 +121,7 @@ def classify_source(fmt, profile_pages, *, backend, policy) -> dict:
     elif fmt == "pdf":
         if pages and source_profile.is_scanned_source(pages):
             source_type = "scanned_pdf"
-        elif pages and (sum(p.get("text_len", 0) for p in pages) / len(pages)) < _LOW_TEXT_MEAN:
+        elif pages and (sum(p.get("text_len", 0) for p in pages) / len(pages)) < thresholds.LOW_TEXT_MEAN:
             source_type = "low_text_pdf"
         elif _dense(pages):
             source_type = "mixed_pdf"
@@ -164,7 +164,8 @@ def converted_input_hash(raw_path, *, backend: str = "auto", policy: str = "cons
     return (hashlib.sha256(raw).hexdigest() + ":" + source_profile.PROFILER_VERSION
             + ":" + source_artifacts.ARTIFACT_VERSION
             + ":" + str(backend) + ":" + str(policy)
-            + ":" + mineru_backend.MINERU_ADAPTER_VERSION)
+            + ":" + mineru_backend.MINERU_ADAPTER_VERSION
+            + ":" + thresholds.fingerprint())   # 覆盖检测/路由阈值即失效缓存、强制重算
 
 
 def convert(src_path, *, out_dir, fmt: str, backend: str = "auto",

@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import source_artifacts as sa  # noqa: F401（C2/C3 归一用）
+import thresholds  # OCR 低置信阈值单一真值（env 可覆盖）
 from source_backends import BackendUnavailable
 
 # adapter 版本：归一逻辑实质变化就 +1，折进 converted 缓存键（与 PROFILER/ARTIFACT/WINDOWING 同规）。
@@ -136,12 +137,15 @@ def normalize_content_list(items, *, assets_src_dir, assets_out_dir):
 _TEXT_SPAN_TYPES = ("text", "inline_equation")
 
 
-def per_page_signals(pdf_info, *, low_conf_min=0.60, low_conf_mean=0.85):
+def per_page_signals(pdf_info, *, low_conf_min=None, low_conf_mean=None):
     """middle.json 的 pdf_info（逐页）→ per-page 结构信号（纯函数，无 IO）。
 
     每页产 {page(1-based), block_types, discarded, text_spans, mean_score, min_score,
     low_confidence}。low_confidence = 有文本 span 且 (min<low_conf_min 或 mean<low_conf_mean)。
+    阈值缺省取 thresholds（env 可覆盖）；显式传参优先。
     """
+    low_conf_min = thresholds.OCR_LOW_CONF_MIN if low_conf_min is None else low_conf_min
+    low_conf_mean = thresholds.OCR_LOW_CONF_MEAN if low_conf_mean is None else low_conf_mean
     out = []
     for p in pdf_info or []:
         page = int(p.get("page_idx", 0)) + 1

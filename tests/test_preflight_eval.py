@@ -312,6 +312,36 @@ def test_check_source_ref_integrity_window_missing_ref_fails():
     assert c["status"] == "fail"
 
 
+# ---- check_detection_distribution（检测分布观测，proposal 2）----
+
+def test_check_detection_distribution_no_pages_ok():
+    c = pe.check_detection_distribution([])
+    assert c["name"] == "detection_distribution" and c["status"] == "ok" and c["severity"] == "info"
+
+
+def test_check_detection_distribution_normal_ratio_ok():
+    pages = [{"needs_vision": i < 2} for i in range(10)]      # 20% 难页 → 正常 ok
+    c = pe.check_detection_distribution(pages)
+    assert c["status"] == "ok"
+
+
+def test_check_detection_distribution_warn_when_over_recall():
+    pages = [{"needs_vision": True} for _ in range(10)]       # 100% 难页 → 疑过召回 warn
+    c = pe.check_detection_distribution(pages)
+    assert c["status"] == "warn" and c["severity"] == "warn" and "过召回" in c["detail"]
+
+
+def test_evaluate_includes_detection_distribution_warn(tmp_path):
+    blocks = [_block("b1", 1, 0, 200)]
+    ws = [_window("w0", 0, 200, ["b1"], ps=1, pe_=1, refs=["p0001#b1"])]
+    d = _write_staging(tmp_path / "d", blocks=blocks, windows=ws, report=_ok_report(page_count=1),
+                       pages=[{"page": i, "needs_vision": True} for i in range(1, 11)])
+    rep = pe.evaluate(d)
+    dd = next(c for c in rep["checks"] if c["name"] == "detection_distribution")
+    assert dd["status"] == "warn"
+    assert rep["summary"]["warn"] >= 1 and rep["summary"]["fail"] == 0    # 观测 warn 不阻断
+
+
 # ---- evaluate（端到端组装 + summary） ----
 
 def test_evaluate_all_ok(tmp_path):
@@ -327,9 +357,10 @@ def test_evaluate_all_ok(tmp_path):
     assert rep["selected_backend"] == "pymupdf"
     names = {c["name"] for c in rep["checks"]}
     assert names == {"artifact_schema", "page_coverage", "window_monotonic", "window_contract",
-                     "asset_traceability", "risk_signals", "orphan_blocks", "source_ref_integrity"}
+                     "asset_traceability", "risk_signals", "orphan_blocks", "source_ref_integrity",
+                     "detection_distribution"}
     assert rep["summary"]["fail"] == 0
-    assert rep["summary"]["ok"] >= 7
+    assert rep["summary"]["ok"] >= 8
 
 
 def test_evaluate_flags_missing_page_as_fail(tmp_path):

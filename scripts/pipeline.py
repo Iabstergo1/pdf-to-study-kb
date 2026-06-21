@@ -80,13 +80,15 @@ def cmd_profile(args):
     """逐页 profile（产出 staging/<source>/pages.jsonl，needs_vision 标记）。"""
     import state_store
     import source_profile
+    import thresholds
     import json
     import hashlib
     db = _vault_state_db()
     raw = _raw_path(db, state_store, args.source)
     src_row = state_store.get_source(db, args.source)
-    # 混入 profiler 版本：确定性启发式升级即失效缓存（对任意来源通用）。
-    ihash = hashlib.sha256(raw.read_bytes()).hexdigest() + ":" + source_profile.PROFILER_VERSION
+    # 混入 profiler 版本 + 检测阈值指纹：启发式升级或 env 覆盖阈值即失效缓存（对任意来源通用）。
+    ihash = (hashlib.sha256(raw.read_bytes()).hexdigest() + ":" + source_profile.PROFILER_VERSION
+             + ":" + thresholds.fingerprint())
     if not state_store.should_run_stage(db, args.source, "profiled", input_hash=ihash):
         print("[skip] profiled up-to-date")
         return
