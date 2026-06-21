@@ -2,7 +2,7 @@
 # 仅在需要把扫描 PDF / 低文本密度 PDF / DOCX / PPTX / 复杂表格·公式·图片做结构化解析时安装。
 #
 # 硬件约束：本项目默认只用 MinerU 的 pipeline 后端，CLI 调用恒显式 `-b pipeline`，
-# 禁用 vlm-engine / hybrid-engine / 本地 VLM（4GB 显存可跑 pipeline，见 scripts/install_mineru.py）。
+# 禁用 vlm-engine / hybrid-engine / 本地 VLM（pipeline 后端显存占用低，低显存 GPU 即可，见 scripts/install_mineru.py）。
 #
 # 安装（推荐：按机型自动选 torch 构建，不固定 CPU 版本）：
 #   conda activate study-kb

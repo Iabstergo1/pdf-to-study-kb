@@ -2,7 +2,7 @@
 
 把复杂源（扫描/低文本 PDF、DOCX、PPTX、复杂表格公式图片）归一成项目 artifact 契约
 （source.md + blocks.jsonl + chapters.json + parse_report.json + assets/）。
-不引入 RAGFlow；不 import MinerU 内部 API（只 subprocess CLI）；硬件 RTX 3050 Ti 4GB →
+不引入 RAGFlow；不 import MinerU 内部 API（只 subprocess CLI）；为适配低显存 GPU（如 4GB 级）→
 默认仅 pipeline 后端，禁 vlm/hybrid。
 """
 from __future__ import annotations
