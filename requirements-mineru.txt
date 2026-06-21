@@ -1,12 +1,20 @@
 # Optional structured backend (Spec 2). 故意不在默认 requirements.txt 里，避免破坏轻量安装。
 # 仅在需要把扫描 PDF / 低文本密度 PDF / DOCX / PPTX / 复杂表格·公式·图片做结构化解析时安装。
 #
-# 硬件约束（RTX 3050 Ti 4GB 显存）：本项目默认只用 MinerU 的 pipeline 后端，
-# CLI 调用恒显式 `-b pipeline`，禁用 vlm-engine / hybrid-engine / 本地 VLM。
+# 硬件约束：本项目默认只用 MinerU 的 pipeline 后端，CLI 调用恒显式 `-b pipeline`，
+# 禁用 vlm-engine / hybrid-engine / 本地 VLM（4GB 显存可跑 pipeline，见 scripts/install_mineru.py）。
 #
-# 安装：
+# 安装（推荐：按机型自动选 torch 构建，不固定 CPU 版本）：
 #   conda activate study-kb
-#   pip install -r requirements-mineru.txt
+#   python scripts/install_mineru.py        # 有 N 卡→装匹配的 CUDA torch；无 GPU→保留 CPU torch
+#   python scripts/install_mineru.py --dry-run   # 先看将执行的命令
 #
-# [all] 亦可（更重）；pipeline-only 用 [core] 足够。版本按实测固定。
+# 该脚本先 `pip install -U mineru[core]`，再用 nvidia-smi 探测驱动 CUDA 版本，
+# 把默认带的 CPU torch/torchvision 按 --no-deps 同版本号替换为匹配的 +cuXXX 构建。
+#
+# 纯手动（不想用脚本时）：`pip install mineru[core]` 即可，但只会装 CPU torch；
+# 要 GPU 加速再自行 `pip install --no-deps --index-url https://download.pytorch.org/whl/cu<tag> \
+#   torch==<ver>+cu<tag> torchvision==<ver>+cu<tag>`（<tag> 取不超过驱动 CUDA 的最新值）。
+#
+# 版本按实测固定（pipeline-only 用 [core] 足够）。
 mineru[core]
