@@ -63,6 +63,30 @@ def test_windows_artifact_records_windows_jsonl_hash(tmp_path):
     assert rows and rows[0]["sha256"] == expected
 
 
+def test_windows_carry_source_id_and_chapter_fields(tmp_path):
+    # L3：cmd_windows 读 chapters.json，windows.jsonl 每窗带 source_id/chapter_title/
+    # chapter_ids/source_refs（block 窗）。用 markdown 源（单章 ch00-full）端到端验证。
+    import json
+    note = tmp_path / "raw" / "note.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# A\n\naaa body text\n\n## B\n\nbbb body text\n", encoding="utf-8")
+    _run(["add-source", "--source", "note", "--domain", "misc", "--path", str(note), "--fmt", "md"], tmp_path)
+    assert _run(["profile", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["source-convert", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["windows", "--source", "note"], tmp_path).returncode == 0
+    wj = tmp_path / "pipeline-workspace/staging/note/windows.jsonl"
+    ws = [json.loads(l) for l in wj.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert ws
+    for w in ws:
+        assert w["source_id"] == "note"
+        assert w["mode"] == "blocks"
+        assert "chapter_title" in w and "chapter_ids" in w and "source_refs" in w
+        # markdown 单章 ch00-full → 窗内 blocks 的 chapter_id 应含之
+        assert w["chapter_ids"] == ["ch00-full"]
+        # source_refs 与 block_ids 等长对齐
+        assert len(w["source_refs"]) == len(w["block_ids"])
+
+
 def _make_show_window_staging(tmp_path):
     staging = tmp_path / "pipeline-workspace" / "staging" / "book"
     staging.mkdir(parents=True)

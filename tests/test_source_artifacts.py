@@ -32,6 +32,29 @@ def test_write_read_blocks_roundtrip(tmp_path):
     assert got[1]["text_level"] == 2 and got[1]["heading_path"] == "T"
 
 
+def test_artifact_version_bumped_to_2():
+    # L2：blocks 新增 chapter_id + report 新增 source_type/backend_reason → bump "1"→"2"
+    assert sa.ARTIFACT_VERSION == "2"
+
+
+def test_source_block_has_chapter_id_default_empty():
+    b = sa.SourceBlock(block_id="b000001", type="text", text="x", page=1,
+                       char_start=0, char_end=1)
+    assert b.chapter_id == ""
+
+
+def test_write_read_blocks_preserves_chapter_id(tmp_path):
+    blocks = [
+        sa.SourceBlock(block_id="b000001", type="text", text="hello", page=1,
+                       char_start=0, char_end=5, chapter_id="ch01-intro",
+                       source_ref="p0001#b000001"),
+    ]
+    p = tmp_path / "blocks.jsonl"
+    sa.write_blocks(p, blocks)
+    got = sa.read_blocks(p)
+    assert got[0]["chapter_id"] == "ch01-intro"
+
+
 def test_routing_advice_defaults():
     ra = sa.RoutingAdvice(recommended_backend="pymupdf",
                           structured_reparse_recommended=False)

@@ -584,3 +584,157 @@ def test_convert_mineru_failure_writes_failed_report_and_raises(tmp_path, monkey
     import json
     rep = json.loads((tmp_path / "o" / "parse_report.json").read_text(encoding="utf-8"))
     assert rep["mineru_failed"] is True and rep["mineru_status"] == "failed"
+
+
+# --- L1 解析层：classify_source（source_type + backend_reason，纯函数，additive） ---
+
+def _native_pdf_pages(n=5):
+    return [{"text_len": 800, "image_count": 0, "needs_vision_reason": []} for _ in range(n)]
+
+
+def test_classify_source_markdown():
+    c = source_convert.classify_source("md", [], backend="auto", policy="conservative")
+    assert c["source_type"] == "markdown"
+    assert "markdown" in c["backend_reason"]
+
+
+def test_classify_source_docx_pptx_by_fmt():
+    cd = source_convert.classify_source("docx", [], backend="auto", policy="conservative")
+    cp = source_convert.classify_source("pptx", [], backend="auto", policy="conservative")
+    assert cd["source_type"] == "docx" and cp["source_type"] == "pptx"
+    # docx/pptx 无 profile_pages（空）仍按 fmt 派生 type
+    assert "docx" in cd["backend_reason"] and "pptx" in cp["backend_reason"]
+
+
+def test_classify_source_native_pdf():
+    c = source_convert.classify_source("pdf", _native_pdf_pages(), backend="auto",
+                                       policy="conservative")
+    assert c["source_type"] == "native_pdf"
+    assert c["backend_reason"]
+
+
+def test_classify_source_scanned_pdf():
+    pages = [{"text_len": 0, "image_count": 1, "needs_vision_reason": ["scanned-or-image"]}
+             for _ in range(10)]
+    c = source_convert.classify_source("pdf", pages, backend="auto", policy="conservative")
+    assert c["source_type"] == "scanned_pdf"
+
+
+def test_classify_source_low_text_pdf():
+    # 低文本密度但不算整本扫描件（无 scanned-or-image 信号）→ low_text_pdf
+    pages = [{"text_len": 20, "image_count": 0, "needs_vision_reason": []} for _ in range(10)]
+    c = source_convert.classify_source("pdf", pages, backend="auto", policy="conservative")
+    assert c["source_type"] == "low_text_pdf"
+
+
+def test_classify_source_mixed_pdf_dense():
+    # 文本充足、非扫描、但表/图/公式密集 → mixed_pdf
+    pages = [{"text_len": 800, "image_count": 0, "needs_vision_reason": ["formula"]}
+             for _ in range(10)]
+    c = source_convert.classify_source("pdf", pages, backend="auto", policy="conservative")
+    assert c["source_type"] == "mixed_pdf"
+
+
+def test_classify_source_partial_scan_reason_conservative():
+    # 保守策略下 30% 页 scanned-or-image（partial-scan，非整本扫描、文本充足）→ 路由 mineru，
+    # backend_reason 必须如实标 partial-scan，不能误标 aggressive（策略其实是 conservative）。
+    pages = ([{"text_len": 800, "image_count": 1, "needs_vision_reason": ["scanned-or-image"]}
+              for _ in range(3)]
+             + [{"text_len": 800, "image_count": 0, "needs_vision_reason": []} for _ in range(7)])
+    c = source_convert.classify_source("pdf", pages, backend="auto", policy="conservative")
+    assert c["backend_reason"] == "partial-scan pdf→mineru"
+    assert "aggressive" not in c["backend_reason"]
+    assert c["source_type"] == "native_pdf"      # type 看页面信号，backend 看路由——可不同，均如实
+
+
+def test_classify_source_empty_pdf_pages_native_default():
+    # PDF 但 profile 为空（异常/无页信息）→ 不误判扫描/低文本，保守 native_pdf
+    c = source_convert.classify_source("pdf", [], backend="auto", policy="conservative")
+    assert c["source_type"] == "native_pdf"
+
+
+def test_classify_source_explicit_backend_reason():
+    # 显式 --backend mineru 的 reason 要体现是显式选择（与 auto 路由区分）
+    c = source_convert.classify_source("pdf", _native_pdf_pages(), backend="mineru",
+                                       policy="conservative")
+    assert "explicit" in c["backend_reason"] or "mineru" in c["backend_reason"]
+
+
+def test_convert_writes_source_type_and_backend_reason_md(tmp_path):
+    src = tmp_path / "n.md"
+    src.write_text("# Title\n\nbody\n", encoding="utf-8")
+    out_dir = tmp_path / "staging" / "n"
+    res = source_convert.convert(src, out_dir=out_dir, fmt="md")
+    import json
+    rep = json.loads((out_dir / "parse_report.json").read_text(encoding="utf-8"))
+    assert rep["source_type"] == "markdown"
+    assert rep["backend_reason"]
+
+
+def test_convert_writes_source_type_pdf(tmp_path):
+    import importlib.util as u
+    if u.find_spec("fitz") is None:
+        import pytest; pytest.skip("pymupdf not installed")
+    import fitz
+    src = tmp_path / "tiny.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "Hello PDF body text long enough to be native")
+    doc.save(str(src)); doc.close()
+    # 先 profile 出 pages 再传给 convert（与 pipeline 一致）
+    pages = source_profile.profile_source(src, fmt="pdf")
+    out_dir = tmp_path / "staging" / "tiny"
+    res = source_convert.convert(src, out_dir=out_dir, fmt="pdf", profile_pages=pages)
+    import json
+    rep = json.loads((out_dir / "parse_report.json").read_text(encoding="utf-8"))
+    assert rep["source_type"] in ("native_pdf", "low_text_pdf", "mixed_pdf")
+
+
+# --- L2 结构还原层：block.chapter_id 映射（page→chapter，后端无关） ---
+
+def test_convert_maps_chapter_id_markdown_single_chapter(tmp_path):
+    import source_artifacts as _sa
+    src = tmp_path / "n.md"
+    src.write_text("# A\n\naaa\n\n## B\n\nbbb\n", encoding="utf-8")
+    out_dir = tmp_path / "staging" / "n"
+    source_convert.convert(src, out_dir=out_dir, fmt="md")
+    blocks = _sa.read_blocks(out_dir / "blocks.jsonl")
+    # markdown 单章 ch00-full（page 1）→ 每个 block 映射到该章
+    assert blocks and all(b["chapter_id"] == "ch00-full" for b in blocks)
+
+
+def test_convert_maps_chapter_id_pdf_by_page_range(tmp_path):
+    import importlib.util as u
+    if u.find_spec("fitz") is None:
+        import pytest; pytest.skip("pymupdf not installed")
+    import fitz
+    import source_artifacts as _sa
+    src = tmp_path / "book.pdf"
+    doc = fitz.open()
+    body = ("This is a native born-digital page with enough readable body text "
+            "so the source profiles as a native pdf and stays on the pymupdf backend "
+            "instead of being routed to mineru as a low-text pdf. ") * 4
+    for _ in range(6):
+        pg = doc.new_page()
+        for k in range(12):
+            pg.insert_text((72, 72 + k * 14), body[:90])
+    doc.set_toc([[1, "Part I", 1], [2, "导论", 1], [2, "进阶", 4]])
+    doc.save(str(src)); doc.close()
+    pages = source_profile.profile_source(src, fmt="pdf")
+    # 前提：本 fixture 须停在 pymupdf（native pdf）以拿到真 TOC 章节；否则断言无意义
+    assert source_convert.select_backend("pdf", pages, backend="auto",
+                                         policy="conservative")[0] == "pymupdf"
+    out_dir = tmp_path / "staging" / "book"
+    res = source_convert.convert(src, out_dir=out_dir, fmt="pdf", profile_pages=pages)
+    blocks = _sa.read_blocks(out_dir / "blocks.jsonl")
+    # 建立 chapter_id → 页范围，逐 block 验证落在所标章内
+    ch_by_id = {c["chapter_id"]: c for c in res["chapters"]}
+    assert blocks
+    for b in blocks:
+        assert b["chapter_id"] in ch_by_id, f"block {b['block_id']} chapter_id 未知"
+        c = ch_by_id[b["chapter_id"]]
+        assert c["page_start"] <= b["page"] <= c["page_end"]
+    # page 1..3 属"导论"，page 4..6 属"进阶"（按 chapters_from_toc 切分）
+    p1 = next(b for b in blocks if b["page"] == 1)
+    p5 = next(b for b in blocks if b["page"] == 5)
+    assert ch_by_id[p1["chapter_id"]]["title"] == "导论"
+    assert ch_by_id[p5["chapter_id"]]["title"] == "进阶"

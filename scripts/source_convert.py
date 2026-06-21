@@ -17,7 +17,8 @@ import source_profile
 import source_artifacts
 from source_backends import get_backend, get_backend_by_name, BackendUnavailable  # noqa: F401
 
-__all__ = ["convert", "converted_input_hash", "select_backend", "BackendUnavailable"]
+__all__ = ["convert", "converted_input_hash", "select_backend", "classify_source",
+           "BackendUnavailable"]
 
 _LOW_TEXT_MEAN = 100
 _DENSE_RATIO = 0.30
@@ -52,6 +53,23 @@ def _dense(pages) -> bool:
     return dense >= _DENSE_RATIO
 
 
+def _assign_chapter_ids(blocks, chapters) -> None:
+    """就地给每个 block 设 chapter_id：block.page 落入某章 [page_start, page_end] → 该章 id。
+
+    后端无关：blocks 是 SourceBlock 实例（write_blocks 前），chapters 是 chaptering 的 dict 列表。
+    章节连续无空洞（chapters_from_toc 保证），但稳健起见逐章区间判定，落不到 → 保持 ""。"""
+    spans = [(int(c.get("page_start", 0)), int(c.get("page_end", 0)), c.get("chapter_id", ""))
+             for c in (chapters or [])]
+    for b in blocks:
+        page = getattr(b, "page", None)
+        if page is None:
+            continue
+        for ps, pe, cid in spans:
+            if ps <= page <= pe:
+                b.chapter_id = cid
+                break
+
+
 def select_backend(fmt, profile_pages, *, backend, policy):
     """确定性选后端 → (backend_name, consumed_by_auto_router)。
 
@@ -77,6 +95,64 @@ def select_backend(fmt, profile_pages, *, backend, policy):
             return "mineru", True
         return "pymupdf", True
     raise BackendUnavailable(f"no backend for fmt={fmt}")
+
+
+def classify_source(fmt, profile_pages, *, backend, policy) -> dict:
+    """L1 解析层：确定性派生 source_type + backend_reason（纯函数，零 LLM、不调后端）。
+
+    source_type ∈ {native_pdf, scanned_pdf, low_text_pdf, mixed_pdf, docx, pptx, markdown}：
+    - fmt==md → markdown；fmt==docx → docx；fmt==pptx → pptx（profile_pages 为空也按 fmt）。
+    - fmt==pdf：扫描件 → scanned_pdf；否则 mean_text<_LOW_TEXT_MEAN → low_text_pdf；
+      否则密集（表/图/公式）→ mixed_pdf；否则 → native_pdf。pages 为空 → 保守 native_pdf。
+    - 未知 fmt → source_type="unknown"（不伪造；与 select_backend 的 fail-closed 分工，不抛错）。
+
+    backend_reason：短串，解释为何选实际后端。显式 --backend 体现 "explicit"，auto 路由体现信号。
+    与 select_backend 同源派生（同一 _scan_or_low_text/_dense 信号），但**不改其返回签名**。
+    """
+    name, _consumed = select_backend(fmt, profile_pages, backend=backend, policy=policy)
+    pages = profile_pages or []
+
+    if fmt == "md":
+        source_type = "markdown"
+    elif fmt == "docx":
+        source_type = "docx"
+    elif fmt == "pptx":
+        source_type = "pptx"
+    elif fmt == "pdf":
+        if pages and source_profile.is_scanned_source(pages):
+            source_type = "scanned_pdf"
+        elif pages and (sum(p.get("text_len", 0) for p in pages) / len(pages)) < _LOW_TEXT_MEAN:
+            source_type = "low_text_pdf"
+        elif _dense(pages):
+            source_type = "mixed_pdf"
+        else:
+            source_type = "native_pdf"
+    else:
+        source_type = "unknown"
+
+    # backend_reason：先按显式选择，再按 auto 路由的实际依据组织短串。
+    if backend in ("pymupdf", "mineru"):
+        backend_reason = f"explicit --backend={backend}"
+    elif name == "markdown":
+        backend_reason = "md→markdown"
+    elif fmt in ("docx", "pptx"):
+        backend_reason = f"fmt={fmt}→mineru"
+    elif source_type == "scanned_pdf":
+        backend_reason = "scanned pdf→mineru"
+    elif source_type == "low_text_pdf":
+        backend_reason = "low-text pdf→mineru"
+    elif name == "mineru" and _scan_or_low_text(pages):  # 保守策略：partial-scan（scan_ratio≥阈值）
+        backend_reason = "partial-scan pdf→mineru"
+    elif name == "mineru":  # 仅剩 aggressive 策略下密集 born-digital
+        backend_reason = "aggressive+dense pdf→mineru"
+    elif source_type == "mixed_pdf":
+        backend_reason = "dense pdf→pymupdf (conservative)"
+    elif source_type == "native_pdf":
+        backend_reason = "default native pdf→pymupdf"
+    else:
+        backend_reason = f"fmt={fmt}→{name}"
+
+    return {"source_type": source_type, "backend_reason": backend_reason}
 
 
 def converted_input_hash(raw_path, *, backend: str = "auto", policy: str = "conservative") -> str:
@@ -120,6 +196,17 @@ def convert(src_path, *, out_dir, fmt: str, backend: str = "auto",
         scanned = source_profile.is_scanned_source(profile_pages or [])
         res.report["scan_suspected"] = scanned
         res.report["ocr_used"] = scanned
+
+    # L1：写确定性 source_type + backend_reason（与选定后端同源派生，additive，零 LLM）。
+    if isinstance(res.report, dict):
+        cls = classify_source(fmt, profile_pages, backend=backend, policy=mineru_policy)
+        res.report["source_type"] = cls["source_type"]
+        res.report["backend_reason"] = cls["backend_reason"]
+
+    # L2：用 res.chapters 的页范围给每个 block 映射 chapter_id（后端无关，统一）。
+    # 三后端都返回 res.chapters（pymupdf TOC / markdown ch00-full / mineru heading），映射通用；
+    # block.page 落某章 [page_start, page_end] → 该 chapter_id；落不到任何章 → 保持 ""（不伪造）。
+    _assign_chapter_ids(res.blocks, res.chapters)
 
     source_md = out_dir / "source.md"
     source_md.write_text(res.source_md, encoding="utf-8")
