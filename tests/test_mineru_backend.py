@@ -72,6 +72,24 @@ def test_normalize_handles_chart_as_image(tmp_path):
     assert "Chart 1" in blocks[0].text
 
 
+def test_normalize_table_captures_caption_and_image(tmp_path):
+    # 真实 MinerU table item 带 table_body(HTML) + img_path(表区域原图) + caption/footnote。
+    assets_src = tmp_path / "raw"
+    assets_src.mkdir()
+    (assets_src / "tbl.jpg").write_bytes(b"\xff\xd8jpg")
+    items = [{"type": "table", "table_body": "<table><tr><td>a</td></tr></table>",
+              "table_caption": ["表 1：收益矩阵"], "table_footnote": ["注：单位为效用"],
+              "img_path": "tbl.jpg", "page_idx": 0}]
+    blocks, _ = mb.normalize_content_list(items, assets_src_dir=assets_src,
+                                          assets_out_dir=tmp_path / "o" / "assets")
+    b = blocks[0]
+    assert b.type == "table" and b.risk_flags == ["table"]
+    assert "表 1：收益矩阵" in b.text and "<table>" in b.text and "注：单位为效用" in b.text
+    assert b.asset_path == "assets/tbl.jpg" and (tmp_path / "o" / "assets" / "tbl.jpg").exists()
+    md = mb.render_source_md(blocks)
+    assert "![table](assets/tbl.jpg)" in md      # 源表图进 source view 供 LLM 核验 HTML
+
+
 def test_render_source_md_assigns_char_spans(tmp_path):
     blocks, _ = mb.normalize_content_list(_fake_content_list(),
                                           assets_src_dir=tmp_path, assets_out_dir=tmp_path / "a")

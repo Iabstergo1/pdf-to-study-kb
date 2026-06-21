@@ -17,7 +17,8 @@ from source_backends import BackendUnavailable
 
 # adapter 版本：归一逻辑实质变化就 +1，折进 converted 缓存键（与 PROFILER/ARTIFACT/WINDOWING 同规）。
 # v2：middle.json 深解析（per-page 识别置信度 → ocr_low_confidence 旗标 + parse_report.pages）。
-MINERU_ADAPTER_VERSION = "2"
+# v3：table 块并入 caption/footnote + 复制表区域源图 asset（HTML 可能有误，留源图供 LLM 核验）。
+MINERU_ADAPTER_VERSION = "3"
 DEFAULT_TIMEOUT_SECONDS = 1800
 
 
@@ -58,6 +59,13 @@ def _copy_asset(img_path, assets_src_dir, assets_out_dir):
     return f"assets/{dst.name}"
 
 
+def _join_caption(cap) -> str:
+    """MinerU caption/footnote（list 或 str）→ 单行字符串（空 → ""）。"""
+    if isinstance(cap, list):
+        return " ".join(str(c) for c in cap if c)
+    return str(cap or "")
+
+
 def normalize_content_list(items, *, assets_src_dir, assets_out_dir):
     """MinerU content_list.json items（按阅读顺序）→ (list[SourceBlock], discarded_count)。
 
@@ -86,14 +94,19 @@ def normalize_content_list(items, *, assets_src_dir, assets_out_dir):
             blocks.append(sa.SourceBlock(type="text", text=it.get("text", ""), risk_flags=[], **common))
         elif t == "table":
             body = it.get("table_body") or it.get("html") or it.get("text") or ""
-            blocks.append(sa.SourceBlock(type="table", text=body, risk_flags=["table"], **common))
+            cap = _join_caption(it.get("table_caption"))
+            foot = _join_caption(it.get("table_footnote"))
+            text = "\n".join(p for p in (cap, body, foot) if p)   # caption + HTML + footnote
+            # 表区域原图（HTML 结构可能有误）→ 复制为 asset，留源图供 LLM 核验
+            asset_path = _copy_asset(it.get("img_path"), assets_src_dir, assets_out_dir)
+            blocks.append(sa.SourceBlock(type="table", text=text, risk_flags=["table"],
+                                         asset_path=asset_path, **common))
         elif t in ("equation", "formula"):
             latex = it.get("text") or it.get("latex") or ""
             blocks.append(sa.SourceBlock(type="equation", text=latex, risk_flags=["equation"], **common))
         elif t in ("image", "figure", "chart"):   # MinerU 3.x：chart 与 image 同类（ContentType.CHART='chart'）
-            cap = (it.get("img_caption") or it.get("image_caption")
-                   or it.get("chart_caption") or [])
-            cap_text = " ".join(cap) if isinstance(cap, list) else str(cap or "")
+            cap_text = _join_caption(it.get("img_caption") or it.get("image_caption")
+                                     or it.get("chart_caption"))
             asset_path = _copy_asset(it.get("img_path"), assets_src_dir, assets_out_dir)
             blocks.append(sa.SourceBlock(type="image", text=cap_text, risk_flags=["image"],
                                          asset_path=asset_path, **common))
@@ -169,6 +182,8 @@ def render_source_md(blocks) -> str:
             body = ("#" * (b.text_level or 1)) + " " + (b.text or "")
         elif b.type == "table":
             body = b.text or ""
+            if b.asset_path:                       # 表区域源图随 HTML 一并入 source view
+                body += f"\n![table]({b.asset_path})"
         elif b.type == "equation":
             body = "$$\n" + (b.text or "") + "\n$$"
         elif b.type == "image":
