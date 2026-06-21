@@ -10,7 +10,7 @@ vault 与维护：init-vault、status、next、fail、promotion-candidates、
               promote-concept、check-session
 
 用法：python scripts/pipeline.py <command> [options]
-架构真值：docs/superpowers/specs/2026-06-08-claude-code-wiki-redesign-design.md
+架构真值：CLAUDE.md（Claude）/ AGENTS.md（Codex）
 """
 
 import argparse

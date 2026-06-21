@@ -30,6 +30,7 @@
 **深入：架构与组件**
 
 - [🏗️ 架构](#️-架构)
+- [🧱 四层预处理架构](#-四层预处理架构借-rag-之形确定性零-llm-之实)
 - [🗂️ 项目结构](#️-项目结构)
 - [🧩 对话式 skills 全表](#-对话式-skills-全表)
 - [🛠️ 底层：确定性 CLI（高级控制与排障接口）](#️-底层确定性-cli高级控制与排障接口)
@@ -81,7 +82,15 @@ python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yam
 
 > [!NOTE]
 > 必需依赖只有 **PyMuPDF + PyYAML**（见 [`requirements.txt`](requirements.txt)）。
-> 默认 fast path 视觉保真走 route B：`source-convert` 用 PyMuPDF 抽文本，**难页（公式 / 矢量图 / 表 / 图表标题）高召回渲染整页 PNG**，由 ingest **读图**保真（公式写 KaTeX）。fast path 不依赖重型 OCR/ML；扫描 / 低文本密度 PDF、DOCX / PPTX 可走**可选 MinerU 结构化后端**（[`requirements-mineru.txt`](requirements-mineru.txt)，非默认依赖；`--backend auto` 自动路由）。
+> 默认 fast path 视觉保真走 route B：`source-convert` 用 PyMuPDF 抽文本，**难页（公式 / 矢量图 / 表 / 图表标题）高召回渲染整页 PNG**，由 ingest **读图**保真（公式写 KaTeX）。fast path 不依赖重型 OCR/ML。
+
+> [!TIP]
+> **可选 MinerU 结构化后端（扫描件 / 低文本 PDF / DOCX / PPTX / 复杂表格·公式·图片）**：装它后 `--backend auto` 会把这些源自动路由给 MinerU（未装则 fail-closed、不伪装成功）。一键按机型装：
+> ```bash
+> python scripts/install_mineru.py        # 装 mineru[core]，再据 nvidia-smi 自动换匹配的 CUDA torch；无 GPU 则保留 CPU
+> python scripts/install_mineru.py --dry-run   # 先看将执行的命令
+> ```
+> 仅用 MinerU 的 `pipeline` 后端，**低显存 GPU（约 4GB 即可）**；详见 [`requirements-mineru.txt`](requirements-mineru.txt)。
 
 ---
 
@@ -154,6 +163,21 @@ flowchart TD
 
 ---
 
+## 🧱 四层预处理架构（借 RAG 之形，确定性零-LLM 之实）
+
+生产级 PDF/文档处理常被归纳为四层（解析 → 结构还原 → 切片索引 → 调用评测）。本项目**借这套思路强化预处理，但不是 RAG**：没有向量库、没有检索服务、没有 LLM 预处理、没有新运行时——四层全部落在**确定性、零-LLM、可重跑**的 CLI 与产物契约里。唯一的 LLM（对话写库）消费这四层产物，不参与预处理本身。
+
+| 层 | 承担者（脚本/产物） | 做什么 | 关键字段 |
+|------|------|------|------|
+| **L1 解析** | `source_profile` / `source_convert` / `source_backends` | 区分 native PDF / 扫描·低文本 PDF / 图文表混排 PDF / DOCX / PPTX / Markdown，分别走 PyMuPDF 抽文本＋难页整页渲图（route B）、或可选 **MinerU** 结构化解析；MinerU 不可用 **fail-closed**（绝不伪装成功） | `parse_report.json`：`source_type` · `backend_reason` · `selected_backend` · `scan_suspected` · `ocr_used` |
+| **L2 结构还原** | `blocks.jsonl` · `chapters.json` · `parse_report.json` · `assets/` | 保留页码、标题层级、章节、段落、表格、图片、公式；表/图/chart/公式可追踪到页码与来源；页眉/页脚/页码/discarded 不污染正文、但在报告可审计 | block：`page` · `block_id` · `type` · `heading_path` · `chapter_id` · `source_ref` · `risk_flags` · `element_id`（表→`t{n}` / 图→`f{n}`，跨页表片段共享 id） |
+| **L3 切片/窗口** | `windowing` · `windows.jsonl` | window 只是**确定性读取单位**（不是语义页面规划）；block-aware、顺序稳定、可追溯；**长表不切**——含表/图的段整块打包，绝不把一张表切到两窗 | window：`source_id` · `chapter_title` · `page_start`–`page_end` · `block_ids` · `contains` · `assets` · `risk_flags` · `source_refs` |
+| **L4 调用与评测** | `source-preflight` · `ingest` · `workorder` · `lint` · **`preflight-eval`** | **不实现 RAG 工具**（无 search_PDF / 向量召回 / LLM 评判），只补 CLI 与产物协议；新增确定性验收门 **`preflight-eval`**：查页码覆盖、窗口单调无洞、asset 与 source_ref 可追溯、扫描/OCR 风险、孤儿块、四层字段契约 | `preflight_eval.json`：8 项检查 + summary；`--strict` 遇 high/fail **非零退出**（可挂 CI / 作转 ingest 前的硬门） |
+
+> **可追溯引用贯穿四层**：每个 block 带 `source_ref`（`p{页码}#{块号}`）＋ `chapter_id` ＋ `element_id`，每个 window 列出其 `source_refs`，写库时 `lint` 强制 lesson 可追溯回来源——产出能落到“第几页、第几张表”，而非无源的自信。零成本先验：`python scripts/pipeline.py preflight-eval --source <src> --strict`（见下方 CLI）。
+
+---
+
 ## 🗂️ 项目结构
 
 仓库分工一目了然：**业务逻辑只在 `scripts/`**，对话编排在两套**字节对等**的 skill 树，运行时产物（`wiki/` `pipeline-workspace/` 与 `books/` 内容）一律 gitignore——每机自有、不入版本控制。
@@ -167,10 +191,13 @@ pdf-to-study-kb/
 ├── scripts/
 │   ├── pipeline.py           # ⭐ 唯一 CLI 入口（28 子命令，全部业务逻辑在此）
 │   ├── state_store.py / locks.py                # 业务 SQLite 状态机 / 单-ingest 并发锁
-│   ├── source_profile.py / source_convert.py / windowing.py / workorder.py   # 预处理链
+│   ├── source_profile.py / source_convert.py / source_artifacts.py / chaptering.py   # L1 解析 + L2 结构契约
+│   ├── source_backends/      # 后端：pymupdf（fast path）/ markdown / 可选 mineru（结构化）
+│   ├── windowing.py / workorder.py / preflight_eval.py   # L3 切窗 / 事务契约 / L4 验收门
 │   ├── concept_store.py / promotion.py          # 概念归一唯一入口 / 跨域提升
 │   ├── wiki_gate.py / page_rules.py / mdpage.py # lint 门禁 / 页规则 / frontmatter
 │   ├── snapshots.py / ingest_guards.py / query_session.py  # 快照 / 写守卫 / 查询会话
+│   ├── install_mineru.py                         # 可选：按机型自动装 MinerU + 匹配 CUDA torch
 │   └── resume-ingest.ps1                         # 无人值守续跑（OS 调度脚本，模型可用性探针 + 有界续跑）
 ├── .claude/skills/<name>/SKILL.md   # 9 个对话式 skill（Claude 读）
 ├── .agents/skills/<name>/SKILL.md   # 同 9 个（Codex 读，与上者字节对等）
@@ -233,9 +260,10 @@ pdf-to-study-kb/
 |------|------|------|------|
 | `add-source` | 注册来源到状态库 | 原始文件 → `sources` 记录 | `--source --domain --path --fmt {pdf,md,docx,pptx}` |
 | `profile` | 逐页 profile + `needs_vision` 判定 | raw → `staging/<src>/pages.jsonl` | `--source` |
-| `source-convert` | 转干净 Markdown，难页（公式/图/表/标题）渲染 PNG，切章节图 | raw → `staging/<src>/source.md` + `assets/` + `chapters.json` | `--source` |
-| `windows` | 生成确定性 processing windows | source.md → `windows.jsonl` | `--source` |
+| `source-convert` | 转干净 Markdown + `blocks.jsonl`，难页渲 PNG，切章节图；后端按 L1 路由 | raw → `staging/<src>/source.md` + `blocks.jsonl` + `assets/` + `chapters.json` + `parse_report.json` | `--source [--backend auto\|pymupdf\|mineru] [--mineru-policy conservative\|aggressive]` |
+| `windows` | 生成确定性 processing windows（block-aware，长表不切） | source.md → `windows.jsonl` | `--source` |
 | `workorder` | 生成 ingest 事务契约 | → `staging/<src>/workorder.yaml` | `--source` |
+| `preflight-eval` | **L4 确定性验收门**：8 项结构检查（页码覆盖/窗口单调/asset·source_ref 可追溯/扫描·OCR 风险/孤儿块/四层字段契约）→ JSON | staging → `preflight_eval.json` | `--source [--strict] [--json <path>]` |
 
 ### `ingest` 会话支撑（通常由 skill 内部调用）
 
@@ -332,10 +360,11 @@ wiki/
 - 多本书**跨领域合并**：同名概念去重合并，长期增量积累、越长越互联
 - 公式 / 图表较多的理工 / 经管材料：难页（公式 / 矢量图 / 表 / 标题）渲整页 PNG，由 LLM 读图保真（公式写 KaTeX）
 - **概念 / 主题为主**的二次组织（而非线性翻译原文）
+- **扫描件 / 低文本 PDF、DOCX / PPTX、复杂表格·公式·图片**：装[可选 MinerU 后端](#-安装克隆后三步)后，`--backend auto` 自动路由结构化解析（一张表给稳定 `t{n}` id、长表不切、跨页表片段相连）
 
 ### 暂不适用
 
-- **DOCX / PPTX、扫描件 / 纯图像 PDF（fast path 默认不内置）**：轻量 fast path（PyMuPDF / Markdown）不支持；需安装**可选 MinerU 结构化后端**（`requirements-mineru.txt`，RTX 3050 Ti 4GB 仅 `pipeline`）。`--backend auto` 会自动把这些源路由到 MinerU，未装则 fail-closed、不伪装成功
+- **未装 MinerU 时的扫描件 / 纯图像 PDF、DOCX / PPTX**：轻量 fast path（PyMuPDF / Markdown）不支持；`--backend auto` 会路由到 MinerU，未装则 **fail-closed、不伪装成功**——按上方一键 `install_mineru.py` 装好即可支持
 - **无人值守批量入库**：唯一的 LLM 是你**手动触发**的对话，不做自动批处理
 - **“导入即用”的零成本知识库**：每本书入库是一次需付费的 LLM 操作，交付时为空库
 
