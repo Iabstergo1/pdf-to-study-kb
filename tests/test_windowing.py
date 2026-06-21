@@ -74,7 +74,7 @@ def test_build_windows_has_chars_mode():
 
 
 def test_windowing_version_bumped():
-    assert windowing.WINDOWING_VERSION == "3"
+    assert windowing.WINDOWING_VERSION == "4"
 
 
 def _md_blocks():
@@ -156,6 +156,94 @@ def test_block_windows_md_equivalent_to_char_windows():
                                                    max_tokens=400, overlap_tokens=50)
     assert [(w["heading_path"], w["char_start"], w["char_end"]) for w in char_ws] == \
            [(w["heading_path"], w["char_start"], w["char_end"]) for w in block_ws]
+
+
+def test_attach_block_meta_adds_source_refs_and_chapter_ids():
+    blocks = [
+        {"block_id": "b000001", "type": "text", "text": "a", "page": 1,
+         "char_start": 0, "char_end": 10, "text_level": None, "heading_path": "",
+         "asset_path": None, "risk_flags": [], "source_ref": "p0001#b000001",
+         "chapter_id": "ch01-intro"},
+        {"block_id": "b000002", "type": "text", "text": "b", "page": 2,
+         "char_start": 10, "char_end": 20, "text_level": None, "heading_path": "",
+         "asset_path": None, "risk_flags": [], "source_ref": "p0002#b000002",
+         "chapter_id": "ch02-body"},
+    ]
+    w = {}
+    windowing._attach_block_meta(w, blocks, 0, 20)
+    assert w["source_refs"] == ["p0001#b000001", "p0002#b000002"]
+    assert w["chapter_ids"] == ["ch01-intro", "ch02-body"]
+
+
+def test_attach_block_meta_chapter_ids_dedup_sorted_and_skip_empty():
+    blocks = [
+        {"block_id": "b1", "type": "text", "text": "a", "page": 1, "char_start": 0,
+         "char_end": 5, "heading_path": "", "asset_path": None, "risk_flags": [],
+         "source_ref": "p0001#b1", "chapter_id": "ch02"},
+        {"block_id": "b2", "type": "text", "text": "b", "page": 1, "char_start": 5,
+         "char_end": 10, "heading_path": "", "asset_path": None, "risk_flags": [],
+         "source_ref": "p0001#b2", "chapter_id": "ch01"},
+        {"block_id": "b3", "type": "text", "text": "c", "page": 1, "char_start": 10,
+         "char_end": 15, "heading_path": "", "asset_path": None, "risk_flags": [],
+         "source_ref": "p0001#b3", "chapter_id": ""},  # 空章 id 不计入
+    ]
+    w = {}
+    windowing._attach_block_meta(w, blocks, 0, 15)
+    assert w["chapter_ids"] == ["ch01", "ch02"]   # 去重排序，跳过空
+
+
+def test_build_windows_from_blocks_sets_source_id_and_chapter_title():
+    md_p1 = "<!-- page 1 -->\n\nintro\n"
+    md = md_p1 + "<!-- page 2 -->\n\nbody\n"
+    blocks = [
+        {"block_id": "b000001", "type": "text", "text": "intro", "page": 1,
+         "char_start": 0, "char_end": len(md_p1), "heading_path": "", "asset_path": None,
+         "risk_flags": [], "source_ref": "p0001#b000001", "chapter_id": "ch01-intro"},
+        {"block_id": "b000002", "type": "text", "text": "body", "page": 2,
+         "char_start": len(md_p1), "char_end": len(md), "heading_path": "", "asset_path": None,
+         "risk_flags": [], "source_ref": "p0002#b000002", "chapter_id": "ch01-intro"},
+    ]
+    chapters = [{"chapter_id": "ch01-intro", "title": "导论", "page_start": 1, "page_end": 2}]
+    ws = windowing.build_windows_from_blocks(blocks, source_id="book", chapters=chapters,
+                                             target_tokens=1000, max_tokens=2000, overlap_tokens=0)
+    assert len(ws) == 1
+    w = ws[0]
+    assert w["source_id"] == "book"
+    assert w["chapter_title"] == "导论"        # page_start=1 落入 ch01-intro
+    assert w["chapter_ids"] == ["ch01-intro"]
+    assert w["source_refs"] == ["p0001#b000001", "p0002#b000002"]
+
+
+def test_build_windows_from_blocks_chapter_title_empty_when_no_match():
+    blocks = [
+        {"block_id": "b1", "type": "text", "text": "x", "page": 9, "char_start": 0,
+         "char_end": 10, "heading_path": "", "asset_path": None, "risk_flags": [],
+         "source_ref": "p0009#b1", "chapter_id": ""},
+    ]
+    chapters = [{"chapter_id": "ch01", "title": "A", "page_start": 1, "page_end": 3}]
+    ws = windowing.build_windows_from_blocks(blocks, source_id="s", chapters=chapters,
+                                             target_tokens=1000, max_tokens=2000)
+    assert ws[0]["chapter_title"] == ""        # page 9 不在任何章 → ""
+    assert ws[0]["source_id"] == "s"
+
+
+def test_build_windows_from_blocks_defaults_no_source_or_chapters():
+    # 向后兼容：不传 source_id/chapters → source_id="" + chapter_title=""，仍带 source_refs/chapter_ids
+    md = "# A\n\naaa\n"
+    blocks = [{"block_id": "b1", "type": "heading", "text": md, "page": 1, "char_start": 0,
+               "char_end": len(md), "text_level": 1, "heading_path": "A", "asset_path": None,
+               "risk_flags": [], "source_ref": "p0001#b1", "chapter_id": "ch00-full"}]
+    ws = windowing.build_windows_from_blocks(blocks)
+    assert ws[0]["source_id"] == "" and ws[0]["chapter_title"] == ""
+    assert ws[0]["chapter_ids"] == ["ch00-full"]
+    assert ws[0]["source_refs"] == ["p0001#b1"]
+
+
+def test_build_windows_char_fallback_unaffected_by_new_kwargs():
+    # char-fallback build_windows 不接 source_id/chapters（那是 block 窗才有）；其形状不变
+    md = "# A\n\naaa\n"
+    ws = windowing.build_windows(md)
+    assert "source_refs" not in ws[0] and "chapter_title" not in ws[0]
 
 
 def test_block_windows_mineru_table_equation_image_metadata():

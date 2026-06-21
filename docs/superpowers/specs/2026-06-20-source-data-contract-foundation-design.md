@@ -320,3 +320,37 @@ class SourceBlock:
 - 新增 risk_flags 风险 lint（仅对 `selected_backend=mineru` 的新源渐进启用，不破坏旧来源）。
 - 双 skill 树 + README/CLAUDE.md/AGENTS.md 同步（移除「无重型 OCR/ML 后端」硬约束的措辞，改为「默认轻量 fast path + 可选 MinerU structured backend」）。
 - 硬件约束：目标机 RTX 3050 Ti 4GB → MinerU 仅 `pipeline` 后端、显式 `-b pipeline`、禁 vlm/hybrid。
+
+---
+
+## 13. 生产级四层预处理 — 数据契约增量（2026-06-21，additive）
+
+> 把既有预处理正式整理为四层架构（借 RAG PDF 处理思想强化，**不引入 RAG**）。全部纯加法、零-LLM、确定性；
+> 不重写 `pipeline.py`，不破坏 workorder/lint/snapshot/状态机/锁/两阶段发布/覆盖保护。规格真值：
+> `pipeline-workspace/reports/four-layer-preprocessing-spec.md`。
+
+### L1 解析层 — `parse_report.json` 新字段
+- `source_type` ∈ `{native_pdf, scanned_pdf, low_text_pdf, mixed_pdf, docx, pptx, markdown}`（fmt 不可识别 → `unknown`，不伪造）。
+- `backend_reason`：短串，解释为何选实际后端（如 `md→markdown` / `fmt=docx→mineru` / `scanned pdf→mineru` / `low-text pdf→mineru` / `aggressive+dense pdf→mineru` / `default native pdf→pymupdf` / `explicit --backend=mineru`）。
+- 实现：纯函数 `source_convert.classify_source(fmt, profile_pages, *, backend, policy) -> {source_type, backend_reason}`（与 `select_backend` 同源派生，**不改其 `(name, consumed)` 返回签名**）；`convert()` 写进 `res.report`。
+
+### L2 结构还原层 — `blocks.jsonl` 新字段
+- `SourceBlock.chapter_id: str = ""`：block.page 落入 `chapters.json` 某章 `[page_start, page_end]` → 该 `chapter_id`；落不到 → `""`（不伪造）。
+- 映射在 `source_convert.convert()` 统一做（后端无关：pymupdf TOC / markdown `ch00-full` / mineru heading 三后端都返回 `res.chapters`）。
+- **`ARTIFACT_VERSION` `"1" → "2"`**（blocks 形状 + report 新字段；折进 converted input_hash，强制对新源重产）。
+
+### L3 切片/窗口层 — `windows.jsonl` 新字段（block 窗）
+- `source_id`：来源 id（char-fallback 窗也注入；其余字段仅 block 窗有）。
+- `chapter_title`：窗 `page_start` 落入的章标题（从 `chapters.json` 查；查不到 → `""`）。
+- `chapter_ids`：窗内 blocks 的 `chapter_id` 去重排序（跳过空）。
+- `source_refs`：窗内 blocks 的 `source_ref`，与 `block_ids` 对齐顺序。
+- 实现：`windowing._attach_block_meta` 加 `source_refs`/`chapter_ids`；`windowing.build_windows_from_blocks(blocks, *, source_id="", chapters=None, ...)` 注入 `source_id`/`chapter_title`；`pipeline.cmd_windows` 读 `chapters.json` 并传参。
+- **`WINDOWING_VERSION` `"3" → "4"`**。
+
+### L4 调用与评测层 — 新命令 `preflight-eval`（确定性，零-LLM，**不实现 RAG 工具**）
+- 新模块 `scripts/preflight_eval.py`：纯函数 `evaluate(staging_dir) -> dict` + 6 个独立 `check_*`。`pipeline.py` 加薄 `cmd_preflight_eval` + subparser。
+- 检查项（每项 `{name, severity(info/warn/high), status(ok/warn/fail), detail}`）：`page_coverage`（缺页→high/fail）、`window_monotonic`（char 有序无洞 + 跨窗页非降 + block 窗 block_ids 非空）、`asset_traceability`（block/window 资产文件在 staging 存在）、`risk_signals`（`scan_suspected`/`ocr_used`/`low_confidence_pages`，非空 low-conf → warn 信息性）、`orphan_blocks`（未进任何窗的 block → warn+计数）、`source_ref_integrity`（block `source_ref==f"p{page:04d}#{block_id}"` 且窗 `source_refs` 覆盖其 `block_ids`）。
+- 输出 JSON：`{source_id, source_type, selected_backend, generated_by:"preflight-eval", checks:[...], summary:{ok,warn,fail}}`。
+- CLI：`preflight-eval --source <id> [--strict] [--json <path>]`（默认 `staging/<src>/preflight_eval.json`）。`--strict` 且存在 `high/fail` → 进程非零退出码（可 CI 化）；非 strict → 退出 0、report 标注。
+
+> **skill 协议同步（deferred）**：`source-preflight` 是否提及 `preflight-eval` 涉及 `.claude`/`.agents` 双树字节对等，本轮未动，留待后续 skill-evolve/手工同步。

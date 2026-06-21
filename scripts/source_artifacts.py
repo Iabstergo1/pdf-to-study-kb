@@ -13,7 +13,8 @@ from pathlib import Path
 
 # artifact 格式版本：blocks/parse_report 形状实质改动就 +1，折进 converted 阶段 input_hash，
 # 使格式升级失效缓存、强制对任意来源重产（与 PROFILER_VERSION/WINDOWING_VERSION 同规）。
-ARTIFACT_VERSION = "1"
+# v2: SourceBlock 增 chapter_id（page→章映射）+ parse_report 增 source_type/backend_reason。
+ARTIFACT_VERSION = "2"
 
 
 @dataclass
@@ -29,6 +30,7 @@ class SourceBlock:
     asset_path: str | None = None   # needs_vision 页 PNG 的 staging 相对路径；否则 None
     risk_flags: list = field(default_factory=list)
     source_ref: str = ""            # f"p{page:04d}#{block_id}"
+    chapter_id: str = ""            # block.page 落入的章（chapters.json 的 chapter_id）；落不到 → ""
 
 
 def block_source_ref(page: int, block_id: str) -> str:

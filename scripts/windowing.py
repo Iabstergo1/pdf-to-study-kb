@@ -11,7 +11,7 @@ import re
 
 # 窗口算法版本：切分逻辑每次实质改动就 +1，折进 windowed 阶段 input_hash 使缓存失效。
 # v2: 页标记存在时关闭 `#` 标题分段（修代码注释被误当标题导致的过度碎片化）。
-WINDOWING_VERSION = "3"  # v3: 增 block-aware windows（build_windows_from_blocks）；窗口加 mode 字段（保留 v2 防碎片化）。
+WINDOWING_VERSION = "4"  # v4: 窗口增 source_id/chapter_title/chapter_ids/source_refs（L3 切片层溯源）。
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
 _PAGE_MARKER = re.compile(r"(?m)^<!-- page \d+ -->\s*$")
@@ -123,12 +123,25 @@ def _attach_block_meta(w: dict, blocks: list, c0: int, c1: int) -> None:
     for b in inwin:
         flags.update(b.get("risk_flags") or [])
     w["risk_flags"] = sorted(flags)
+    # L3：窗内 blocks 的 source_ref（与 block_ids 对齐顺序）+ chapter_id 去重排序（跳过空）。
+    w["source_refs"] = [b.get("source_ref", "") for b in inwin]
+    w["chapter_ids"] = sorted({b.get("chapter_id") for b in inwin if b.get("chapter_id")})
 
 
-def build_windows_from_blocks(blocks: list, *, target_tokens: int = 2000,
-                              max_tokens: int = 4000, overlap_tokens: int = 200) -> list[dict]:
+def _chapter_title_for_page(page: int, chapters: list) -> str:
+    """page 落入某章 [page_start, page_end] → 该章标题；落不到 → ""（L3 chapter_title 查询）。"""
+    for c in chapters or []:
+        if int(c.get("page_start", 0)) <= page <= int(c.get("page_end", 0)):
+            return c.get("title", "") or ""
+    return ""
+
+
+def build_windows_from_blocks(blocks: list, *, source_id: str = "", chapters=None,
+                              target_tokens: int = 2000, max_tokens: int = 4000,
+                              overlap_tokens: int = 200) -> list[dict]:
     """block-aware windows：按 section 切（与 char 窗共用 _slice_section 保等价），
-    再用窗 char 区间回挂块元数据（block_ids/page 范围/contains/assets/risk_flags）。"""
+    再用窗 char 区间回挂块元数据（block_ids/page 范围/contains/assets/risk_flags/source_refs/
+    chapter_ids）。L3：每窗注入 source_id；按 page_start 从 chapters 查 chapter_title。"""
     out: list[dict] = []
     idx = 0
     for path, s, e in _sections_from_blocks(blocks):
@@ -136,6 +149,8 @@ def build_windows_from_blocks(blocks: list, *, target_tokens: int = 2000,
                                          max_tokens=max_tokens, overlap_tokens=overlap_tokens):
             w = _win(idx, path, c0, c1, ov, mode="blocks")
             _attach_block_meta(w, blocks, c0, c1)
+            w["source_id"] = source_id
+            w["chapter_title"] = _chapter_title_for_page(w["page_start"], chapters)
             out.append(w)
             idx += 1
     return out

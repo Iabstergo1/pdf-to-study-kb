@@ -205,13 +205,23 @@ def cmd_windows(args):
     source_md = out / "source.md"
     if not source_md.exists():
         raise SystemExit("run source-convert first")
+    # chapters.json（L3 chapter_title 查询源）；缺则空表（chapter_title 退化为 ""，不报错）。
+    chapters_path = out / "chapters.json"
+    chapters = (json.loads(chapters_path.read_text(encoding="utf-8"))
+                if chapters_path.exists() else [])
     # 有 blocks → 以 blocks.jsonl 为切窗依据（block-aware）；无 → 退回 source.md char 窗。
     if blocks_path.exists():
         basis = blocks_path.read_bytes()
-        build = lambda: windowing.build_windows_from_blocks(source_artifacts.read_blocks(blocks_path))
+        build = lambda: windowing.build_windows_from_blocks(
+            source_artifacts.read_blocks(blocks_path), source_id=args.source, chapters=chapters)
     else:
         basis = source_md.read_text(encoding="utf-8").encode("utf-8")
-        build = lambda: windowing.build_windows(source_md.read_text(encoding="utf-8"))
+        # char-fallback 窗也注入 source_id（其余 L3 字段 block 窗才有）。
+        def build():
+            ws = windowing.build_windows(source_md.read_text(encoding="utf-8"))
+            for w in ws:
+                w["source_id"] = args.source
+            return ws
     # 混入窗口算法版本：切分逻辑升级即失效缓存（对任意来源通用）。
     ihash = hashlib.sha256(basis).hexdigest() + ":" + windowing.WINDOWING_VERSION
     if not state_store.should_run_stage(db, args.source, "windowed", input_hash=ihash):
@@ -230,6 +240,28 @@ def cmd_windows(args):
     except Exception as e:
         state_store.fail_stage(db, args.source, "windowed", error=str(e))
         raise
+
+
+def cmd_preflight_eval(args):
+    """L4：对 staging/<source>/ 跑确定性预处理验收（零-LLM），落 JSON + 打印 summary。
+    --strict：任一 high/fail → 非零退出码（可 CI 化）；非 strict → 退出 0（report 标注）。"""
+    import preflight_eval
+    import json
+    staging = _staging_dir(args.source)
+    if not staging.exists():
+        raise SystemExit(f"staging 不存在（{staging}）；先跑 add-source→profile→source-convert→windows")
+    report = preflight_eval.evaluate(staging)
+    out_path = Path(args.json) if getattr(args, "json", None) else staging / "preflight_eval.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    s = report["summary"]
+    for c in report["checks"]:
+        print(f"[{c['status'].upper():4}] {c['name']:22} ({c['severity']}) {c['detail']}")
+    print(f"[summary] ok={s['ok']} warn={s['warn']} fail={s['fail']} → {out_path}")
+    has_high_fail = any(c["status"] == "fail" and c["severity"] == "high"
+                        for c in report["checks"])
+    if getattr(args, "strict", False) and has_high_fail:
+        raise SystemExit(2)
 
 
 def _vault_dir() -> Path:
@@ -1066,6 +1098,11 @@ def main():
                      help="选后端：auto（默认）/ pymupdf 强制轻量 / mineru 强制结构化（未装则 fail-closed）")
     scp.add_argument("--mineru-policy", choices=["conservative", "aggressive"], default="conservative",
                      help="auto 路由策略：conservative（默认，密集 born-digital 仍 PyMuPDF）/ aggressive（密集也走 MinerU）")
+    pep = subparsers.add_parser("preflight-eval",
+                                help="L4：确定性验收 staging 预处理产物（零-LLM，可 CI 化）")
+    pep.add_argument("--source", required=True, help="source_id")
+    pep.add_argument("--strict", action="store_true", help="任一 high/fail → 非零退出码")
+    pep.add_argument("--json", default=None, help="报告输出路径（默认 staging/<src>/preflight_eval.json）")
     subparsers.add_parser("init-vault", help="建 wiki/ 脚手架 + overview/log/purpose 种子（幂等）")
     subparsers.add_parser("apply-obsidian-style",
                           help="落地学习库观感 CSS snippet + merge appearance.json（幂等，纯配置层零内容改动）")
@@ -1151,6 +1188,7 @@ def main():
         'profile': cmd_profile,
         'source-convert': cmd_source_convert,
         'windows': cmd_windows,
+        'preflight-eval': cmd_preflight_eval,
         'fail': cmd_fail,
         'init-vault': cmd_init_vault,
         'apply-obsidian-style': cmd_apply_obsidian_style,
