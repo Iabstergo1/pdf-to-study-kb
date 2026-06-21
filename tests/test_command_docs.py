@@ -183,6 +183,8 @@ def test_resume_ingest_detects_active_ingest_with_lock_status_line(tmp_path):
     )
 
     assert r.returncode == 0, r.stdout + r.stderr
-    args = arg_log.read_text(encoding="utf-8")
+    # codex.cmd 用 `echo %*`，含中文 prompt 时按 cmd 控制台 OEM 码页(GBK)落盘；
+    # 断言只查 ASCII 标志，故宽松解码（替换非 UTF-8 字节）以免被中文噪声卡住。
+    args = arg_log.read_text(encoding="utf-8", errors="replace")
     assert "exec --sandbox workspace-write" in args
     assert "dangerously-bypass" not in args

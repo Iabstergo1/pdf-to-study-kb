@@ -968,11 +968,11 @@ def _skill_gate_check(base):
     """gate 核心（skill-gate 与 skill-adopt 共用）：候选只许动 skill 两树(白名单) + 过 pytest。
     返回 (ok, reason)。"""
     import subprocess as _sp
-    tracked = _sp.run(["git", "diff", "--name-only", base], capture_output=True, text=True)
+    tracked = _sp.run(["git", "diff", "--name-only", base], capture_output=True, text=True, encoding="utf-8")
     if tracked.returncode != 0:
         return False, f"git diff 失败（不在 git 仓？）: {tracked.stderr.strip()}"
     untracked = _sp.run(["git", "ls-files", "--others", "--exclude-standard"],
-                        capture_output=True, text=True)
+                        capture_output=True, text=True, encoding="utf-8")
     changed = [ln.strip() for ln in (tracked.stdout + untracked.stdout).splitlines() if ln.strip()]
     allowed = (".claude/skills/", ".agents/skills/")
     outside = sorted(f for f in changed if not f.startswith(allowed))
@@ -1009,7 +1009,7 @@ def cmd_skill_stage(args):
     """skill 自进化·零-LLM：把候选改动(skill 树 diff)登记为待审提案 + audit；线上(已提交状态)不动。"""
     import subprocess as _sp
     diff = _sp.run(["git", "diff", args.base, "--", ".claude/skills", ".agents/skills"],
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, encoding="utf-8")
     base_dir = _workspace_root() / "pipeline-workspace/skill-evolution"
     cand_dir = base_dir / "candidates" / args.candidate
     cand_dir.mkdir(parents=True, exist_ok=True)
@@ -1028,11 +1028,11 @@ def cmd_skill_adopt(args):
         raise SystemExit(1)
     _sp.run(["git", "add", ".claude/skills", ".agents/skills"])
     commit = _sp.run(["git", "commit", "-q", "-m", f"skill-evolve: adopt candidate {args.candidate}"],
-                     capture_output=True, text=True)
+                     capture_output=True, text=True, encoding="utf-8")
     if commit.returncode != 0:
         print(f"[skill-adopt] git commit 失败: {commit.stdout}{commit.stderr}")
         raise SystemExit(1)
-    sha = _sp.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    sha = _sp.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, encoding="utf-8").stdout.strip()
     _append_audit(_workspace_root() / "pipeline-workspace/skill-evolution",
                   {"candidate": args.candidate, "event": "adopted", "commit": sha})
     print(f"[skill-adopt] candidate={args.candidate} 已采纳并提交双树 commit={sha}")
