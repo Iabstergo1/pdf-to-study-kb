@@ -292,6 +292,56 @@ def test_check_dual_audit_disagreements_warn():
     assert c["status"] == "warn" and c["severity"] == "warn"
 
 
+# ---- check_evidence_bundle（双审分歧是否闭环进 LLM 读取窗口；evidence-assembly 核心门）----
+
+def _evidence(candidates):
+    return {"pages": {}, "candidates": list(candidates), "initial_needs_vision": [1],
+            "reviewer_structural": list(candidates), "final_hard_pages": [1]}
+
+
+def test_check_evidence_bundle_na_when_no_candidates():
+    c = pe.check_evidence_bundle({"candidates": []}, [], [], [], _ok_report())
+    assert c["name"] == "evidence_bundle" and c["status"] == "ok" and c["severity"] == "info"
+
+
+def test_check_evidence_bundle_fails_when_unarbitrated():
+    # 候选页 2 无裁决 → 分歧未闭环 → high/fail（阻断整本 ingest）。
+    blocks = [_block("b2", 2, 0, 10)]
+    ws = [_window("w0", 0, 10, ["b2"], ps=2, pe_=2)]
+    c = pe.check_evidence_bundle(_evidence([2]), [], blocks, ws, _ok_report())
+    assert c["status"] == "fail" and c["severity"] == "high"
+
+
+def test_check_evidence_bundle_ok_when_render_materialized_in_window():
+    blocks = [_block("b2", 2, 0, 10, asset="assets/p0002.png")]
+    ws = [_window("w0", 0, 10, ["b2"], ps=2, pe_=2, assets=["assets/p0002.png"])]
+    decs = [{"page": 2, "decision": "render", "reason": "flattened fraction"}]
+    c = pe.check_evidence_bundle(_evidence([2]), decs, blocks, ws, _ok_report())
+    assert c["status"] == "ok" and c["severity"] == "high"
+
+
+def test_check_evidence_bundle_fails_when_render_not_in_window():
+    blocks = [_block("b2", 2, 0, 10, asset="assets/p0002.png")]
+    ws = [_window("w0", 0, 10, ["b2"], ps=2, pe_=2)]   # window does not carry the asset
+    decs = [{"page": 2, "decision": "render", "reason": "x"}]
+    c = pe.check_evidence_bundle(_evidence([2]), decs, blocks, ws, _ok_report())
+    assert c["status"] == "fail"
+
+
+def test_check_evidence_bundle_fails_on_needs_human():
+    blocks = [_block("b2", 2, 0, 10)]
+    ws = [_window("w0", 0, 10, ["b2"], ps=2, pe_=2)]
+    decs = [{"page": 2, "decision": "needs_human", "reason": "ambiguous table/figure"}]
+    c = pe.check_evidence_bundle(_evidence([2]), decs, blocks, ws, _ok_report())
+    assert c["status"] == "fail"
+
+
+def test_check_evidence_bundle_na_for_markdown():
+    c = pe.check_evidence_bundle(_evidence([2]), [], [], [],
+                                 _ok_report(source_type="markdown", dual_audit_required=False))
+    assert c["status"] == "ok" and c["severity"] == "info"
+
+
 # ---- check_risk_signals ----
 
 def test_check_risk_signals_info_when_clean():
@@ -419,7 +469,7 @@ def test_evaluate_all_ok(tmp_path):
     names = {c["name"] for c in rep["checks"]}
     assert names == {"artifact_schema", "page_coverage", "window_monotonic", "window_contract",
                      "asset_traceability", "risk_signals", "orphan_blocks", "source_ref_integrity",
-                     "detection_distribution", "dual_audit"}
+                     "detection_distribution", "dual_audit", "evidence_bundle"}
     assert rep["summary"]["fail"] == 0
     assert rep["summary"]["ok"] >= 9
 

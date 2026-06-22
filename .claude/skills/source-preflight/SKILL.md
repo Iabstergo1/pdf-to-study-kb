@@ -46,17 +46,20 @@ python scripts/pipeline.py init-vault
 python scripts/pipeline.py add-source --source <src> --domain <domain> --path <path> --fmt <fmt>
 python scripts/pipeline.py profile --source <src>
 python scripts/pipeline.py source-convert --source <src>
-python scripts/pipeline.py source-audit --source <src> [--strict]   # PDF dual-audit: MinerU reviews PyMuPDF → reconciliation.json
+python scripts/pipeline.py source-audit --source <src> [--strict]   # PDF dual-audit → reconciliation.json + evidence.json + arbitration/queue.json
+python scripts/pipeline.py arbitration-status --source <src>        # if pending: agent auto-arbitrates the queue → arbitration-apply (protocol: ingest/references/arbitrate.md), before windows
 python scripts/pipeline.py windows --source <src>
 python scripts/pipeline.py workorder --source <src>
 python scripts/pipeline.py preflight-eval --source <src> [--strict]
 python scripts/pipeline.py status
 ```
 
-Each step is idempotent; on any error, stop — do not skip. A PDF must run `source-audit` first (PyMuPDF
-thresholds are deliberately broad and are not a single source of truth); strict acceptance requires the
-dual-audit to pass, and MinerU unavailable in strict mode is fail-closed. In dev you may omit `source-audit`,
-but `preflight-eval` then flags the `dual_audit` check as degraded — that output is **not production-accepted**.
+Each step is idempotent; on any error, stop — do not skip. For a PDF, `windows` is **fail-closed**: it
+refuses to build unless `source-audit` has produced reconciliation.json + evidence.json +
+arbitration/queue.json AND every disagreement is closed (PyMuPDF thresholds are deliberately broad and are
+not a single source of truth). The only way to build a PDF's windows without a completed source-audit is the
+explicit dev escape hatch `windows --dev-bypass`, whose output is **degraded / not for strict acceptance**.
+Strict acceptance still requires the dual-audit to pass, and MinerU unavailable in strict mode is fail-closed.
 `preflight-eval` reads existing staging only, zero LLM; `--strict` exits non-zero on a high/fail (a hard gate before switching to ingest).
 
 ## 7. Workflow
@@ -83,6 +86,7 @@ re-run from the failed step; `pipeline status` shows where it stopped.
 - `source.md`, `reconciliation.json`, `windows.jsonl`, `workorder.yaml` exist.
 - `workorder.yaml` contains `write_scope` and the registry hash.
 - PDF dual-audit recorded (`reconciliation.json` `dual_audited=true`, or a degraded/blocker recorded).
+- PDF dual-audit disagreements arbitrated + materialized: `preflight-eval`'s `check_evidence_bundle` is green (no un-arbitrated / un-materialized / pending `needs_human`), or a blocker recorded.
 - needs_vision pages have a PNG, or a blocker is recorded.
 - `preflight-eval` checks have no high/fail (`--strict` exit 0), or a blocker is recorded.
 - The report contains deterministic facts only — no semantic summary / chapter interpretation.

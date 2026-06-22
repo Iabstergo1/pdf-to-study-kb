@@ -16,11 +16,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import thresholds  # 观测阈值（env 可覆盖）
 import source_audit  # PDF_TYPES（双审适用范围单一真值）
+import arbitration   # 分歧闭环验收（check_closure）
 
 # 严重度排序：high > warn > info（strict 判定取 high）。状态：ok / warn / fail。
 __all__ = ["evaluate", "check_artifact_schema", "check_page_coverage",
            "check_window_monotonic", "check_window_contract", "check_asset_traceability",
-           "check_dual_audit", "check_risk_signals", "check_orphan_blocks",
+           "check_dual_audit", "check_evidence_bundle", "check_risk_signals", "check_orphan_blocks",
            "check_source_ref_integrity", "check_detection_distribution"]
 
 # 四层必备字段契约（artifact contract gate）：
@@ -189,6 +190,32 @@ def check_dual_audit(reconciliation: dict, report: dict) -> dict:
     return _check("dual_audit", "high", "ok", detail)
 
 
+def check_evidence_bundle(evidence: dict, decisions: list, blocks: list, windows: list,
+                          report: dict) -> dict:
+    """证据闭环验收（evidence-assembly 的核心门）：双审分歧是否已闭环进 LLM 实际读取的窗口证据包。
+
+    验收目标不再是"双审跑没跑",而是"下一阶段 LLM 拿到的输入是否完整"。非 PDF / 无双审分歧候选
+    → info/ok。否则用 arbitration.check_closure：任一候选未仲裁 / `render` 未物化进窗口 /
+    `needs_human` 未决 / `ignore` 缺原因 → high/fail（strict 阻断整本 ingest）。"""
+    pdf = (report.get("source_type") in source_audit.PDF_TYPES
+           or bool(report.get("dual_audit_required")))
+    candidates = (evidence or {}).get("candidates", [])
+    if not pdf or not candidates:
+        return _check("evidence_bundle", "info", "ok", "无双审分歧候选（不适用或无未闭环分歧）")
+    r = arbitration.check_closure(evidence, decisions, blocks, windows)
+    if r["closed"]:
+        return _check("evidence_bundle", "high", "ok",
+                      f"{len(candidates)} 个双审分歧候选已全部闭环进窗口证据包（render 已物化 / ignore 有因）")
+    counts: dict = {}
+    for kind, _pg in r["problems"]:
+        counts[kind] = counts.get(kind, 0) + 1
+    pages = sorted({pg for _k, pg in r["problems"]})
+    detail = ("双审分歧未闭环进 LLM 读取窗口："
+              + ", ".join(f"{k}×{v}" for k, v in sorted(counts.items()))
+              + f"；涉及页 {pages[:20]}（缺仲裁/render未物化/needs_human/ignore缺因 → 阻断整本 ingest）")
+    return _check("evidence_bundle", "high", "fail", detail)
+
+
 def check_risk_signals(report: dict, *, low_confidence_pages: list) -> dict:
     """OCR/扫描风险。**硬规则**：扫描件/疑似扫描却没走 OCR（ocr_used=False）→ 扫描内容可能被当
     文本悄悄丢失（最危险）→ high/fail。其余：low_confidence_pages 非空 → warn（提示复核）；否则 ok。"""
@@ -289,6 +316,14 @@ def evaluate(staging_dir) -> dict:
     rcp = d / "reconciliation.json"
     if rcp.exists():
         reconciliation = json.loads(rcp.read_text(encoding="utf-8"))
+    evidence = {}                                    # 逐页证据模型（候选/闭环用；可缺）
+    evp = d / "evidence.json"
+    if evp.exists():
+        evidence = json.loads(evp.read_text(encoding="utf-8"))
+    arb_decisions = []                               # agent 仲裁裁决（闭环验收用；可缺）
+    adp = d / "arbitration" / "decisions.json"
+    if adp.exists():
+        arb_decisions = json.loads(adp.read_text(encoding="utf-8")).get("decisions", [])
 
     # page_count：优先 parse_report；缺则用 blocks 的最大 page（保守，不伪造缺页）。
     page_count = int(report.get("page_count") or 0)
@@ -302,6 +337,7 @@ def evaluate(staging_dir) -> dict:
         check_window_contract(windows),
         check_asset_traceability(d, blocks, windows),
         check_dual_audit(reconciliation, report),
+        check_evidence_bundle(evidence, arb_decisions, blocks, windows, report),
         check_risk_signals(report, low_confidence_pages=report.get("low_confidence_pages", [])),
         check_orphan_blocks(blocks, windows),
         check_source_ref_integrity(blocks, windows),

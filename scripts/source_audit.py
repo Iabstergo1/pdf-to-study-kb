@@ -179,8 +179,36 @@ def _default_mineru_review(raw_path, out_dir, input_hash):
     return [asdict(b) for b in res.blocks]
 
 
+def _default_render_packets(raw_path, pages, arb_dir):
+    """默认：打开 raw PDF，把分歧候选页渲成 arbitration/p<NNNN>.png（供 agent 仲裁时读图）。"""
+    import source_profile
+    source_profile.render_pages_png(raw_path, pages, arb_dir, prefix="p")
+
+
+def _write_evidence_and_queue(staging_dir, raw_path, primary_pages, primary_blocks, review_blocks,
+                              *, render_packets=None):
+    """落 evidence.json（逐页证据模型）+ arbitration/queue.json（最小分歧证据包），并按需补渲候选页图。
+
+    零 LLM：仅确定性产出；agent 在 source-preflight/ingest skill 流里读 queue 自动仲裁。
+    lazy import arbitration 防与本模块循环依赖（arbitration 顶层 import source_audit）。"""
+    import arbitration as arb
+    sd = Path(staging_dir)
+    model = arb.build_evidence_model(primary_pages, primary_blocks, review_blocks)
+    (sd / arb.EVIDENCE_FILE).write_text(json.dumps(model, ensure_ascii=False, indent=2), encoding="utf-8")
+    candidates = arb.select_candidates(model)
+    text_by_page = {int(b.get("page", 0)): (b.get("text") or "") for b in (primary_blocks or [])}
+    packets = arb.build_packets(model, page_text=lambda p: text_by_page.get(p, ""))
+    (sd / arb.ARB_DIR).mkdir(parents=True, exist_ok=True)
+    if candidates:
+        (render_packets or _default_render_packets)(raw_path, candidates, sd / arb.ARB_DIR)
+    (sd / arb.QUEUE_FILE).write_text(
+        json.dumps({"generated_by": "source-audit", "source_id": sd.name, "packets": packets},
+                   ensure_ascii=False, indent=2), encoding="utf-8")
+    return model
+
+
 def audit(staging_dir, raw_path, *, source_type: str, primary_backend: str, strict: bool = False,
-          source_id: str = "", input_hash: str = "", mineru_review=None) -> dict:
+          source_id: str = "", input_hash: str = "", mineru_review=None, render_packets=None) -> dict:
     """编排一次双审 → 写 staging/<src>/reconciliation.json，返回报告。
 
     缓存：reconciliation.json 已存在且 input_hash 一致 → 直接复用（不重跑 MinerU）。
@@ -192,8 +220,13 @@ def audit(staging_dir, raw_path, *, source_type: str, primary_backend: str, stri
     recon_path = staging_dir / "reconciliation.json"
     if recon_path.exists() and input_hash:
         try:
+            import arbitration as arb  # lazy：arbitration 顶层 import source_audit（防循环）
             cur = json.loads(recon_path.read_text(encoding="utf-8"))
-            if cur.get("input_hash") == input_hash:
+            # 仅当 reconciliation + evidence + queue 三件套齐全才复用缓存；缺 evidence/queue（旧缓存或
+            # 被删）→ 缓存失效、重跑 reviewer 重建，绝不出现"有 reconciliation 但没仲裁队列"的状态。
+            bundle_ok = ((staging_dir / arb.EVIDENCE_FILE).exists()
+                         and (staging_dir / arb.QUEUE_FILE).exists())
+            if cur.get("input_hash") == input_hash and bundle_ok:
                 return cur
         except Exception:
             pass
@@ -234,4 +267,7 @@ def audit(staging_dir, raw_path, *, source_type: str, primary_backend: str, stri
                        source_id=source_id or staging_dir.name, input_hash=input_hash)
     staging_dir.mkdir(parents=True, exist_ok=True)
     sa.write_reconciliation(recon_path, report)
+    # 证据归一 + 分歧证据包（驱动 agent 自动仲裁）：与 reconciliation 同批确定性产出。
+    _write_evidence_and_queue(staging_dir, raw_path, primary_pages, primary_blocks, review_blocks,
+                              render_packets=render_packets)
     return report

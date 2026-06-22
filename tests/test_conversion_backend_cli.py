@@ -235,3 +235,144 @@ def test_source_audit_nonstrict_marks_degraded(tmp_path, monkeypatch):
 def test_source_audit_help(tmp_path):
     r = _run(["source-audit", "--help"], tmp_path)
     assert r.returncode == 0 and "--strict" in r.stdout and "--source" in r.stdout
+
+
+# --- evidence-assembly: arbitration-apply materializes a render decision into route-B assets ---
+
+def test_arbitration_apply_cli_materializes_render(tmp_path):
+    import importlib.util as u
+    if u.find_spec("fitz") is None:
+        import pytest; pytest.skip("pymupdf not installed")
+    import fitz
+    import json
+    sid = "arbcli"
+    raw = tmp_path / f"{sid}.pdf"
+    doc = fitz.open()
+    for _ in range(2):
+        doc.new_page().insert_text((72, 72), "page body text here")
+    doc.save(str(raw)); doc.close()
+    assert _run(["add-source", "--source", sid, "--domain", "d", "--path", str(raw), "--fmt", "pdf"],
+                tmp_path).returncode == 0
+    staging = tmp_path / "pipeline-workspace" / "staging" / sid
+    staging.mkdir(parents=True)
+    blocks = [{"block_id": "b1", "type": "text", "text": "t", "page": 1, "char_start": 0, "char_end": 10,
+               "heading_path": "", "asset_path": None, "risk_flags": [], "chapter_id": "", "source_ref": "p0001#b1"},
+              {"block_id": "b2", "type": "text", "text": "MPL w = MPK r", "page": 2, "char_start": 10,
+               "char_end": 30, "heading_path": "", "asset_path": None, "risk_flags": [], "chapter_id": "",
+               "source_ref": "p0002#b2"}]
+    (staging / "blocks.jsonl").write_text("\n".join(json.dumps(b) for b in blocks), encoding="utf-8")
+    (staging / "pages.jsonl").write_text("\n".join(json.dumps(p) for p in [
+        {"page": 1, "needs_vision": True, "needs_vision_reason": ["formula"]},
+        {"page": 2, "needs_vision": False, "needs_vision_reason": []}]), encoding="utf-8")
+    (staging / "evidence.json").write_text(json.dumps({"pages": {"2": {}}, "candidates": [2],
+        "initial_needs_vision": [1], "reviewer_structural": [2], "final_hard_pages": [1]}), encoding="utf-8")
+    (staging / "arbitration").mkdir()
+    (staging / "arbitration" / "decisions.json").write_text(json.dumps({"decisions": [
+        {"page": 2, "decision": "render", "risk_flags": ["formula"], "reason": "flattened fraction"}]}),
+        encoding="utf-8")
+    r = _run(["arbitration-apply", "--source", sid], tmp_path)
+    assert r.returncode == 0, r.stderr
+    blks = [json.loads(l) for l in (staging / "blocks.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    b2 = next(b for b in blks if b["page"] == 2)
+    assert b2["asset_path"] == "assets/p0002.png" and "arbitrated" in b2["risk_flags"]
+    assert (staging / "assets" / "p0002.png").exists()              # the page was actually rendered
+    ev = json.loads((staging / "evidence.json").read_text(encoding="utf-8"))
+    assert ev["pages"]["2"]["resolution"] == "materialized" and 2 in ev["final_hard_pages"]
+
+
+def test_arbitration_cli_help(tmp_path):
+    assert "--source" in _run(["arbitration-status", "--help"], tmp_path).stdout
+    assert "--source" in _run(["arbitration-apply", "--help"], tmp_path).stdout
+
+
+# --- windows 闸门：未闭环双审分歧时 fail-closed（除非显式 --dev-bypass） ---
+
+def _stage_pending_arbitration(tmp_path, sid):
+    """搭一个带未仲裁双审分歧的 staging：跑真实预处理到 converted（状态机允许 windowed）+ 塞
+    evidence candidate（无 decisions）。闸门只看 evidence.candidates，不校验该页是否真实存在。"""
+    import json
+    staging = _preprocess_md(tmp_path, sid, "# A\n\nbody\n")
+    (staging / "evidence.json").write_text(json.dumps(
+        {"pages": {"2": {}}, "candidates": [2], "initial_needs_vision": [],
+         "reviewer_structural": [2], "final_hard_pages": []}), encoding="utf-8")
+    return staging
+
+
+def test_windows_fail_closed_on_pending_arbitration(tmp_path):
+    sid = "winpend"
+    staging = _stage_pending_arbitration(tmp_path, sid)
+    r = _run(["windows", "--source", sid], tmp_path)
+    assert r.returncode != 0
+    assert "未闭环" in (r.stdout + r.stderr) or "un_arbitrated" in (r.stdout + r.stderr)
+    assert not (staging / "windows.jsonl").exists()       # 未闭环分歧 → 不产窗
+
+
+def test_windows_dev_bypass_allows_pending_arbitration(tmp_path):
+    sid = "winbypass"
+    staging = _stage_pending_arbitration(tmp_path, sid)
+    r = _run(["windows", "--source", sid, "--dev-bypass"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert (staging / "windows.jsonl").exists()           # 显式 dev bypass → 放行（产物降级）
+
+
+# --- windows 闸门：PDF 源构窗前必须已完成 source-audit（三件套齐全），否则 fail-closed ---
+
+def test_windows_fail_closed_when_pdf_missing_source_audit(tmp_path):
+    # PDF 源跑了 convert 但故意没跑 source-audit → 缺 reconciliation/evidence/queue → 拒绝构窗。
+    sid = "winpdfnoaudit"
+    _preprocess_pdf(tmp_path, sid)
+    assert _run(["source-convert", "--source", sid, "--backend", "pymupdf"], tmp_path).returncode == 0
+    r = _run(["windows", "--source", sid], tmp_path)
+    assert r.returncode != 0
+    blob = r.stdout + r.stderr
+    assert "source-audit" in blob and "reconciliation.json" in blob
+    staging = tmp_path / "pipeline-workspace" / "staging" / sid
+    assert not (staging / "windows.jsonl").exists()       # PDF 未双审 → 不产窗
+
+
+def test_windows_ok_when_pdf_source_audit_complete_no_pending(tmp_path, monkeypatch):
+    # 三件套齐全且无 pending candidate（non-strict degraded：MinerU 禁用仍产 evidence/queue，candidates=[]）。
+    monkeypatch.setenv("MINERU_DISABLE", "1")
+    sid = "winpdfaudit"
+    _preprocess_pdf(tmp_path, sid)
+    assert _run(["source-convert", "--source", sid, "--backend", "pymupdf"], tmp_path).returncode == 0
+    assert _run(["source-audit", "--source", sid], tmp_path).returncode == 0
+    staging = tmp_path / "pipeline-workspace" / "staging" / sid
+    assert (staging / "reconciliation.json").exists() and (staging / "evidence.json").exists()
+    assert (staging / "arbitration" / "queue.json").exists()
+    r = _run(["windows", "--source", sid], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (staging / "windows.jsonl").exists()
+
+
+def test_windows_no_source_audit_required_for_markdown(tmp_path):
+    # 非 PDF（markdown）不要求 source-audit bundle：无 evidence.json 也能正常构窗。
+    sid = "winmdnoaudit"
+    _preprocess_md(tmp_path, sid, "# A\n\nbody\n")
+    r = _run(["windows", "--source", sid], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    staging = tmp_path / "pipeline-workspace" / "staging" / sid
+    assert (staging / "windows.jsonl").exists()
+
+
+def test_windows_dev_bypass_skips_pdf_source_audit_gate(tmp_path):
+    # --dev-bypass 跳过 PDF 双审存在性闸门（dev 降级路径，不可用于 strict acceptance）。
+    sid = "winpdfbypass"
+    _preprocess_pdf(tmp_path, sid)
+    assert _run(["source-convert", "--source", sid, "--backend", "pymupdf"], tmp_path).returncode == 0
+    r = _run(["windows", "--source", sid, "--dev-bypass"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    staging = tmp_path / "pipeline-workspace" / "staging" / sid
+    assert (staging / "windows.jsonl").exists()
+
+
+def test_windows_fail_closed_when_pdf_missing_parse_report(tmp_path):
+    # parse_report.json 缺失也不能让 PDF 绕过闸门：PDF 判定以 state_store 的 source format 为权威。
+    sid = "winpdfnoreport"
+    _preprocess_pdf(tmp_path, sid)
+    assert _run(["source-convert", "--source", sid, "--backend", "pymupdf"], tmp_path).returncode == 0
+    staging = tmp_path / "pipeline-workspace" / "staging" / sid
+    (staging / "parse_report.json").unlink()              # 删 parse_report，模拟"靠它判 PDF"的绕过路径
+    r = _run(["windows", "--source", sid], tmp_path)
+    assert r.returncode != 0
+    assert not (staging / "windows.jsonl").exists()       # 仍被判为 PDF → 三件套缺 → 拒绝构窗

@@ -191,6 +191,73 @@ def test_audit_cache_skip_on_matching_input_hash(tmp_path):
     assert calls["n"] == 1                         # 第二次命中 input_hash 缓存 → 不重跑 MinerU
 
 
+def test_audit_cache_hit_rebuilds_missing_evidence_and_queue(tmp_path):
+    # 旧缓存场景：reconciliation.json 命中 input_hash，但 evidence.json/queue.json 缺失 → 必须补齐，
+    # 不能出现"有 reconciliation 但没仲裁队列"。补齐须忠实，故 bundle 缺时缓存失效、reviewer 重跑。
+    d = _staging(tmp_path, blocks=[_pblock("b1", 1), _pblock("b2", 2)],
+                 pages=[_ppage(1, needs_vision=True, reasons=["formula"]), _ppage(2)])
+    review = [_rblock(1, "equation"), _rblock(2, "equation")]
+    calls = {"n": 0}
+
+    def rev(*a):
+        calls["n"] += 1
+        return review
+    sa_audit.audit(d, tmp_path / "x.pdf", source_type="native_pdf", primary_backend="pymupdf",
+                   input_hash="h", mineru_review=rev, render_packets=lambda *a: None)
+    assert (d / "evidence.json").exists() and (d / "arbitration" / "queue.json").exists()
+    (d / "evidence.json").unlink()
+    (d / "arbitration" / "queue.json").unlink()           # 模拟旧缓存：只剩 reconciliation
+    sa_audit.audit(d, tmp_path / "x.pdf", source_type="native_pdf", primary_backend="pymupdf",
+                   input_hash="h", mineru_review=rev, render_packets=lambda *a: None)
+    assert (d / "evidence.json").exists() and (d / "arbitration" / "queue.json").exists()  # 补齐
+    assert calls["n"] == 2                                 # bundle 缺 → 缓存失效，reviewer 重跑重建
+
+
+def test_audit_cache_skip_keeps_bundle_intact(tmp_path):
+    # 三件套齐全时缓存仍短路（不退化）：第二次命中 reconciliation+evidence+queue → 不重跑 reviewer。
+    d = _staging(tmp_path, blocks=[_pblock("b1", 1), _pblock("b2", 2)],
+                 pages=[_ppage(1, needs_vision=True, reasons=["formula"]), _ppage(2)])
+    calls = {"n": 0}
+
+    def rev(*a):
+        calls["n"] += 1
+        return [_rblock(1, "equation"), _rblock(2, "equation")]
+    for _ in range(2):
+        sa_audit.audit(d, tmp_path / "x.pdf", source_type="native_pdf", primary_backend="pymupdf",
+                       input_hash="h", mineru_review=rev, render_packets=lambda *a: None)
+    assert calls["n"] == 1                                 # bundle 完整 → 第二次命中缓存
+    assert (d / "evidence.json").exists() and (d / "arbitration" / "queue.json").exists()
+
+
+def test_audit_emits_evidence_and_queue_when_mineru_finds_missed_structure(tmp_path):
+    # PyMuPDF missed a structural page MinerU finds → evidence.json + non-empty arbitration queue + packet PNG.
+    d = _staging(tmp_path, blocks=[_pblock("b1", 1), _pblock("b2", 2)],
+                 pages=[_ppage(1, needs_vision=True, reasons=["formula"]), _ppage(2)])
+    review = [_rblock(1, "equation"), _rblock(2, "equation")]   # MinerU finds a formula on p2 too
+    rendered = {"pages": []}
+
+    def fake_render(raw, pages, arb_dir):
+        rendered["pages"] = [int(p) for p in pages]
+        for pg in pages:
+            (Path(arb_dir) / f"p{int(pg):04d}.png").write_bytes(b"png")
+    sa_audit.audit(d, tmp_path / "x.pdf", source_type="native_pdf", primary_backend="pymupdf",
+                   input_hash="h", mineru_review=lambda *a: review, render_packets=fake_render)
+    ev = json.loads((d / "evidence.json").read_text(encoding="utf-8"))
+    assert ev["candidates"] == [2] and ev["initial_needs_vision"] == [1]
+    q = json.loads((d / "arbitration" / "queue.json").read_text(encoding="utf-8"))
+    assert len(q["packets"]) == 1 and q["packets"][0]["page"] == 2
+    assert rendered["pages"] == [2] and (d / "arbitration" / "p0002.png").exists()
+
+
+def test_audit_empty_queue_when_no_disagreement(tmp_path):
+    d = _staging(tmp_path, blocks=[_pblock("b1", 1)], pages=[_ppage(1)])
+    sa_audit.audit(d, tmp_path / "x.pdf", source_type="native_pdf", primary_backend="pymupdf",
+                   input_hash="h", mineru_review=lambda *a: [_rblock(1, "text")],
+                   render_packets=lambda *a: None)
+    q = json.loads((d / "arbitration" / "queue.json").read_text(encoding="utf-8"))
+    assert q["packets"] == []                          # no structural disagreement → nothing to arbitrate
+
+
 def test_audit_mineru_primary_no_second_reviewer(tmp_path):
     d = _staging(tmp_path, blocks=[_pblock("b1", 1), _pblock("b2", 2)],
                  pages=[_ppage(1), _ppage(2)])

@@ -16,7 +16,8 @@ from pathlib import Path
 # v2: SourceBlock 增 chapter_id（page→章映射）+ parse_report 增 source_type/backend_reason。
 # v3: SourceBlock 增 element_id（table→t{n} / image·chart→f{n}，稳定 id；跨页表片段共享）。
 # v4: parse_report 增 dual_audit_required；新增 reconciliation.json 契约（PyMuPDF + MinerU 双审）。
-ARTIFACT_VERSION = "4"
+# v5: evidence.json 逐页证据模型 + arbitration/{queue,decisions} 闭环（分歧→仲裁→物化进窗口证据包）。
+ARTIFACT_VERSION = "5"
 
 
 @dataclass

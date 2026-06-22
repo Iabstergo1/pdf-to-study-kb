@@ -57,10 +57,13 @@ def test_ingest_skill_orchestrates_full_pipeline():
 
 
 def test_ingest_skill_dual_audit_wiring():
-    # The dual-audit contract must be wired through the full ingest workflow (preprocessing → acceptance).
+    # The dual-audit + evidence-assembly loop must be wired through the full ingest workflow
+    # (preprocessing → auto-arbitration → materialization → closed-loop acceptance).
     text = _skill_all("ingest")
-    for must in ["source-audit", "reconciliation.json", "dual-audit", "MinerU", "PyMuPDF"]:
-        assert must in text, f"ingest missing dual-audit element: {must}"
+    for must in ["source-audit", "reconciliation.json", "dual-audit", "MinerU", "PyMuPDF",
+                 "arbitration", "evidence.json", "arbitration-apply", "check_evidence_bundle"]:
+        assert must in text, f"ingest missing dual-audit/evidence-loop element: {must}"
+    assert (SKILLS / "ingest" / "references" / "arbitrate.md").exists(), "ingest missing references/arbitrate.md"
 
 
 def test_ingest_skill_synthesis_duties():

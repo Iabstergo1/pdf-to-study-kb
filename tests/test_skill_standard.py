@@ -90,13 +90,13 @@ def test_t3_hygiene_no_dead_pointers():
 
 _PROTOCOL_KEYWORDS = {
     "ingest": ["workorder.yaml", "resolve-concept", "check-write", "window-done",
-               "status: proposed", "lint", "source-audit"],
+               "status: proposed", "lint", "source-audit", "arbitration"],
     "kb-query": ["check-session", "query-session", "candidate_write_set", "evidence_refs"],
     "kb-save": ["resolve-concept", "check-write", "check-session", "save-back-policy",
                 "status: proposed"],
     "kb-review": ["Review-Queue", "review_proposals", "promote-concept"],
     "wiki-lint-semantic": ["L4", "contradiction", "Q2", "proposal"],
-    "source-preflight": ["workorder", "source-convert", "source-audit", "windows", "write_scope", "zero-LLM"],
+    "source-preflight": ["workorder", "source-convert", "source-audit", "arbitration", "windows", "write_scope", "zero-LLM"],
     "kb-qa": ["Q-chain", "Review-Queue", "coverage", "mutually exclusive"],
     "source-xray": ["reports/source-xray", "published", "kb-save"],
     "skill-evolve": ["skill-mine", "skill-gate", "skill-stage", "skill-adopt", "backlog"],

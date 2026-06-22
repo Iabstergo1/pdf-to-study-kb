@@ -21,7 +21,7 @@ translation: concepts/topics lead, lessons follow the source TOC.
 - Both agents share one `pipeline.py` and one `wiki/` vault.
 
 ```text
-preprocess (zero LLM):  add-source → profile → source-convert → source-audit → windows → workorder
+preprocess (zero-LLM CLI):  add-source → profile → source-convert → source-audit →[ auto-arbitration: agent decides, CLI materializes ]→ windows → workorder
 same session (the LLM): read chapters.json (whole-book map) + source.md / hard-page images
                         → write status:proposed pages (hard pages embed source images by type)
                         → concept resolution → synthesis layer
@@ -30,7 +30,7 @@ finish (zero LLM):      lint → promote(proposed→published) or rollback + Rev
 
 ## 3. Core constraints
 
-1. **Preprocessing & finishing are zero-LLM** (deterministic CLI); the only LLM is the human-triggered skill, never unattended batch.
+1. **Preprocessing & finishing are deterministic** (zero-LLM CLI). The only LLM in preprocessing is the agent's **auto-arbitration of dual-audit disagreements** inside the skill flow (structured decisions only; the CLI materializes them) — never an LLM inside the CLI, never unattended batch, never a full-book scan. The writing LLM is the human-triggered ingest skill.
 2. **No splitting:** the LLM never plans/approves semantic units; long sources are read via deterministic processing windows (TOC / heading / page / token sliding window).
 3. **Concept dedup:** every concept create/update goes through the single `resolve-concept`; a `canonical_id` hit merges, **never creates a duplicate**. `_registry.yaml` / `aliases.md` are derived — skills never hand-write them.
 4. **Two-phase publish:** skills only write `status: proposed`; the finishing gate promotes to `published` and indexes it; failure rolls back (`pipeline-workspace/snapshots/`) + enqueues to `Review-Queue/`.
@@ -54,6 +54,12 @@ backend produced which evidence, pages cross-checked, disagreements, accepted/de
 - MinerU runs `pipeline` backend only (CLI always `-b pipeline`; vlm/hybrid disabled) — fits a ~4 GB GPU.
   Install via `python scripts/install_mineru.py` (kept install-optional so the dev path stays lightweight;
   production must install it).
+- **Evidence-assembly loop (disagreements close into the windows the next LLM reads):** `source-audit` emits
+  `evidence.json` + an arbitration queue for pages where MinerU found structure PyMuPDF missed. The skill flow
+  **auto-arbitrates** (agent decides render/ignore/needs_human — structured only) and `arbitration-apply`
+  materializes (renders the page, sets needs_vision), so the windows carry the source image. `preflight-eval
+  --strict` `check_evidence_bundle` blocks any un-closed disagreement — acceptance asks "is the LLM's input
+  complete", not "did dual-audit run".
 
 ## 5. Command layer (skills, model-invocable)
 

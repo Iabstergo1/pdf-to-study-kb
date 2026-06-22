@@ -145,6 +145,33 @@ def visual_signals(page) -> dict:
     return {"n_draw": n_draw, "n_tables": n_tables, "image_count": image_count}
 
 
+def render_page_png(doc, page_number: int, out_path, *, zoom: int = 3) -> str:
+    """渲染开着的 fitz doc 的 1-based 第 page_number 页为整页 PNG（route B）。
+    convert / source-audit 难页补图 / arbitration 物化共用同一渲染口径（zoom=3）。"""
+    import fitz  # noqa: F401（确保依赖存在；matrix 用到）
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    doc[page_number - 1].get_pixmap(matrix=fitz.Matrix(zoom, zoom)).save(str(out_path))
+    return str(out_path)
+
+
+def render_pages_png(raw_path, pages, out_dir, *, prefix: str = "p", zoom: int = 3) -> dict:
+    """打开 raw PDF 一次，把 `pages` 渲成 out_dir/<prefix><NNNN>.png；返回 {page: rel_path}。"""
+    import fitz
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rel = {}
+    doc = fitz.open(str(raw_path))
+    try:
+        for pg in pages:
+            name = f"{prefix}{int(pg):04d}.png"
+            render_page_png(doc, int(pg), out_dir / name, zoom=zoom)
+            rel[int(pg)] = name
+    finally:
+        doc.close()
+    return rel
+
+
 def needs_vision_reasons(page: dict) -> list:
     """高召回：任一视觉/公式信号命中即返回原因（可审计）。
     代价不对称——漏页不可恢复，多截近乎零成本，故偏召回。

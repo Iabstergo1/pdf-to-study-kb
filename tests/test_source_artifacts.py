@@ -34,8 +34,9 @@ def test_write_read_blocks_roundtrip(tmp_path):
 
 def test_artifact_version_bumped():
     # L2 "1"→"2"(chapter_id + source_type/backend_reason)；C1 "2"→"3"(element_id)；
-    # dual-audit "3"→"4"(parse_report.dual_audit_required + reconciliation.json 契约)
-    assert sa.ARTIFACT_VERSION == "4"
+    # dual-audit "3"→"4"(parse_report.dual_audit_required + reconciliation.json 契约)；
+    # evidence-assembly "4"→"5"(evidence.json + arbitration 闭环)
+    assert sa.ARTIFACT_VERSION == "5"
 
 
 def test_source_block_element_id_default_and_roundtrip(tmp_path):

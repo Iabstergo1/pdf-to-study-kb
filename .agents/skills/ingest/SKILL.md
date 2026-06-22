@@ -39,19 +39,20 @@ demand. Project truth: `AGENTS.md`. Engineering format: `docs/skill-runtime/skil
 
 - CLI: `scripts/pipeline.py` (commands per phase).
 - Protocols: `docs/skill-runtime/schema.md` (page types / required sections), `concept-resolution.md` (resolution).
-- Phase references: `references/preflight.md`, `references/write-pages.md`, `references/synthesis.md`, `references/finish-lint.md`.
+- Phase references: `references/preflight.md`, `references/arbitrate.md`, `references/write-pages.md`, `references/synthesis.md`, `references/finish-lint.md`.
 
 ## 5. Persisted artifacts
 
 - `pipeline-workspace/staging/<src>/`: `source.md`, `blocks.jsonl`, `chapters.json` (deterministic chapter
-  map / navigation spine), `reconciliation.json` (PyMuPDF×MinerU dual-audit), `windows.jsonl`,
+  map / navigation spine), `reconciliation.json` + `evidence.json` (PyMuPDF×MinerU dual-audit + per-page
+  evidence model), `arbitration/{queue,decisions,audit}.json`, `windows.jsonl`,
   `workorder.yaml`, hard-page PNGs, `digest.md` (cross-window rolling digest with a `## RESUME` block).
 - `ingest_progress` (per-window accounting, machine state). Rollback snapshots in `pipeline-workspace/snapshots/`.
 
 ## 6. CLI commands (orchestration order)
 
 ```text
-preprocess (zero LLM)  init-vault → add-source → profile → source-convert → source-audit → windows → workorder
+preprocess + auto-arbitration  init-vault → add-source → profile → source-convert → source-audit →[ arbitration-status → if pending: agent arbitrates queue → arbitration-apply ]→ windows → workorder
 start / per-window (LLM)  ingest-start → read chapters.json (build whole-book understanding)
                           →[ in chapter order: window-start → show-window → write pages (hard pages embed source images by type) → window-done --writes ]×N
 synthesis (LLM)           phase E: update overview + build topic/comparison/synthesis (into some window's --writes) — first-class, lint blocks if missing
@@ -63,7 +64,10 @@ incremental reopen        reopen → ingest-start →[ per-window backfill ]→ 
 > Markdown / born-digital PDF take the lightweight PyMuPDF path; scanned / low-text PDF, DOCX / PPTX take
 > MinerU (fail-closed if absent, never a silent fallback). **`source-audit` runs the MinerU structural
 > review of every PDF and writes `reconciliation.json`** (PyMuPDF thresholds are deliberately broad and are
-> not a single source of truth); production / strict acceptance requires the dual-audit to pass.
+> not a single source of truth); production / strict acceptance requires the dual-audit to pass. **When the
+> dual-audit flags a structural page PyMuPDF missed, the auto-arbitration sub-step (`references/arbitrate.md`)
+> automatically decides render/ignore/needs_human and the CLI materializes it into the windows — an un-closed
+> disagreement blocks strict acceptance.**
 > When writing each window, **read it via `show-window`** (output carries heading_path / page range /
 > block_ids / risk_flags / assets); **do not guess ranges from `source.md` char offsets.** Block-mode
 > (MinerU / structured) pages keep traceable `block_ids` / `source_refs` / `assets`.
@@ -80,6 +84,7 @@ incremental reopen        reopen → ingest-start →[ per-window backfill ]→ 
 | Phase | File | Responsibility |
 |---|---|---|
 | A preprocess | `references/preflight.md` | deterministic chain + dual-audit acceptance (needs_vision / degraded warnings / reconciliation / window coverage) |
+| A.5 auto-arbitration | `references/arbitrate.md` | when the dual-audit flags un-closed disagreements, the agent auto-decides render/ignore/needs_human (structured only); the CLI materializes → the windows carry the assets |
 | B+C+D per-window writing | `references/write-pages.md` | start guard + **read chapters.json for whole-book understanding** + per-window sub-units U1–U7 + embed source images by type + writing discipline + lint hard rules |
 | E synthesis | `references/synthesis.md` | incremental overview/topic/comparison/synthesis |
 | F finish | `references/finish-lint.md` | ingest-done + lint promote/rollback + derived rebuild |
@@ -94,7 +99,9 @@ unfinished window (`pipeline.py next` is the machine anchor); otherwise auto-adv
 ## 9. Acceptance criteria
 
 - Preprocess: `workorder.yaml` generated; `ingest-start` took the lock + the stale-registry check passed;
-  for PDFs, `source-audit` produced `reconciliation.json` and strict `preflight-eval` would pass the dual-audit.
+  for PDFs, `source-audit` produced `reconciliation.json` + `evidence.json`, every dual-audit disagreement was
+  arbitrated + materialized, and strict `preflight-eval` passes both `dual_audit` and `check_evidence_bundle`
+  (the windows carry the source images for arbitrated pages).
 - Writing: every page `check-write` ALLOW, page_rules self-check 0 violations, every non-source page in a `window-done --writes`.
 - Synthesis (phase E mandatory): overview updated (not a bare link list) + at least one topic/comparison/synthesis, all in `--writes`; otherwise `lint` reports `L7-synthesis-missing` and rolls back.
 - Finish: `lint` passes (promoted into the index), or failures land in `Review-Queue/` and the round is rolled back.

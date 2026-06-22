@@ -12,7 +12,8 @@
    - `python scripts/pipeline.py add-source --source <src> --domain <domain> --path <path> --fmt <fmt>`
    - `python scripts/pipeline.py profile --source <src>`
    - `python scripts/pipeline.py source-convert --source <src>`
-   - `python scripts/pipeline.py source-audit --source <src>` (PDF dual-audit: MinerU reviews PyMuPDF → `reconciliation.json`; add `--strict` for production / strict acceptance, fail-closed if MinerU is unavailable)
+   - `python scripts/pipeline.py source-audit --source <src>` (PDF dual-audit: MinerU reviews PyMuPDF → `reconciliation.json` + `evidence.json` + `arbitration/queue.json`; add `--strict` for production / strict acceptance, fail-closed if MinerU is unavailable)
+   - **auto-arbitration (when the dual-audit found un-closed disagreements):** `arbitration-status` → if pending, arbitrate the queue → `arbitration-apply` — see `references/arbitrate.md`. This runs automatically before windows; an un-closed disagreement blocks strict acceptance.
    - `python scripts/pipeline.py windows --source <src>`
    - `python scripts/pipeline.py workorder --source <src>`
 3. Read `pipeline-workspace/staging/<src>/workorder.yaml` — it defines your entire write boundary
@@ -24,6 +25,9 @@
 - **Dual-audit (PDF):** `reconciliation.json` exists (from `source-audit`). Strict acceptance requires
   `dual_audited=true`; otherwise `preflight-eval` reports a `dual_audit` failure (PyMuPDF thresholds are
   deliberately broad and are not a single source of truth — PyMuPDF-only output is not production-accepted).
+- **Evidence bundle closed (PDF):** every dual-audit disagreement candidate has been arbitrated and
+  materialized — `preflight-eval`'s `check_evidence_bundle` is green (no un-arbitrated / un-materialized /
+  pending `needs_human`); the windows ingest reads carry the source images for arbitrated pages.
 - **needs_vision sane:** `source-convert`'s hard-page count should not be 0 (a book with formulas/figures
   should flag some pages); 0 on such a source is suspicious — review.
 - **Hard pages (route B):** `source-convert` marks hard pages (formula / vector figure / table / caption,

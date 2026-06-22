@@ -232,6 +232,90 @@ def cmd_source_audit(args):
           f"degraded={rep['degraded']}, disagreements={len(rep['disagreements'])}) → {recon_path}")
 
 
+def cmd_arbitration_status(args):
+    """打印分歧仲裁队列状态（确定性，零 LLM）：候选 / 已决策 / pending / render·ignore·needs_human。
+    source-preflight/ingest skill 据此决定是否需要 agent 自动仲裁；无候选则无需调 LLM。"""
+    import json as _json
+    import arbitration as arb
+    staging = _staging_dir(args.source)
+    ev = staging / arb.EVIDENCE_FILE
+    if not ev.exists():
+        raise SystemExit("缺 evidence.json；先跑 source-audit")
+    model = _json.loads(ev.read_text(encoding="utf-8"))
+    candidates = model.get("candidates", [])
+    dec_path = staging / arb.DECISIONS_FILE
+    decisions = (_json.loads(dec_path.read_text(encoding="utf-8")).get("decisions", [])
+                 if dec_path.exists() else [])
+    by_page = {int(d["page"]): d.get("decision") for d in decisions}
+    pending = [p for p in candidates if int(p) not in by_page]
+    kinds = {}
+    for v in by_page.values():
+        kinds[v] = kinds.get(v, 0) + 1
+    print(f"[arbitration] candidates={len(candidates)} decided={len(by_page)} pending={len(pending)} "
+          f"render={kinds.get('render', 0)} ignore={kinds.get('ignore', 0)} needs_human={kinds.get('needs_human', 0)}")
+    if pending:
+        print(f"  pending pages need agent arbitration: {pending}")
+        print(f"  read packets → {staging / arb.QUEUE_FILE}; write decisions → {staging / arb.DECISIONS_FILE}")
+
+
+def _apply_resolutions(staging, decisions):
+    """把裁决回写 evidence.json 的 arbitration/resolution + 重算 final_hard_pages，并追加 audit.jsonl（可审计）。"""
+    import json as _json
+    import arbitration as arb
+    ev_path = Path(staging) / arb.EVIDENCE_FILE
+    model = _json.loads(ev_path.read_text(encoding="utf-8")) if ev_path.exists() else {"pages": {}}
+    res_map = {arb.RENDER: "materialized", arb.IGNORE: "ignored", arb.NEEDS_HUMAN: "blocked"}
+    for d in decisions:
+        pg, dec = str(int(d["page"])), d.get("decision")
+        if pg in model.get("pages", {}):
+            model["pages"][pg]["arbitration"] = dec
+            model["pages"][pg]["resolution"] = res_map.get(dec)
+    model["final_hard_pages"] = sorted(set(model.get("initial_needs_vision", [])) | set(arb.render_pages(decisions)))
+    ev_path.write_text(_json.dumps(model, ensure_ascii=False, indent=2), encoding="utf-8")
+    ap = Path(staging) / arb.AUDIT_FILE
+    ap.parent.mkdir(parents=True, exist_ok=True)
+    with open(ap, "a", encoding="utf-8") as f:
+        for d in decisions:
+            f.write(_json.dumps({"page": int(d["page"]), "decision": d.get("decision"),
+                                 "reason": d.get("reason", "")}, ensure_ascii=False) + "\n")
+
+
+def cmd_arbitration_apply(args):
+    """物化 arbitration/decisions.json（确定性，零 LLM）：render→补整页图 + 置 needs_vision + 风险标记；
+    ignore→记原因；needs_human→标 blocked。幂等 + 追加 audit.jsonl。**须在 windows 之前跑**，
+    使 windows 首次构窗即携带视觉资产（避免对已 windowed 源回退重跑的状态机限制）。"""
+    import json as _json
+    import state_store
+    import source_artifacts as sa
+    import source_profile
+    import arbitration as arb
+    db = _vault_state_db()
+    raw = _raw_path(db, state_store, args.source)
+    staging = _staging_dir(args.source)
+    dec_path = staging / arb.DECISIONS_FILE
+    if not dec_path.exists():
+        raise SystemExit(f"缺 {arb.DECISIONS_FILE}（agent 在 skill 流里仲裁后才有）；先 source-audit + 自动仲裁")
+    decisions = _json.loads(dec_path.read_text(encoding="utf-8")).get("decisions", [])
+    blocks = sa.read_blocks(staging / "blocks.jsonl")
+    pj = staging / "pages.jsonl"
+    pages = ([_json.loads(l) for l in pj.read_text(encoding="utf-8").splitlines() if l.strip()]
+             if pj.exists() else [])
+    render_pgs = arb.render_pages(decisions)
+    if render_pgs:
+        source_profile.render_pages_png(raw, render_pgs, staging / "assets", prefix="p")  # 补整页图进 assets/
+    sa.write_blocks(staging / "blocks.jsonl", arb.materialize_blocks(blocks, decisions))
+    pj.write_text("\n".join(_json.dumps(p, ensure_ascii=False) for p in arb.materialize_pages(pages, decisions)),
+                  encoding="utf-8")
+    _apply_resolutions(staging, decisions)
+    n = _sync_assets(args.source)
+    kinds = {}
+    for d in decisions:
+        kinds[d.get("decision")] = kinds.get(d.get("decision"), 0) + 1
+    print(f"[OK] arbitration-apply → render={len(render_pgs)} ignore={kinds.get('ignore', 0)} "
+          f"needs_human={kinds.get('needs_human', 0)}; synced {n} PNG → vault. "
+          f"现在(重)跑 windows 让窗口携带视觉资产,再 preflight-eval --strict 验收闭环。")
+
+
 def cmd_windows(args):
     """确定性 processing windows：有 blocks.jsonl 走 block-aware，否则退回旧 char 窗。"""
     import state_store
@@ -245,6 +329,54 @@ def cmd_windows(args):
     source_md = out / "source.md"
     if not source_md.exists():
         raise SystemExit("run source-convert first")
+    # 双审闸门（确定性，零 LLM；在状态机转换之前）。--dev-bypass 显式跳过（dev 降级路径，不可用于
+    # strict 验收）。windows 是交给 ingest LLM 的输入，所以构窗前必须满足两道门：
+    if not getattr(args, "dev_bypass", False):
+        import arbitration as arb
+        import source_audit
+        # 闸门 B（PDF 双审存在性）：PDF 源构窗前必须已完成 source-audit——reconciliation + evidence
+        # + arbitration/queue 三件套齐全。否则窗口会在"未双审/未生成分歧队列"下被交给 ingest LLM。
+        # 非 PDF 源不受影响。PDF 判定以 state_store 记录的 source format 为权威（add-source 写入），
+        # parse_report.json 仅作补充——缺 parse_report.json 不能让 PDF 漏过闸门。
+        src_row = state_store.get_source(db, args.source)
+        fmt = src_row["format"] if src_row else None
+        report = {}
+        rp = out / "parse_report.json"
+        if rp.exists():
+            report = json.loads(rp.read_text(encoding="utf-8"))
+        is_pdf = (fmt == "pdf"
+                  or report.get("source_type") in source_audit.PDF_TYPES
+                  or bool(report.get("dual_audit_required")))
+        if is_pdf:
+            missing = [n for n, p in [
+                ("reconciliation.json", out / "reconciliation.json"),
+                ("evidence.json", out / arb.EVIDENCE_FILE),
+                ("arbitration/queue.json", out / arb.QUEUE_FILE)] if not p.exists()]
+            if missing:
+                raise SystemExit(
+                    "PDF 源未完成 source-audit（缺 " + ", ".join(missing) + "），拒绝构窗（fail-closed）："
+                    "windows 是交给 ingest LLM 的输入，PDF 必须先 PyMuPDF+MinerU 双审并生成分歧队列。"
+                    "先跑 source-audit（+自动仲裁+arbitration-apply），或加 --dev-bypass 跳过"
+                    "（dev 降级路径，不可用于 strict 验收）。")
+        # 闸门 A（分歧未闭环）：有 evidence 且存在未仲裁/render未物化/needs_human/ignore缺因 → 拒绝构窗。
+        ev_path = out / arb.EVIDENCE_FILE
+        if ev_path.exists():
+            model = json.loads(ev_path.read_text(encoding="utf-8"))
+            dec_path = out / arb.DECISIONS_FILE
+            decisions = (json.loads(dec_path.read_text(encoding="utf-8")).get("decisions", [])
+                         if dec_path.exists() else [])
+            gate_blocks = source_artifacts.read_blocks(blocks_path) if blocks_path.exists() else []
+            blockers = arb.windows_blockers(model, decisions, gate_blocks)
+            if blockers:
+                counts: dict = {}
+                for k, _pg in blockers:
+                    counts[k] = counts.get(k, 0) + 1
+                pages = sorted({pg for _k, pg in blockers})
+                raise SystemExit(
+                    "未闭环双审分歧，拒绝构窗（fail-closed）："
+                    + ", ".join(f"{k}×{v}" for k, v in sorted(counts.items()))
+                    + f"；涉及页 {pages[:20]}。先读 arbitration/queue.json 仲裁→写 decisions.json"
+                      "→arbitration-apply，或加 --dev-bypass 跳过（产物降级，不可用于 strict 验收）。")
     # chapters.json（L3 chapter_title 查询源）；缺则空表（chapter_title 退化为 ""，不报错）。
     chapters_path = out / "chapters.json"
     chapters = (json.loads(chapters_path.read_text(encoding="utf-8"))
@@ -1126,10 +1258,12 @@ def main():
     asp.add_argument("--domain", required=True, help="所属领域")
     asp.add_argument("--path", required=True, help="原始文件路径")
     asp.add_argument("--fmt", required=True, choices=["pdf", "md", "docx", "pptx"], help="来源格式")
-    for name, help_text in [("profile", "逐页 profile + needs_vision 标记"),
-                            ("windows", "生成确定性 processing windows")]:
-        p = subparsers.add_parser(name, help=help_text)
-        p.add_argument("--source", required=True, help="source_id")
+    pfp = subparsers.add_parser("profile", help="逐页 profile + needs_vision 标记")
+    pfp.add_argument("--source", required=True, help="source_id")
+    winp = subparsers.add_parser("windows", help="生成确定性 processing windows")
+    winp.add_argument("--source", required=True, help="source_id")
+    winp.add_argument("--dev-bypass", action="store_true",
+                      help="跳过双审分歧闸门构窗（dev 用；产物降级，不可用于 strict 验收）")
     scp = subparsers.add_parser("source-convert", help="转成 staging/<source>/ 全 artifact（按 backend 选后端）")
     scp.add_argument("--source", required=True, help="source_id")
     scp.add_argument("--force", action="store_true",
@@ -1143,6 +1277,12 @@ def main():
     saup.add_argument("--source", required=True, help="source_id")
     saup.add_argument("--strict", action="store_true",
                       help="MinerU 复读必需但不可用/失败 → 非零退出（生产/严格验收，不静默回退 PyMuPDF）")
+    arst = subparsers.add_parser("arbitration-status",
+                                 help="打印双审分歧仲裁队列状态（候选/已决策/pending；skill 据此自动仲裁）")
+    arst.add_argument("--source", required=True, help="source_id")
+    arap = subparsers.add_parser("arbitration-apply",
+                                 help="物化 decisions.json（render 补图+标记 / ignore / needs_human）；须在 windows 前跑")
+    arap.add_argument("--source", required=True, help="source_id")
     pep = subparsers.add_parser("preflight-eval",
                                 help="L4：确定性验收 staging 预处理产物（零-LLM，可 CI 化）")
     pep.add_argument("--source", required=True, help="source_id")
@@ -1233,6 +1373,8 @@ def main():
         'profile': cmd_profile,
         'source-convert': cmd_source_convert,
         'source-audit': cmd_source_audit,
+        'arbitration-status': cmd_arbitration_status,
+        'arbitration-apply': cmd_arbitration_apply,
         'windows': cmd_windows,
         'preflight-eval': cmd_preflight_eval,
         'fail': cmd_fail,
