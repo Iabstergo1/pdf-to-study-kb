@@ -669,6 +669,7 @@ def test_convert_writes_source_type_and_backend_reason_md(tmp_path):
     rep = json.loads((out_dir / "parse_report.json").read_text(encoding="utf-8"))
     assert rep["source_type"] == "markdown"
     assert rep["backend_reason"]
+    assert rep["dual_audit_required"] is False       # 非 PDF（markdown）→ 双审不适用
 
 
 def test_convert_writes_source_type_pdf(tmp_path):
@@ -678,7 +679,12 @@ def test_convert_writes_source_type_pdf(tmp_path):
     import fitz
     src = tmp_path / "tiny.pdf"
     doc = fitz.open()
-    doc.new_page().insert_text((72, 72), "Hello PDF body text long enough to be native")
+    # 文本密集 → 判 native_pdf → auto 走 PyMuPDF（确定性 + 快；不触发 MinerU 子进程，套件不依赖环境）。
+    body = ("This native born-digital page carries plenty of readable body text so the source "
+            "profiles as a native pdf and stays on the pymupdf backend under auto routing. ") * 3
+    pg = doc.new_page()
+    for k in range(10):
+        pg.insert_text((72, 72 + k * 16), body[:95])
     doc.save(str(src)); doc.close()
     # 先 profile 出 pages 再传给 convert（与 pipeline 一致）
     pages = source_profile.profile_source(src, fmt="pdf")
@@ -686,7 +692,8 @@ def test_convert_writes_source_type_pdf(tmp_path):
     res = source_convert.convert(src, out_dir=out_dir, fmt="pdf", profile_pages=pages)
     import json
     rep = json.loads((out_dir / "parse_report.json").read_text(encoding="utf-8"))
-    assert rep["source_type"] in ("native_pdf", "low_text_pdf", "mixed_pdf")
+    assert rep["source_type"] == "native_pdf"
+    assert rep["dual_audit_required"] is True        # PDF 类 → 验收要求 PyMuPDF + MinerU 双审
 
 
 # --- L2 结构还原层：block.chapter_id 映射（page→chapter，后端无关） ---

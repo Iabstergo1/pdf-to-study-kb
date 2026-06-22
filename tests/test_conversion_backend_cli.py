@@ -200,3 +200,38 @@ def test_sync_assets_copies_jpg(tmp_path):
     r = _run(["sync-assets", "--source", sid], tmp_path)
     assert r.returncode == 0, r.stderr
     assert (tmp_path / "wiki" / "assets" / sid / "fig1.jpg").exists()   # MinerU 图片(.jpg) 入 vault
+
+
+# --- dual-audit：source-audit CLI（PyMuPDF + MinerU 双审；MinerU 禁用 → strict fail-closed / dev 降级） ---
+
+def test_source_audit_strict_fail_closed_when_mineru_unavailable(tmp_path, monkeypatch):
+    # strict/生产验收：每个 PDF 都要 MinerU structural review；禁用 → 非零退出（不静默回退 PyMuPDF）。
+    monkeypatch.setenv("MINERU_DISABLE", "1")
+    sid = "p2audit_strict"
+    _preprocess_pdf(tmp_path, sid)
+    assert _run(["source-convert", "--source", sid, "--backend", "pymupdf"], tmp_path).returncode == 0
+    r = _run(["source-audit", "--source", sid, "--strict"], tmp_path)
+    assert r.returncode != 0
+    blob = (r.stdout + r.stderr)
+    assert "dual-audit" in blob.lower() or "install_mineru" in blob
+
+
+def test_source_audit_nonstrict_marks_degraded(tmp_path, monkeypatch):
+    # dev/non-strict：PyMuPDF-only 可产出，但 reconciliation 显式标 degraded / not dual-audited。
+    import json
+    monkeypatch.setenv("MINERU_DISABLE", "1")
+    sid = "p2audit_dev"
+    _preprocess_pdf(tmp_path, sid)
+    assert _run(["source-convert", "--source", sid, "--backend", "pymupdf"], tmp_path).returncode == 0
+    r = _run(["source-audit", "--source", sid], tmp_path)
+    assert r.returncode == 0, r.stderr
+    recon = json.loads((tmp_path / "pipeline-workspace" / "staging" / sid
+                        / "reconciliation.json").read_text(encoding="utf-8"))
+    assert recon["degraded"] is True and recon["dual_audited"] is False
+    assert recon["review_status"] == "degraded_no_review"
+    assert recon["production_accepted"] is False
+
+
+def test_source_audit_help(tmp_path):
+    r = _run(["source-audit", "--help"], tmp_path)
+    assert r.returncode == 0 and "--strict" in r.stdout and "--source" in r.stdout

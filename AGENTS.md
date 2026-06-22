@@ -14,7 +14,7 @@
 - 两 agent 共享同一 `pipeline.py` 与同一 `wiki/` vault；Codex 读本文件，Claude Code 读 `CLAUDE.md`。
 
 ```text
-ingest skill 编排预处理（零 LLM）：add-source → profile → source-convert → windows → workorder
+ingest skill 编排预处理（零 LLM）：add-source → profile → source-convert → source-audit（PyMuPDF×MinerU 双审）→ windows → workorder
    ↓ 同一会话（唯一 LLM）：读 chapters.json 全书章节图 + source.md/难页图 → 按章写 status:proposed 页（难页按类型嵌原图）+ 概念归一 + 综合层
    ↓ 同一会话收尾（零 LLM）：确定性 lint → promote(proposed→published) 或 回滚+Review-Queue → 重建 index/registry/aliases
 ```
@@ -42,8 +42,8 @@ LLM 能力 = `.agents/skills/{ingest,kb-query,kb-save,kb-review,kb-qa,wiki-lint-
 
 ## 6. 真实能力边界（开工前知悉）
 
-- **视觉保真 / 结构化解析（两条路径，默认轻量）**：fast path——PDF 经 PyMuPDF 抽纯文本，会拍平上/下标/分数、且看不见矢量图与无框线表；`source-convert` 把每个难页（`needs_vision` 高召回判定：公式页 / 矢量图页[`get_drawings`] / 表格页[`find_tables`] / 图表标题页）渲染为整页 PNG（route B），由 ingest 时 LLM **读图**保真（公式写 KaTeX；lint 硬规则强制 lesson 内嵌源图），`pages.jsonl` 记 `needs_vision_reason` 可审计。**可选 structured backend：MinerU**（见 `requirements.txt` 可选段 / `scripts/install_mineru.py`，非默认依赖，subprocess 调 CLI）——用于扫描 PDF / 低文本密度 PDF / DOCX / PPTX / 复杂表格·公式·图片，归一成同一套 `source.md + blocks.jsonl + chapters.json + parse_report.json + assets/`；低显存 GPU（约 4GB）→ 默认仅 MinerU `pipeline` 后端（CLI 恒 `-b pipeline`，禁 vlm/hybrid），未装则 fail-closed、绝不静默回退 PyMuPDF。
-- **格式覆盖**：`pdf`/`md` 走 fast path 已端到端打通；`docx`/`pptx` 与扫描/低文本 PDF 经可选 MinerU 结构化后端（`--backend auto` 自动路由，`--backend mineru` 强制；未装 fail-closed）。
+- **视觉保真 / PDF 双审解析（PyMuPDF 抽取 + MinerU structural review）**：fast path——PDF 经 PyMuPDF 抽纯文本（快，作 profiling/extraction 路径），会拍平上/下标/分数、且看不见矢量图与无框线表；`source-convert` 把每个难页（`needs_vision` 高召回判定：公式页 / 矢量图页[`get_drawings`] / 表格页[`find_tables`] / 图表标题页）渲染为整页 PNG（route B），由 ingest 时 LLM **读图**保真（公式写 KaTeX；lint 硬规则强制 lesson 内嵌源图），`pages.jsonl` 记 `needs_vision_reason` 可审计。**MinerU 是 PDF 验收的必需 structural reviewer（不是可选回退）**：`source-audit` 跑 MinerU 复读同一 PDF、与 PyMuPDF 做确定性逐页互检 → `reconciliation.json`（哪后端给哪证据 / 对了哪些页 / 分歧 / 是否接受 / 是否降级）——因 PyMuPDF 的 `needs_vision` 阈值刻意宽、**不可作单一真值**。strict / 生产验收要求每个 PDF 都过双审，MinerU 不可用即 **fail-closed（不静默回退 PyMuPDF）**；non-strict / dev 可 PyMuPDF-only 但 reconciliation 显式标 `degraded / 未双审`、**不满足 strict 验收**。MinerU 亦作扫描 / 低文本 PDF、DOCX / PPTX 的 primary 结构化抽取，归一成同一套 `source.md + blocks.jsonl + chapters.json + parse_report.json + reconciliation.json + assets/`；低显存 GPU（约 4GB）→ 仅 MinerU `pipeline` 后端（CLI 恒 `-b pipeline`，禁 vlm/hybrid）。
+- **格式覆盖**：`pdf` 经 PyMuPDF 抽取 + MinerU 双审（strict 必需，未装 fail-closed）；`md` 走 fast path；`docx`/`pptx` 与扫描/低文本 PDF 由 MinerU primary 结构化（`--backend auto` 自动路由，`--backend mineru` 强制；未装 fail-closed）。
 - **每本书的入库都是一次需付费的 LLM 操作**，并非导入即用；项目交付时为空库，内容通过运行 ingest 逐步生成。
 - **lint 硬规则**：wikilink 必须全 vault 相对路径（非 Obsidian basename）、必需小节标题逐字、非 source 页（topic/comparison/synthesis/overview）必须进某 window 的 `--writes` 记账——见 ingest skill 阶段 D 速查；未遵守将被门禁拦截。
 

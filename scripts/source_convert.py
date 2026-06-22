@@ -203,6 +203,9 @@ def convert(src_path, *, out_dir, fmt: str, backend: str = "auto",
         cls = classify_source(fmt, profile_pages, backend=backend, policy=mineru_policy)
         res.report["source_type"] = cls["source_type"]
         res.report["backend_reason"] = cls["backend_reason"]
+        # dual-audit 契约：PDF 类（*_pdf）验收要求 PyMuPDF + MinerU 双审（reconciliation.json 兑现，
+        # 见 source_audit）；md/docx/pptx 非 PDF → False。preflight check_dual_audit 据此判适用范围。
+        res.report["dual_audit_required"] = cls["source_type"].endswith("_pdf")
 
     # L2：用 res.chapters 的页范围给每个 block 映射 chapter_id（后端无关，统一）。
     # 三后端都返回 res.chapters（pymupdf TOC / markdown ch00-full / mineru heading），映射通用；

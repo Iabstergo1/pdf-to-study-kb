@@ -73,6 +73,22 @@ def test_build_windows_has_chars_mode():
     assert all(w["mode"] == "chars" for w in ws)
 
 
+def test_char_fallback_windows_marked_degraded():
+    # char-fallback 窗缺 block-aware 结构 → 显式标 degraded（不当正常成功；dual-audit 契约）。
+    md = "y " * 2000
+    ws = windowing.build_windows(md, target_tokens=300, max_tokens=400, overlap_tokens=0)
+    assert ws and all(w.get("degraded") is True for w in ws)
+
+
+def test_block_windows_not_degraded():
+    md = "# A\n\naaa\n"
+    blocks = [{"block_id": "b1", "type": "heading", "text": md, "page": 1, "char_start": 0,
+               "char_end": len(md), "text_level": 1, "heading_path": "A", "asset_path": None,
+               "risk_flags": [], "source_ref": "p0001#b1", "chapter_id": "ch00-full"}]
+    ws = windowing.build_windows_from_blocks(blocks)
+    assert ws and all(w.get("degraded") is False for w in ws)   # block-aware 窗非降级
+
+
 def test_windowing_version_bumped():
     assert windowing.WINDOWING_VERSION == "5"
 

@@ -194,6 +194,44 @@ def cmd_sync_assets(args):
     print(f"[OK] synced {n} source-page PNG(s) -> wiki/assets/{args.source}/")
 
 
+def cmd_source_audit(args):
+    """source-audit：PDF 双审——跑 MinerU structural review 复核 PyMuPDF 抽取，写 reconciliation.json。
+
+    PyMuPDF 的 needs_vision 阈值刻意宽、不可作 PDF 验收单一真值；本步让 MinerU 作独立结构 reviewer，
+    产出可审计的双审证据（哪后端给哪证据/对了哪些页/哪里不一致/是否接受/是否降级）。
+    --strict：MinerU 复读必需但不可用/失败 → 非零退出（fail-closed，不静默回退 PyMuPDF）。
+    无 --strict（dev）：MinerU 缺时 PyMuPDF-only 仍出，但 reconciliation 显式标 degraded/未双审。"""
+    import json as _json
+    import hashlib
+    import state_store
+    import source_audit
+    import source_convert
+    db = _vault_state_db()
+    raw = _raw_path(db, state_store, args.source)
+    staging = _staging_dir(args.source)
+    report_path = staging / "parse_report.json"
+    if not report_path.exists():
+        raise SystemExit("缺 parse_report.json：先跑 source-convert")
+    report = _json.loads(report_path.read_text(encoding="utf-8"))
+    source_type = report.get("source_type", "")
+    primary_backend = report.get("selected_backend", "")
+    # 复用 converted 缓存键派生 audit input_hash（自洽即可：同源重跑命中缓存，不重跑 MinerU）。
+    ihash = source_convert.converted_input_hash(raw, backend="auto", policy="conservative")
+    try:
+        rep = source_audit.audit(staging, raw, source_type=source_type,
+                                 primary_backend=primary_backend,
+                                 strict=getattr(args, "strict", False),
+                                 source_id=args.source, input_hash=ihash)
+    except source_audit.DualAuditUnavailable as e:
+        raise SystemExit(f"dual-audit fail-closed: {e}")
+    recon_path = staging / "reconciliation.json"
+    sha = hashlib.sha256(recon_path.read_bytes()).hexdigest()
+    state_store.record_artifact(db, args.source, kind="reconciliation",
+                                path=str(recon_path), sha256=sha)
+    print(f"[OK] source-audit → {rep['review_status']} (dual_audited={rep['dual_audited']}, "
+          f"degraded={rep['degraded']}, disagreements={len(rep['disagreements'])}) → {recon_path}")
+
+
 def cmd_windows(args):
     """确定性 processing windows：有 blocks.jsonl 走 block-aware，否则退回旧 char 窗。"""
     import state_store
@@ -1100,6 +1138,11 @@ def main():
                      help="选后端：auto（默认）/ pymupdf 强制轻量 / mineru 强制结构化（未装则 fail-closed）")
     scp.add_argument("--mineru-policy", choices=["conservative", "aggressive"], default="conservative",
                      help="auto 路由策略：conservative（默认，密集 born-digital 仍 PyMuPDF）/ aggressive（密集也走 MinerU）")
+    saup = subparsers.add_parser("source-audit",
+                                 help="PDF 双审：跑 MinerU structural review 复核 PyMuPDF + 写 reconciliation.json")
+    saup.add_argument("--source", required=True, help="source_id")
+    saup.add_argument("--strict", action="store_true",
+                      help="MinerU 复读必需但不可用/失败 → 非零退出（生产/严格验收，不静默回退 PyMuPDF）")
     pep = subparsers.add_parser("preflight-eval",
                                 help="L4：确定性验收 staging 预处理产物（零-LLM，可 CI 化）")
     pep.add_argument("--source", required=True, help="source_id")
@@ -1189,6 +1232,7 @@ def main():
         'add-source': cmd_add_source,
         'profile': cmd_profile,
         'source-convert': cmd_source_convert,
+        'source-audit': cmd_source_audit,
         'windows': cmd_windows,
         'preflight-eval': cmd_preflight_eval,
         'fail': cmd_fail,

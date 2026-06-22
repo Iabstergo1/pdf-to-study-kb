@@ -149,7 +149,7 @@ def test_source_convert_fail_closed_on_scanned_source(tmp_path):
         "\n".join('{"page":%d,"text_len":0,"image_count":1,"needs_vision":true}' % i
                   for i in range(1, 11)), encoding="utf-8")
     # PyMuPDF route B 路径：整本扫描件未 --force → 阻断（auto→MinerU-unavailable 的 fail-closed
-    # 见 test_p2_cli::test_source_convert_docx_auto_mineru_unavailable_fail_closed）。
+    # 见 test_conversion_backend_cli::test_source_convert_docx_auto_mineru_unavailable_fail_closed）。
     r = _run(["source-convert", "--source", "scan", "--backend", "pymupdf"], tmp_path)
     assert r.returncode != 0, r.stdout
     assert "scanned_source" in (r.stdout + r.stderr)

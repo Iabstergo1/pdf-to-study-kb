@@ -74,6 +74,9 @@ def _win(idx: int, path: str, c0: int, c1: int, overlap_before: int, mode: str =
         "char_start": c0,
         "char_end": c1,
         "overlap_before": overlap_before,
+        # char-fallback（mode="chars"）缺 block-aware 结构 → 显式标 degraded（不当正常成功；
+        # preflight check_window_contract 据 mode 报降级，此旗标使降级在窗 artifact 上直接可见）。
+        "degraded": mode == "chars",
     }
 
 

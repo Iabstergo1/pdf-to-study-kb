@@ -10,6 +10,7 @@
    - `python scripts/pipeline.py add-source --source <src> --domain <domain> --path <path> --fmt <fmt>`
    - `python scripts/pipeline.py profile --source <src>`
    - `python scripts/pipeline.py source-convert --source <src>`
+   - `python scripts/pipeline.py source-audit --source <src>`（PDF 双审：MinerU 复核 PyMuPDF → `reconciliation.json`；生产/严格验收加 `--strict`，MinerU 不可用即 fail-closed）
    - `python scripts/pipeline.py windows --source <src>`
    - `python scripts/pipeline.py workorder --source <src>`
 3. 读 `pipeline-workspace/staging/<src>/workorder.yaml`——它定义你的全部写入边界（`write_scope`）、registry hash、页面快照。**没有 work order 不进入阶段 B。**
@@ -20,3 +21,4 @@
 - **needs_vision 合理**：`source-convert` 输出的难页数不应为 0（含公式 / 图表的书应有若干页被标记）；为 0 且源含公式或插图则可疑，复核。
 - **难页（route B）**：`source-convert` 对难页（公式 / 矢量图 / 表 / 图表标题，高召回）打 `[info]`——纯文本会拍平上/下标、且看不见矢量图与无框线表，每页渲整页 PNG 供 ingest 读图保真。确认难页 PNG 已生成、`pages.jsonl` 有 `needs_vision_reason` 即可（不依赖任何 OCR/ML 后端）。
 - **windows 覆盖**：`windows.jsonl` 的 char 范围应覆盖 `source.md` 全文（无大段漏读）。
+- **PDF 双审**：PDF 源须有 `reconciliation.json`（`source-audit` 产出）；strict 验收要 `dual_audited=true`，否则 `preflight-eval` 标 `dual_audit` fail（PyMuPDF 阈值刻意宽、不可作单一真值，PyMuPDF-only 未双审不算生产验收）。

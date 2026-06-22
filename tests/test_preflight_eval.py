@@ -1,7 +1,7 @@
 """L4 调用与评测层：preflight_eval 纯函数 + check_*（确定性，零-LLM）。
 
 每个 check_* 用合成 staging（正例 + 违例）测；evaluate 端到端组装 + summary；
-pipeline preflight-eval 的 --strict 退出码语义另在 test_p2/p1 CLI 风格的 subprocess 测。
+pipeline preflight-eval 的 --strict 退出码语义另在 test_conversion_backend_cli / test_preprocessing_cli 的 subprocess 测。
 """
 import importlib.util
 import json
@@ -41,7 +41,7 @@ def _window(wid, cs, ce, block_ids, *, ps=1, pe_=1, refs=None, assets=None):
             "source_refs": refs if refs is not None else [f"p{ps:04d}#{b}" for b in block_ids]}
 
 
-def _write_staging(d, *, blocks, windows, report, pages=None, assets=None):
+def _write_staging(d, *, blocks, windows, report, pages=None, assets=None, reconciliation=None):
     d.mkdir(parents=True, exist_ok=True)
     (d / "blocks.jsonl").write_text(
         "\n".join(json.dumps(b, ensure_ascii=False) for b in blocks), encoding="utf-8")
@@ -52,6 +52,9 @@ def _write_staging(d, *, blocks, windows, report, pages=None, assets=None):
     if pages is not None:
         (d / "pages.jsonl").write_text(
             "\n".join(json.dumps(p, ensure_ascii=False) for p in pages), encoding="utf-8")
+    if reconciliation is not None:
+        (d / "reconciliation.json").write_text(
+            json.dumps(reconciliation, ensure_ascii=False), encoding="utf-8")
     ad = d / "assets"
     ad.mkdir(exist_ok=True)
     for name in (assets or []):
@@ -62,7 +65,19 @@ def _write_staging(d, *, blocks, windows, report, pages=None, assets=None):
 def _ok_report(**extra):
     r = {"selected_backend": "pymupdf", "source_type": "native_pdf",
          "backend_reason": "default native pdf→pymupdf", "page_count": 2,
-         "scan_suspected": False, "ocr_used": False}
+         "scan_suspected": False, "ocr_used": False, "dual_audit_required": True}
+    r.update(extra)
+    return r
+
+
+def _ok_reconciliation(**extra):
+    # 一份"双审通过"的 reconciliation（native_pdf，PyMuPDF primary + MinerU 复读一致）。
+    r = {"generated_by": "source-audit", "source_id": "s", "source_type": "native_pdf",
+         "primary_backend": "pymupdf", "review_backend": "mineru",
+         "review_status": "cross_checked", "dual_audited": True, "production_accepted": True,
+         "degraded": False, "degraded_reason": "", "mineru_status": "used", "input_hash": "h",
+         "page_count_primary": 2, "page_count_review": 2, "pages_cross_checked": [1, 2],
+         "agreements": 2, "disagreements": [], "missing_evidence": []}
     r.update(extra)
     return r
 
@@ -234,6 +249,49 @@ def test_check_window_contract_flags_char_fallback():
     assert "w0" in c["detail"]
 
 
+# ---- check_dual_audit（PyMuPDF + MinerU 双审验收契约）----
+
+def test_check_dual_audit_cross_checked_ok():
+    c = pe.check_dual_audit(_ok_reconciliation(), _ok_report())
+    assert c["name"] == "dual_audit" and c["status"] == "ok"
+
+
+def test_check_dual_audit_not_applicable_for_markdown():
+    c = pe.check_dual_audit({}, _ok_report(source_type="markdown", dual_audit_required=False))
+    assert c["status"] == "ok" and c["severity"] == "info"
+
+
+def test_check_dual_audit_missing_reconciliation_for_pdf_fails():
+    # PDF 但没跑 source-audit（无 reconciliation.json）→ high/fail（验收要求双审证据）。
+    c = pe.check_dual_audit({}, _ok_report())
+    assert c["status"] == "fail" and c["severity"] == "high"
+    assert "reconciliation" in c["detail"] or "双审" in c["detail"]
+
+
+def test_check_dual_audit_degraded_no_review_fails():
+    # PyMuPDF-only（MinerU 缺）→ not dual-audited → high/fail（strict 不放行）。
+    rec = _ok_reconciliation(review_status="degraded_no_review", dual_audited=False,
+                             degraded=True, production_accepted=False, review_backend=None,
+                             degraded_reason="mineru unavailable", missing_evidence=["mineru_review"])
+    c = pe.check_dual_audit(rec, _ok_report())
+    assert c["status"] == "fail" and c["severity"] == "high"
+
+
+def test_check_dual_audit_review_failed_fails():
+    rec = _ok_reconciliation(review_status="review_failed", dual_audited=False, degraded=True,
+                             production_accepted=False, review_backend=None,
+                             degraded_reason="mineru crashed", missing_evidence=["mineru_review"])
+    c = pe.check_dual_audit(rec, _ok_report())
+    assert c["status"] == "fail" and c["severity"] == "high"
+
+
+def test_check_dual_audit_disagreements_warn():
+    rec = _ok_reconciliation(disagreements=[{"page": 2, "kind": "table_presence",
+                                             "primary": True, "review": False}])
+    c = pe.check_dual_audit(rec, _ok_report())
+    assert c["status"] == "warn" and c["severity"] == "warn"
+
+
 # ---- check_risk_signals ----
 
 def test_check_risk_signals_info_when_clean():
@@ -335,7 +393,9 @@ def test_evaluate_includes_detection_distribution_warn(tmp_path):
     blocks = [_block("b1", 1, 0, 200)]
     ws = [_window("w0", 0, 200, ["b1"], ps=1, pe_=1, refs=["p0001#b1"])]
     d = _write_staging(tmp_path / "d", blocks=blocks, windows=ws, report=_ok_report(page_count=1),
-                       pages=[{"page": i, "needs_vision": True} for i in range(1, 11)])
+                       pages=[{"page": i, "needs_vision": True} for i in range(1, 11)],
+                       reconciliation=_ok_reconciliation(page_count_primary=1, page_count_review=1,
+                                                         pages_cross_checked=[1], agreements=1))
     rep = pe.evaluate(d)
     dd = next(c for c in rep["checks"] if c["name"] == "detection_distribution")
     assert dd["status"] == "warn"
@@ -349,7 +409,8 @@ def test_evaluate_all_ok(tmp_path):
     ws = [_window("w0", 0, 200, ["b1", "b2"], ps=1, pe_=2,
                   refs=["p0001#b1", "p0002#b2"])]
     d = _write_staging(tmp_path / "good", blocks=blocks, windows=ws,
-                       report=_ok_report(), pages=[{"page": 1}, {"page": 2}])
+                       report=_ok_report(), pages=[{"page": 1}, {"page": 2}],
+                       reconciliation=_ok_reconciliation())
     rep = pe.evaluate(d)
     assert rep["generated_by"] == "preflight-eval"
     assert rep["source_id"] == "good"
@@ -358,9 +419,9 @@ def test_evaluate_all_ok(tmp_path):
     names = {c["name"] for c in rep["checks"]}
     assert names == {"artifact_schema", "page_coverage", "window_monotonic", "window_contract",
                      "asset_traceability", "risk_signals", "orphan_blocks", "source_ref_integrity",
-                     "detection_distribution"}
+                     "detection_distribution", "dual_audit"}
     assert rep["summary"]["fail"] == 0
-    assert rep["summary"]["ok"] >= 8
+    assert rep["summary"]["ok"] >= 9
 
 
 def test_evaluate_flags_missing_page_as_fail(tmp_path):
@@ -379,11 +440,34 @@ def test_evaluate_low_confidence_pages_warn(tmp_path):
     blocks = [_block("b1", 1, 0, 200)]
     ws = [_window("w0", 0, 200, ["b1"], ps=1, pe_=1, refs=["p0001#b1"])]
     d = _write_staging(tmp_path / "lc", blocks=blocks, windows=ws,
-                       report=_ok_report(page_count=1, low_confidence_pages=[1]))
+                       report=_ok_report(page_count=1, low_confidence_pages=[1]),
+                       reconciliation=_ok_reconciliation(page_count_primary=1, page_count_review=1,
+                                                         pages_cross_checked=[1], agreements=1))
     rep = pe.evaluate(d)
     rs = next(c for c in rep["checks"] if c["name"] == "risk_signals")
     assert rs["status"] == "warn"
     assert rep["summary"]["warn"] >= 1
+
+
+def test_evaluate_includes_dual_audit_ok(tmp_path):
+    blocks = [_block("b1", 1, 0, 100), _block("b2", 2, 100, 200)]
+    ws = [_window("w0", 0, 200, ["b1", "b2"], ps=1, pe_=2, refs=["p0001#b1", "p0002#b2"])]
+    d = _write_staging(tmp_path / "da", blocks=blocks, windows=ws, report=_ok_report(),
+                       reconciliation=_ok_reconciliation())
+    rep = pe.evaluate(d)
+    da = next(c for c in rep["checks"] if c["name"] == "dual_audit")
+    assert da["status"] == "ok"
+
+
+def test_evaluate_pdf_without_reconciliation_flags_dual_audit_fail(tmp_path):
+    # PDF 源跑了预处理但没跑 source-audit（无 reconciliation.json）→ dual_audit high/fail。
+    blocks = [_block("b1", 1, 0, 200)]
+    ws = [_window("w0", 0, 200, ["b1"], ps=1, pe_=1, refs=["p0001#b1"])]
+    d = _write_staging(tmp_path / "nd", blocks=blocks, windows=ws, report=_ok_report(page_count=1))
+    rep = pe.evaluate(d)
+    da = next(c for c in rep["checks"] if c["name"] == "dual_audit")
+    assert da["status"] == "fail" and da["severity"] == "high"
+    assert rep["summary"]["fail"] >= 1
 
 
 # ---- pipeline preflight-eval CLI（--source / --strict / --json + 退出码语义） ----
@@ -397,7 +481,8 @@ def test_cli_preflight_eval_ok_writes_default_json(tmp_path):
     blocks = [_block("b1", 1, 0, 100), _block("b2", 2, 100, 200)]
     ws = [_window("w0", 0, 200, ["b1", "b2"], ps=1, pe_=2, refs=["p0001#b1", "p0002#b2"])]
     _staging_under_root(tmp_path, "good", blocks=blocks, windows=ws,
-                        report=_ok_report(), pages=[{"page": 1}, {"page": 2}])
+                        report=_ok_report(), pages=[{"page": 1}, {"page": 2}],
+                        reconciliation=_ok_reconciliation())
     r = _run(["preflight-eval", "--source", "good"], tmp_path)
     assert r.returncode == 0, r.stderr
     out_json = tmp_path / "pipeline-workspace" / "staging" / "good" / "preflight_eval.json"
@@ -428,9 +513,19 @@ def test_cli_preflight_eval_strict_nonzero_on_fail(tmp_path):
 def test_cli_preflight_eval_strict_zero_when_all_ok(tmp_path):
     blocks = [_block("b1", 1, 0, 100), _block("b2", 2, 100, 200)]
     ws = [_window("w0", 0, 200, ["b1", "b2"], ps=1, pe_=2, refs=["p0001#b1", "p0002#b2"])]
-    _staging_under_root(tmp_path, "good", blocks=blocks, windows=ws, report=_ok_report())
+    _staging_under_root(tmp_path, "good", blocks=blocks, windows=ws, report=_ok_report(),
+                        reconciliation=_ok_reconciliation())
     r = _run(["preflight-eval", "--source", "good", "--strict"], tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_cli_preflight_eval_strict_fails_pdf_without_dual_audit(tmp_path):
+    # 端到端：PDF 源但缺 reconciliation.json（未跑 source-audit）→ strict fail-closed（双审契约）。
+    blocks = [_block("b1", 1, 0, 200)]
+    ws = [_window("w0", 0, 200, ["b1"], ps=1, pe_=1, refs=["p0001#b1"])]
+    _staging_under_root(tmp_path, "nd", blocks=blocks, windows=ws, report=_ok_report(page_count=1))
+    r = _run(["preflight-eval", "--source", "nd", "--strict"], tmp_path)
+    assert r.returncode != 0
 
 
 def test_cli_preflight_eval_custom_json_path(tmp_path):

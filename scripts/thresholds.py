@@ -65,6 +65,9 @@ LESSON_MIN_BODY = _int("STUDY_KB_LESSON_MIN_BODY", 80)     # lesson 正文最小
 # ── 观测：preflight-eval 检测分布告警 ──
 DETECT_RATIO_HIGH = _float("STUDY_KB_DETECT_RATIO_HIGH", 0.90)  # needs_vision 比例> → 疑过召回（warn）
 
+# ── source-audit 双审互检（验收期；不折进 profile/convert 缓存键——只影响 reconciliation，不改抽取产物）──
+RECONCILE_PAGECOUNT_TOL = _int("STUDY_KB_RECONCILE_PAGECOUNT_TOL", 1)  # |primary−review| 页数差> → page_count_mismatch 分歧
+
 # 折进缓存键的检测/路由阈值（不含纯观测/门禁项；改这些才需对 profile/convert 重算）。
 _CACHE_KEYED = (
     "FORMULA_STRONG", "FORMULA_BORDERLINE", "EQ_LINES_MIN", "CODE_HINT_MIN",

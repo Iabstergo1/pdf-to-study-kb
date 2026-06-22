@@ -15,7 +15,8 @@ from pathlib import Path
 # 使格式升级失效缓存、强制对任意来源重产（与 PROFILER_VERSION/WINDOWING_VERSION 同规）。
 # v2: SourceBlock 增 chapter_id（page→章映射）+ parse_report 增 source_type/backend_reason。
 # v3: SourceBlock 增 element_id（table→t{n} / image·chart→f{n}，稳定 id；跨页表片段共享）。
-ARTIFACT_VERSION = "3"
+# v4: parse_report 增 dual_audit_required；新增 reconciliation.json 契约（PyMuPDF + MinerU 双审）。
+ARTIFACT_VERSION = "4"
 
 
 @dataclass
@@ -70,12 +71,15 @@ class RoutingAdvice:
 
 def build_parse_report(selected_backend: str, *, input_hash: str,
                        routing_advice: "RoutingAdvice", warnings=None,
-                       consumed_by_auto_router: bool = False, **extra) -> dict:
+                       consumed_by_auto_router: bool = False,
+                       dual_audit_required: bool = False, **extra) -> dict:
     """组装 parse_report.json（advisory-only）。强制信封常量，避免漏写/误写。
 
     强制 advisory 契约：`routing_advice.advisory_only` 永远 True（即使调用方误传 False）；
     `consumed_by_auto_router` 默认 False，**仅** auto router 实际据 advice/信号做路由时（Spec 2）
     才由调用方显式置 True。
+    `dual_audit_required`：本源是否要求 PyMuPDF + MinerU 双审（PDF 类恒 True；严格验收靠
+    reconciliation.json 兑现，见 source_audit）。默认 False（md/docx/pptx 等非 PDF）。
     mineru_status 默认 "not_checked"（Spec 1）；MinerU backend 可经 extra 覆盖为 "used"/失败值。
     extra：per-backend 附加字段（pymupdf: page_count/block_count/needs_vision_pages/
     risk_flag_counts；markdown: section_count/heading_count/block_count；mineru: 见 mineru_backend）。
@@ -90,6 +94,7 @@ def build_parse_report(selected_backend: str, *, input_hash: str,
         "input_hash": input_hash,
         "routing_advice": ra,
         "mineru_status": "not_checked",
+        "dual_audit_required": bool(dual_audit_required),
         "warnings": list(warnings or []),
     }
     report.update(extra)
@@ -97,6 +102,60 @@ def build_parse_report(selected_backend: str, *, input_hash: str,
 
 
 def write_parse_report(path, report: dict) -> str:
+    text = json.dumps(report, ensure_ascii=False, indent=2)
+    Path(path).write_text(text, encoding="utf-8")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# ── dual-audit reconciliation 契约（source_audit 产出 / preflight 验收的事实层）──────
+# reconciliation.json 是 PyMuPDF（primary 抽取）与 MinerU（structural reviewer）一次确定性
+# 互检的可审计记录：哪个后端给了哪类证据、对了哪些页、哪里不一致、是否被接受、是否降级。
+# 本模块只定义形状 + 序列化（零业务逻辑）；互检比对逻辑在 source_audit.py。
+
+_RECONCILIATION_REQUIRED = (
+    "source_id", "source_type", "primary_backend", "review_backend", "review_status",
+    "dual_audited", "production_accepted", "degraded", "mineru_status",
+    "page_count_primary")
+
+
+def build_reconciliation_report(*, source_id: str, source_type: str, primary_backend: str,
+                                review_backend, review_status: str, dual_audited: bool,
+                                production_accepted: bool, degraded: bool, mineru_status: str,
+                                input_hash: str, page_count_primary: int,
+                                degraded_reason: str = "", page_count_review=None,
+                                pages_cross_checked=None, agreements: int = 0,
+                                disagreements=None, missing_evidence=None) -> dict:
+    """组装 reconciliation.json。强制必备字段齐全、非 vague——验收要用的字段不得缺省成
+    "unknown"/None（review_backend 在"无审"时确为 None，是显式语义而非缺省占位）。
+
+    review_status ∈ {cross_checked, degraded_no_review, review_failed}；
+    primary_backend ∈ {pymupdf, mineru, markdown}；review_backend ∈ {mineru, None}。
+    disagreements: list[{page, kind, primary, review}]；missing_evidence: list[str]。
+    """
+    return {
+        "generated_by": "source-audit",
+        "source_id": source_id,
+        "source_type": source_type,
+        "primary_backend": primary_backend,
+        "review_backend": review_backend,
+        "review_status": review_status,
+        "dual_audited": bool(dual_audited),
+        "production_accepted": bool(production_accepted),
+        "degraded": bool(degraded),
+        "degraded_reason": degraded_reason,
+        "mineru_status": mineru_status,
+        "input_hash": input_hash,
+        "page_count_primary": int(page_count_primary),
+        "page_count_review": page_count_review,
+        "pages_cross_checked": list(pages_cross_checked or []),
+        "agreements": int(agreements),
+        "disagreements": list(disagreements or []),
+        "missing_evidence": list(missing_evidence or []),
+    }
+
+
+def write_reconciliation(path, report: dict) -> str:
+    """落盘 reconciliation.json，返回内容 sha256（确定性，与 parse_report 同序列化规约）。"""
     text = json.dumps(report, ensure_ascii=False, indent=2)
     Path(path).write_text(text, encoding="utf-8")
     return hashlib.sha256(text.encode("utf-8")).hexdigest()

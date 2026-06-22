@@ -15,12 +15,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import thresholds  # 观测阈值（env 可覆盖）
+import source_audit  # PDF_TYPES（双审适用范围单一真值）
 
 # 严重度排序：high > warn > info（strict 判定取 high）。状态：ok / warn / fail。
 __all__ = ["evaluate", "check_artifact_schema", "check_page_coverage",
            "check_window_monotonic", "check_window_contract", "check_asset_traceability",
-           "check_risk_signals", "check_orphan_blocks", "check_source_ref_integrity",
-           "check_detection_distribution"]
+           "check_dual_audit", "check_risk_signals", "check_orphan_blocks",
+           "check_source_ref_integrity", "check_detection_distribution"]
 
 # 四层必备字段契约（artifact contract gate）：
 _REQUIRED_REPORT = ("source_type", "selected_backend", "backend_reason")   # L1
@@ -154,6 +155,40 @@ def check_asset_traceability(staging_dir, blocks: list, windows: list) -> dict:
     return _check("asset_traceability", "high", "ok", "全部视觉块可追溯到 asset 或文本")
 
 
+def check_dual_audit(reconciliation: dict, report: dict) -> dict:
+    """PDF 双审验收（dual-audit 契约，item 10）：reconciliation.json 须存在且兑现
+    PyMuPDF（primary）+ MinerU（structural reviewer）双审。
+
+    PyMuPDF 阈值刻意宽、不可作单一真值——本检查把"是否真正双审"从口头约定变成可 CI 化的硬门。
+    - 非 PDF（dual_audit_required=False 且 source_type 非 PDF 类）→ info/ok（不适用）。
+    - PDF 但无 reconciliation（未跑 source-audit）→ high/fail（验收要求双审证据）。
+    - review_status ∈ {degraded_no_review, review_failed} 或 dual_audited=False（PyMuPDF-only，
+      未真正双审）→ high/fail（strict 不放行，生产不接受）。
+    - cross_checked 但有结构分歧 → warn（可见，不阻断接受）。否则 → ok。"""
+    pdf = (report.get("source_type") in source_audit.PDF_TYPES
+           or bool(report.get("dual_audit_required")))
+    if not pdf:
+        return _check("dual_audit", "info", "ok", "非 PDF 源，PyMuPDF+MinerU 双审不适用")
+    if not reconciliation:
+        return _check("dual_audit", "high", "fail",
+                      "PDF 源缺 reconciliation.json（未跑 source-audit）：验收要求 PyMuPDF+MinerU 双审证据")
+    status = reconciliation.get("review_status", "")
+    dual = bool(reconciliation.get("dual_audited"))
+    dis = reconciliation.get("disagreements") or []
+    detail = (f"primary={reconciliation.get('primary_backend')} "
+              f"review={reconciliation.get('review_backend')} status={status} "
+              f"cross_checked={len(reconciliation.get('pages_cross_checked') or [])}页 "
+              f"disagreements={len(dis)}")
+    if status in ("degraded_no_review", "review_failed") or not dual:
+        reason = reconciliation.get("degraded_reason") or status or "not dual-audited"
+        return _check("dual_audit", "high", "fail",
+                      f"PDF 未真正双审（{status}）：{reason}；PyMuPDF-only 不算生产验收通过。" + detail)
+    if dis:
+        return _check("dual_audit", "warn", "warn",
+                      detail + "：PyMuPDF/MinerU 结构有分歧，建议复核（不阻断接受）")
+    return _check("dual_audit", "high", "ok", detail)
+
+
 def check_risk_signals(report: dict, *, low_confidence_pages: list) -> dict:
     """OCR/扫描风险。**硬规则**：扫描件/疑似扫描却没走 OCR（ocr_used=False）→ 扫描内容可能被当
     文本悄悄丢失（最危险）→ high/fail。其余：low_confidence_pages 非空 → warn（提示复核）；否则 ok。"""
@@ -250,6 +285,10 @@ def evaluate(staging_dir) -> dict:
     rp = d / "parse_report.json"
     if rp.exists():
         report = json.loads(rp.read_text(encoding="utf-8"))
+    reconciliation = {}                              # source-audit 双审证据（PDF 验收用；可缺）
+    rcp = d / "reconciliation.json"
+    if rcp.exists():
+        reconciliation = json.loads(rcp.read_text(encoding="utf-8"))
 
     # page_count：优先 parse_report；缺则用 blocks 的最大 page（保守，不伪造缺页）。
     page_count = int(report.get("page_count") or 0)
@@ -262,6 +301,7 @@ def evaluate(staging_dir) -> dict:
         check_window_monotonic(windows),
         check_window_contract(windows),
         check_asset_traceability(d, blocks, windows),
+        check_dual_audit(reconciliation, report),
         check_risk_signals(report, low_confidence_pages=report.get("low_confidence_pages", [])),
         check_orphan_blocks(blocks, windows),
         check_source_ref_integrity(blocks, windows),

@@ -85,7 +85,7 @@ python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yam
 > 默认 fast path 视觉保真走 route B：`source-convert` 用 PyMuPDF 抽文本，**难页（公式 / 矢量图 / 表 / 图表标题）高召回渲染整页 PNG**，由 ingest **读图**保真（公式写 KaTeX）。fast path 不依赖重型 OCR/ML。
 
 > [!TIP]
-> **可选 MinerU 结构化后端（扫描件 / 低文本 PDF / DOCX / PPTX / 复杂表格·公式·图片）**：装它后 `--backend auto` 会把这些源自动路由给 MinerU（未装则 fail-closed、不伪装成功）。一键按机型装：
+> **MinerU 结构化后端（PDF 验收的必需 structural reviewer + 扫描 / 低文本 PDF、DOCX / PPTX 的 primary 解析）**：`source-audit` 用 MinerU 复核每个 PDF 的 PyMuPDF 抽取（双审 → `reconciliation.json`，因 PyMuPDF 阈值刻意宽、不可作单一真值），**strict / 生产验收必需、MinerU 不可用即 fail-closed**；`--backend auto` 亦把扫描 / 低文本 / DOCX / PPTX 自动路由给 MinerU（未装则 fail-closed、不伪装成功）。一键按机型装：
 > ```bash
 > python scripts/install_mineru.py        # 装 mineru[core]，再据 nvidia-smi 自动换匹配的 CUDA torch；无 GPU 则保留 CPU
 > python scripts/install_mineru.py --dry-run   # 先看将执行的命令
@@ -169,7 +169,7 @@ flowchart TD
 
 | 层 | 承担者（脚本/产物） | 做什么 | 关键字段 |
 |------|------|------|------|
-| **L1 解析** | `source_profile` / `source_convert` / `source_backends` | 区分 native PDF / 扫描·低文本 PDF / 图文表混排 PDF / DOCX / PPTX / Markdown，分别走 PyMuPDF 抽文本＋难页整页渲图（route B）、或可选 **MinerU** 结构化解析；MinerU 不可用 **fail-closed**（绝不伪装成功） | `parse_report.json`：`source_type` · `backend_reason` · `selected_backend` · `scan_suspected` · `ocr_used` |
+| **L1 解析 + 双审** | `source_profile` / `source_convert` / `source_backends` / `source_audit` | PyMuPDF 抽文本＋难页整页渲图（route B）作 extraction 路径；**MinerU 是每个 PDF 的必需 structural reviewer**——`source-audit` 跑 PyMuPDF×MinerU 双审、记录分歧 / 接受 / 降级；扫描·低文本 PDF、DOCX / PPTX 由 MinerU primary 解析；MinerU 不可用 **fail-closed**（绝不伪装成功） | `parse_report.json`：`source_type` · `backend_reason` · `selected_backend` · `dual_audit_required` ＋ `reconciliation.json`：`dual_audited` · `review_status` · `disagreements` · `degraded` |
 | **L2 结构还原** | `blocks.jsonl` · `chapters.json` · `parse_report.json` · `assets/` | 保留页码、标题层级、章节、段落、表格、图片、公式；表/图/chart/公式可追踪到页码与来源；页眉/页脚/页码/discarded 不污染正文、但在报告可审计 | block：`page` · `block_id` · `type` · `heading_path` · `chapter_id` · `source_ref` · `risk_flags` · `element_id`（表→`t{n}` / 图→`f{n}`，跨页表片段共享 id） |
 | **L3 切片/窗口** | `windowing` · `windows.jsonl` | window 只是**确定性读取单位**（不是语义页面规划）；block-aware、顺序稳定、可追溯；**长表不切**——含表/图的段整块打包，绝不把一张表切到两窗 | window：`source_id` · `chapter_title` · `page_start`–`page_end` · `block_ids` · `contains` · `assets` · `risk_flags` · `source_refs` |
 | **L4 调用与评测** | `source-preflight` · `ingest` · `workorder` · `lint` · **`preflight-eval`** | **不实现 RAG 工具**（无 search_PDF / 向量召回 / LLM 评判），只补 CLI 与产物协议；新增确定性验收门 **`preflight-eval`**：查页码覆盖、窗口单调无洞、asset 与 source_ref 可追溯、扫描/OCR 风险、孤儿块、四层字段契约 | `preflight_eval.json`：8 项检查 + summary；`--strict` 遇 high/fail **非零退出**（可挂 CI / 作转 ingest 前的硬门） |
