@@ -1,66 +1,105 @@
-# PDF to Study KB — Claude Code 项目指令
+# PDF to Study KB — Claude Code project truth
 
-> 本文件是 **Claude Code 理解本项目的唯一真值**（Codex 对应 `AGENTS.md`，内容对等、调同一套 CLI）。
-> 详细运行时协议在 `docs/skill-runtime/*`（skill 执行时按需加载）。其余历史设计文档已删除，**请勿参照已删除的文档开展工作**。
+> This file is the **single source of truth for Claude Code** (Codex reads `AGENTS.md`; the two are
+> content-equivalent and drive the same CLI). Runtime protocols live in `docs/skill-runtime/*` (loaded by
+> skills on demand). Older design docs were deleted — **do not work from deleted docs.**
 
-## 1. 本质
+## 1. What this is
 
-把多来源文档（PDF/DOCX/PPTX/MD）**用对话**增量编译进一个本地、跨领域、按概念导航、越长越互联的 Obsidian 学习知识库（llm-wiki 模式）。**确定性 Python CLI 保证可重复 / 可观测 / 安全；唯一的 LLM 是人触发的对话式 skill，负责高价值的写作与跨页归并。** 产出是"知识网"而非"翻译稿"：概念/主题为主，lessons 跟随源 TOC 为辅。
+Compile multi-format sources (PDF/DOCX/PPTX/MD) **through conversation** into one local, cross-domain,
+concept-navigated Obsidian study knowledge base (llm-wiki). A **deterministic, zero-LLM Python CLI**
+guarantees reproducibility, observability, and safety; the **only LLM is a human-triggered conversational
+skill** that does the high-value writing and cross-page merging. The output is a knowledge web, not a
+translation: concepts/topics lead, lessons follow the source TOC.
 
-## 2. 架构（两层 + 两 agent）
+## 2. Architecture (two layers + two agents)
 
-- **确定性执行层** `scripts/pipeline.py`（零 LLM）：预处理 + 后置 lint 门禁 + 索引重建 + 单一业务 SQLite 状态机/锁。**全部业务逻辑在此**，由 `tests/` 覆盖。
-- **对话编排层** `.claude/skills/<name>/SKILL.md`（Claude）/ Codex 侧 skill：自然语言指令 + 流程编排，**不承载业务 Python**，通过 shell 调同一 CLI。
-- 两 agent 共享同一 `pipeline.py` 与同一 `wiki/` vault；Claude 读本文件，Codex 读 `AGENTS.md`。
+- **Deterministic layer** `scripts/pipeline.py` (zero LLM): preprocessing + post-write lint gate + index
+  rebuild + a single business SQLite state machine / locks. **All business logic lives here**, covered by `tests/`.
+- **Orchestration layer** `.claude/skills/<name>/SKILL.md` (Claude) / `.agents/skills/<name>/SKILL.md`
+  (Codex): natural-language orchestration, **no business Python** — it shells the same CLI.
+- Both agents share one `pipeline.py` and one `wiki/` vault.
 
 ```text
-ingest skill 编排预处理（零 LLM）：add-source → profile → source-convert → source-audit（PyMuPDF×MinerU 双审）→ windows → workorder
-   ↓ 同一会话（唯一 LLM）：读 chapters.json 全书章节图 + source.md/难页图 → 按章写 status:proposed 页（难页按类型嵌原图）+ 概念归一 + 综合层
-   ↓ 同一会话收尾（零 LLM）：确定性 lint → promote(proposed→published) 或 回滚+Review-Queue → 重建 index/registry/aliases
+preprocess (zero LLM):  add-source → profile → source-convert → source-audit → windows → workorder
+same session (the LLM): read chapters.json (whole-book map) + source.md / hard-page images
+                        → write status:proposed pages (hard pages embed source images by type)
+                        → concept resolution → synthesis layer
+finish (zero LLM):      lint → promote(proposed→published) or rollback + Review-Queue → rebuild index/registry/aliases
 ```
 
-## 3. 六条核心约束
+## 3. Core constraints
 
-1. **预处理/收尾零 LLM**（确定性 CLI）；唯一 LLM 是人触发的对话式 skill，不做无人值守批处理。
-2. **不拆分**：不让 LLM 做语义 unit 规划/审批；长源用确定性 processing windows（TOC/标题/页码/token 滑窗）读取。
-3. **概念去重**：所有 concept 创建/更新走单一 `resolve-concept`，命中 `canonical_id` 即合并、**绝不新建重复页**；`_registry.yaml`/`aliases.md` 为派生文件，skill 不手写。
-4. **两阶段发布**：skill 只写 `status: proposed`；收尾门禁过才 promote 到 `published` 并入 index，失败回滚（`pipeline-workspace/snapshots/`，默认非 git）+ 进 `Review-Queue/`。
-5. **覆盖保护**：写已存在页须"在 work-order snapshot 中 + `managed_by != human` + hash 一致"，否则拒写、出 proposal。**绝不静默修改由 human 维护的页面。**
-6. **fail-closed lint**：断链、缺必需小节、孤儿页（未记账归属）、重复 canonical_id、公式页缺源图——任一不过即阻断发布。
+1. **Preprocessing & finishing are zero-LLM** (deterministic CLI); the only LLM is the human-triggered skill, never unattended batch.
+2. **No splitting:** the LLM never plans/approves semantic units; long sources are read via deterministic processing windows (TOC / heading / page / token sliding window).
+3. **Concept dedup:** every concept create/update goes through the single `resolve-concept`; a `canonical_id` hit merges, **never creates a duplicate**. `_registry.yaml` / `aliases.md` are derived — skills never hand-write them.
+4. **Two-phase publish:** skills only write `status: proposed`; the finishing gate promotes to `published` and indexes it; failure rolls back (`pipeline-workspace/snapshots/`) + enqueues to `Review-Queue/`.
+5. **Overwrite protection:** writing an existing page requires "in work-order snapshot + `managed_by != human` + hash match"; otherwise refuse and emit a proposal. **Never silently edit a human-owned page.**
+6. **Fail-closed lint:** broken links, missing required sections, orphan pages (unaccounted ownership), duplicate `canonical_id`, formula pages missing their source image — any one blocks publish.
 
-## 4. 命令层（skills 驱动，可自动触发）
+## 4. PDF preprocessing contract (PyMuPDF + MinerU dual-audit)
 
-LLM 能力 = `.claude/skills/{ingest,kb-query,kb-save,kb-review,kb-qa,wiki-lint-semantic,source-preflight,source-xray,skill-evolve}/SKILL.md`，**全部允许模型按 `description` 自动触发**（无 `disable-model-invocation`）。误触发靠 description 负样本压制（"总结这篇/解释/翻译"不进 wiki 流程）；数据安全由 CLI 守卫强制，与是否自动触发正交。其中 `skill-evolve` 是 **skill 自进化**：把反复出现的 lint 失败（`skill-mine` 在 lint 失败时自动聚成 `backlog.yaml`）沉淀成对某 skill 的有界改进，受 `skill-gate`（pytest+双树对等+gate-integrity，候选只许动 skill 两树）守门、人 `skill-adopt` 才合并进双树。详细协议：`docs/skill-runtime/{routing,schema,concept-resolution,save-back-policy}.md`（skill 按需加载）。
+PyMuPDF is the **fast extraction/profiling path**. Its `needs_vision` thresholds are deliberately broad
+and **must not be trusted as a single source of truth**. **MinerU is a required structural reviewer for
+strict PDF acceptance, not an optional fallback.** `source-audit` runs MinerU to re-read each PDF, does a
+deterministic per-page cross-check against PyMuPDF, and writes an auditable `reconciliation.json` (which
+backend produced which evidence, pages cross-checked, disagreements, accepted/degraded, missing evidence).
 
-## 5. 双 agent 协作约定（Claude + Codex）
+- **strict / production:** every PDF must pass the dual-audit; MinerU unavailable or failed → **fail-closed**
+  (no silent fallback to PyMuPDF). Enforced by `preflight-eval --strict` (`check_dual_audit`).
+- **non-strict / dev:** PyMuPDF-only may run for fast local iteration, but `reconciliation.json` marks it
+  `degraded / not dual-audited`; it **cannot** satisfy strict acceptance.
+- Scanned / low-text PDF, DOCX, PPTX use MinerU as the **primary** parser. All backends normalize to one
+  artifact set: `source.md + blocks.jsonl + chapters.json + parse_report.json + reconciliation.json + assets/`.
+- MinerU runs `pipeline` backend only (CLI always `-b pipeline`; vlm/hybrid disabled) — fits a ~4 GB GPU.
+  Install via `python scripts/install_mineru.py` (kept install-optional so the dev path stays lightweight;
+  production must install it).
 
-- **同一时刻同一 vault 只允许一个 ingest**（`source_locks` 强制）。Claude 与 Codex **不得同时对同一库 ingest**；崩溃残留锁用 `python scripts/pipeline.py unlock` 回收。
-- **共享 CLI 是唯一契约**：两 agent 都只调 `scripts/pipeline.py`，**业务逻辑只改这里**，不在各自 skill 里重复实现；改了 CLI 行为要保证两边 skill 仍一致。
-- **续跑锚点 = `pipeline.py next` + digest `## ⏩ RESUME` 块**（不依赖任何会话级 hook）：中断后（上下文压缩 / 模型不可用）说“继续”或由 `scripts/resume-ingest.ps1`（OS 定时器触发，prompt 自带定位逻辑）续跑，都从下一个未完成 window 接上。两 agent 的**共享契约始终是 `pipeline.py` + `digest.md`（含 RESUME 块）+ 字节对等的 skill 双树**，对 Claude / Codex 一致。
-- **解释器统一用项目指定的 `study-kb` conda 环境**（`conda create -n study-kb python=3.12` 后安装 `requirements.txt`：PyMuPDF / PyYAML / pytest；可选 MinerU 结构化后端见 `requirements.txt` 末尾可选段 / `scripts/install_mineru.py`，非默认依赖）；**请勿改用其他解释器**。
-- **生成物非 git**：`wiki/`、`pipeline-workspace/` 已 gitignore，不提交——它们是每机运行时状态。
+## 5. Command layer (skills, model-invocable)
 
-## 6. 真实能力边界（开工前知悉）
+LLM capability = `.claude/skills/{ingest,kb-query,kb-save,kb-review,kb-qa,wiki-lint-semantic,source-preflight,source-xray,skill-evolve}/SKILL.md`,
+all model-invocable by `description` (misfires suppressed by negative samples; data safety enforced by the
+CLI guards, orthogonal to auto-invocation). `skill-evolve` is **skill self-evolution**: recurring lint
+failures (`skill-mine` clusters them into `backlog.yaml`) become bounded edits to a skill, gated by
+`skill-gate` (pytest + dual-tree parity + gate-integrity; candidates may only touch the two skill trees)
+and merged only by a human `skill-adopt`. Protocols: `docs/skill-runtime/{routing,schema,concept-resolution,save-back-policy,skill-standard}.md`.
 
-- **视觉保真 / PDF 双审解析（PyMuPDF 抽取 + MinerU structural review）**：fast path——PDF 经 PyMuPDF 抽纯文本（快，作 profiling/extraction 路径），会拍平上/下标/分数、且看不见矢量图与无框线表；`source-convert` 把每个难页（`needs_vision` 高召回判定：公式页 / 矢量图页[`get_drawings`] / 表格页[`find_tables`] / 图表标题页）渲染为整页 PNG（route B），由 ingest 时 LLM **读图**保真（公式写 KaTeX；lint 硬规则强制 lesson 内嵌源图），`pages.jsonl` 记 `needs_vision_reason` 可审计。**MinerU 是 PDF 验收的必需 structural reviewer（不是可选回退）**：`source-audit` 跑 MinerU 复读同一 PDF、与 PyMuPDF 做确定性逐页互检 → `reconciliation.json`（哪后端给哪证据 / 对了哪些页 / 分歧 / 是否接受 / 是否降级）——因 PyMuPDF 的 `needs_vision` 阈值刻意宽、**不可作单一真值**。strict / 生产验收要求每个 PDF 都过双审，MinerU 不可用即 **fail-closed（不静默回退 PyMuPDF）**；non-strict / dev 可 PyMuPDF-only 但 reconciliation 显式标 `degraded / 未双审`、**不满足 strict 验收**。MinerU 亦作扫描 / 低文本 PDF、DOCX / PPTX 的 primary 结构化抽取，归一成同一套 `source.md + blocks.jsonl + chapters.json + parse_report.json + reconciliation.json + assets/`；低显存 GPU（约 4GB）→ 仅 MinerU `pipeline` 后端（CLI 恒 `-b pipeline`，禁 vlm/hybrid）。
-- **格式覆盖**：`pdf` 经 PyMuPDF 抽取 + MinerU 双审（strict 必需，未装 fail-closed）；`md` 走 fast path；`docx`/`pptx` 与扫描/低文本 PDF 由 MinerU primary 结构化（`--backend auto` 自动路由，`--backend mineru` 强制；未装 fail-closed）。
-- **每本书的入库都是一次需付费的 LLM 操作**，并非导入即用；项目交付时为空库，内容通过运行 ingest 逐步生成。
-- **lint 硬规则**：wikilink 必须全 vault 相对路径（非 Obsidian basename）、必需小节标题逐字、非 source 页（topic/comparison/synthesis/overview）必须进某 window 的 `--writes` 记账——见 ingest skill 阶段 D 速查；未遵守将被门禁拦截。
+## 6. Dual-agent collaboration (Claude + Codex)
 
-## 7. Windows / PowerShell 工具约定
+- **One ingest per vault at a time** (`source_locks`). Claude and Codex **must not ingest the same vault
+  concurrently**; reclaim a crashed lock with `python scripts/pipeline.py unlock`.
+- **The shared CLI is the only contract:** both agents call only `scripts/pipeline.py`; **business logic
+  changes go there**, never duplicated in skills. If you change CLI behavior, keep both skill trees consistent.
+- **Resume anchor = `pipeline.py next` + the digest `## RESUME` block** (no session-level hook): after an
+  interruption say "continue" or let `scripts/resume-ingest.ps1` resume from the next unfinished window.
+- **Interpreter = the project `study-kb` conda env** (`conda create -n study-kb python=3.12`, then
+  `requirements.txt`: PyMuPDF / PyYAML / pytest; optional MinerU per `requirements.txt` / `scripts/install_mineru.py`).
+- **Generated state is not git:** `wiki/` and `pipeline-workspace/` are gitignored per-machine runtime state.
 
-> 本项目在 Windows + PowerShell 7 环境下开发，本节面向 Windows 贡献者；在 macOS / Linux 上，agent 的原生 shell 即标准 Bash，以下 Git Bash 相关事项通常不适用。
+## 7. Capability boundaries
 
-在 Windows 上，Claude Code 的 Bash 工具底层是 Git Bash (MSYS2)，处理含中文的 Windows 路径可能出错。
+- **Format coverage:** `pdf` = PyMuPDF extraction + MinerU dual-audit (strict required, fail-closed if
+  absent); `md` = fast path; `docx`/`pptx` and scanned/low-text PDF = MinerU primary (`--backend auto`
+  routes, `--backend mineru` forces; fail-closed if absent).
+- **Each book's ingest is a paid LLM operation**, not import-and-go; the project ships with an empty vault.
+- **Lint hard rules:** wikilinks must be full vault-relative paths (not Obsidian basenames); required
+  section titles verbatim; non-source pages (topic/comparison/synthesis/overview) must be accounted for in
+  some window's `--writes`.
 
-1. **优先用原生工具**：Glob、Grep、Read、Edit —— 不经过 Bash，无路径问题。
-2. **要执行命令时**：直接调 `pwsh`（PowerShell 7）+ study-kb 解释器，不要用 Git Bash 调 PowerShell。
-3. **禁止**：用 Bash 执行 `powershell -Command "..."` 或 `Select-String` 等。
-4. **UTF-8**：跑 Python 前设 `$env:PYTHONUTF8=1`（中文源/路径）。
+## 8. Windows / PowerShell tooling
 
-## 8. 权威收敛与报告约定
+On Windows, prefer the native tools (Glob/Grep/Read/Edit — no path issues). To run commands, call `pwsh`
+(PowerShell 7) + the study-kb interpreter directly; do not drive PowerShell through Git Bash. Set
+`$env:PYTHONUTF8=1` before Python (CJK sources/paths).
 
-- **本文件 = Claude 的项目真值**；`AGENTS.md` = Codex 的（内容对等）。两者冲突时以行为更安全的一方为准并同步修正。
-- `docs/skill-runtime/*` = skill 运行时协议（保持准确、按需加载），不是"背景文档"。
-- 旧 `docs/`（spec / adr / agents）已删除——请勿参照已删除的文档开展工作；**请勿重新引入 LangGraph / 双 SQLite / plan-units / 逐 unit 孤立生成 / surya 硬管线**（`tests/test_legacy_removed.py` 守卫）。
-- 执行/修复/审阅报告写入项目文件（如 `pipeline-workspace/reports/`），对话中只说一句指引，不复制大段输出。
+## 9. Authority & do-not-reintroduce
+
+- **This file = Claude's project truth;** `AGENTS.md` = Codex's (equivalent). On conflict, prefer the safer
+  behavior and sync both.
+- `docs/skill-runtime/*` = skill runtime protocols (keep accurate, load on demand).
+- Old design docs were deleted — do not work from them. **Do not reintroduce LangGraph / dual business
+  SQLite / plan-units / per-unit isolated generation / the Surya hard-OCR pipeline** (guarded by
+  `tests/test_legacy_removed.py`). MinerU structured parsing is required, not banned — the ban is on the
+  deprecated orchestration, not on OCR/structured parsing.
+- Write execution/fix/review reports to project files (e.g. `pipeline-workspace/reports/`); in chat give a
+  one-line pointer, not large dumps.

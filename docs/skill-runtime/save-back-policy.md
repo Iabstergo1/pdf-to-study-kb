@@ -1,20 +1,24 @@
-# Save-back 准入门槛（spec §7.1）
+# Save-back admission gate
 
-`/kb-save` 写入前必须核对。**至少满足一项**，且不得缺证据（evidence_refs 非空）：
+`/kb-save` must check this before writing. **At least one** must hold, and evidence must be present
+(`evidence_refs` non-empty):
 
-- 形成跨来源综合、模型对比、学习路线、常见误区或自测题；
-- 解决一个会反复出现的学习困惑，并能链接到已有概念/主题；
-- 发现重复概念、别名、跨域提升候选或页面矛盾；
-- 用户明确要求「保存到 wiki / 形成笔记 / 加进 synthesis」。
+- it forms a cross-source synthesis, model comparison, learning path, common-pitfall note, or self-test;
+- it resolves a recurring learning confusion and links to existing concepts/topics;
+- it surfaces a duplicate concept, an alias, a cross-domain promotion candidate, or a page contradiction;
+- the user explicitly asked to "save to the wiki / make a note / add to a synthesis".
 
-## 默认不保存
+## Do not save by default
 
-- 一次性事实查询、普通解释、没有来源支撑的推测、只复述已有页面的答案；
-- 需要覆盖 `managed_by: human` 页或越过 write scope 的答案；
-- 无法链接到现有 source_refs / concept_refs 的内容。
+- one-off fact lookups, ordinary explanations, source-less speculation, or restating an existing page;
+- answers that would overwrite a `managed_by: human` page or exceed the write scope;
+- content that cannot be linked to existing `source_refs` / `concept_refs`.
 
-## 硬约束
+## Hard constraints
 
-- 概念写入仍走 `resolve_or_create_concept` 协议（命中即合并、绝不新建重复）。
-- 全部写出页 `status: proposed`，由收尾 `lint` 决定 promote；Q2 语义判断可阻断。
-- `decision.md` 必须说明：为什么保存 / 写了哪些页 / 引用了哪些证据 / 为什么没有污染已有概念。
+- Concept writes still go through the `resolve_or_create_concept` protocol (merge on hit, never create a
+  duplicate).
+- Every written page is `status: proposed`; the finishing `lint` decides promotion, and a Q2 semantic
+  judgement can block.
+- `decision.md` must record: why it was saved / which pages were written / which evidence was cited /
+  why no existing concept was polluted.

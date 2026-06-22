@@ -1,79 +1,88 @@
 ---
 name: source-preflight
-description: 对新的外部来源先跑确定性预处理链并验收 staging 产物，但不写语义 wiki 页。当用户说“先预处理这个 PDF / 跑 source-preflight / 先生成来源画像 / 先看看能不能 ingest”时使用。只做 add-source、profile、source-convert、windows、workorder 的零 LLM 验收门，不做拆书、摘要、语义 unit 规划或写库。
+description: Run the deterministic preprocessing chain on a new external source and accept its staging artifacts, without writing any semantic wiki pages. Use when the user says "preprocess this PDF first / run source-preflight / build the source profile first / see if it can be ingested". Only the zero-LLM acceptance gate for add-source, profile, source-convert, source-audit, windows, workorder — no book-splitting, summarizing, semantic unit planning, or vault writes.
 ---
 
-# source-preflight — 来源预处理验收门（零 LLM 语义）
+# source-preflight — source preprocessing acceptance gate (zero semantic LLM)
 
-对一个候选来源运行确定性 CLI 预处理链，确认 staging 产物是否足以进入 `ingest`。本 skill 是薄包装：只编排 `scripts/pipeline.py`，不做任何 LLM 语义拆书 / unit 规划 / 写页。
+Run the deterministic CLI preprocessing chain on a candidate source and decide whether its staging
+artifacts are good enough to enter `ingest`. This skill is a thin wrapper: it only orchestrates
+`scripts/pipeline.py` and does **no LLM semantic splitting / unit planning / page writing**. Project truth:
+`CLAUDE.md` / `AGENTS.md`. Engineering format: `docs/skill-runtime/skill-standard.md`.
 
-## 1. 触发 / 负样本
+## 1. Triggers / Non-triggers
 
-- **触发**：「先预处理这个 PDF」「跑 source-preflight」「先生成来源画像」「先看看能不能 ingest」「只跑到 workorder」。
-- **负样本**：「加入知识库/收录」且要写页发布（用 `ingest`）；「总结这本书/拆书」但不入库（用 `source-xray`，且只基于已发布内容）；「查询 wiki」用 `kb-query`；「翻译/解释」普通回答。
+- **Triggers:** "preprocess this PDF first", "run source-preflight", "build the source profile first", "see if it can be ingested", "just run up to workorder".
+- **Non-triggers:** "add to the KB / index it" with page writing (use `ingest`); "summarize/split this book" without ingesting (use `source-xray`, published content only); "query the wiki" (use `kb-query`); "translate/explain" (a normal answer).
 
-## 2. 输入
+## 2. Inputs
 
-- 用户给：原始文件路径 `<path>`、领域 `<domain>`；格式 `<fmt>` 由扩展名推断（pdf/md/docx/pptx）；`<src>` 由文件名派生。
-- 执行前确认一次 `<src>` 与 `<domain>`。
-- 读：`CLAUDE.md` / `AGENTS.md` 的预处理零 LLM 约束、`docs/skill-runtime/schema.md`（理解 workorder 写入边界）。
+- The user gives: file path `<path>`, domain `<domain>`; `<fmt>` inferred from the extension (pdf/md/docx/pptx); `<src>` derived from the filename. Confirm `<src>` and `<domain>` once.
+- Read: the **zero-LLM preprocessing constraint** in `CLAUDE.md` / `AGENTS.md`, and `docs/skill-runtime/schema.md` (to understand the workorder write boundary).
 
-## 3. 输出
+## 3. Outputs
 
-- `pipeline-workspace/staging/<src>/{source.md, blocks.jsonl, chapters.json, parse_report.json, reconciliation.json, windows.jsonl, workorder.yaml, preflight_eval.json}` 与难页 PNG / 图表 asset。
-- 可选的确定性预处理报告：`pipeline-workspace/reports/source-preflight/<src>.md`，读 `parse_report.json` 展示 backend、是否 OCR、table/equation/image 数、discarded（页眉页脚）数、warnings、是否建议 ingest；以及 CLI 状态、页数、needs_vision 页、降级告警、windows 覆盖、workorder `write_scope`，不写语义摘要。
-- `preflight-eval` 的确定性评测 JSON（`preflight_eval.json`）：page 覆盖、窗口单调无洞、table/image/chart asset 与 source_ref 可追溯、扫描/OCR 与低置信页、孤儿块——只读既有产物、不调 LLM；`--strict` 下严重项返回非零退出码（可 CI 化）。
-- 不写 `wiki/` 语义内容页，不创建 `status: proposed` 页面，不更新概念页。
+- `pipeline-workspace/staging/<src>/{source.md, blocks.jsonl, chapters.json, parse_report.json, reconciliation.json, windows.jsonl, workorder.yaml, preflight_eval.json}` + hard-page PNGs / figure assets.
+- An optional deterministic report `pipeline-workspace/reports/source-preflight/<src>.md`: from `parse_report.json` + `reconciliation.json` show backend, dual-audit status (dual_audited / degraded / disagreements), OCR, table/equation/image counts, discarded (header/footer) count, warnings, and an ingest recommendation; plus CLI status, page count, needs_vision pages, degraded warnings, window coverage, workorder `write_scope`. **No semantic summary.**
+- `preflight-eval`'s deterministic JSON (`preflight_eval.json`): page coverage, window monotonicity, table/image/chart asset + source_ref traceability, the **dual-audit gate** (`check_dual_audit`), scan/OCR & low-confidence pages, orphan blocks — reads existing artifacts only, no LLM; `--strict` returns non-zero on a high/fail (CI-able).
+- No semantic wiki content pages, no `status: proposed` pages, no concept-page updates.
 
-## 4. 依赖
+## 4. Dependencies
 
-- CLI：`init-vault`、`add-source`、`profile`、`source-convert`、`source-audit`、`windows`、`workorder`、`preflight-eval`、`status`。
-- 后续真正入库交给 `ingest`，本 skill 不内联 ingest 阶段 B/C/D/E/F。
-- 协议：`docs/skill-runtime/skill-standard.md` 与 `docs/skill-runtime/schema.md`。
+- CLI: `init-vault`, `add-source`, `profile`, `source-convert`, `source-audit`, `windows`, `workorder`, `preflight-eval`, `status`.
+- The actual ingest is handed to `ingest`; this skill does not inline ingest phases B/C/D/E/F.
+- Protocols: `docs/skill-runtime/skill-standard.md` and `docs/skill-runtime/schema.md`.
 
-## 5. 持久化 artifact
+## 5. Persisted artifacts
 
-- `pipeline-workspace/staging/<src>/source.md`
-- `pipeline-workspace/staging/<src>/windows.jsonl`
-- `pipeline-workspace/staging/<src>/workorder.yaml`
-- `pipeline-workspace/staging/<src>/assets/pXXXX.png`（needs_vision 页）
-- `pipeline-workspace/reports/source-preflight/<src>.md`（若写报告，只含确定性事实）
+- `pipeline-workspace/staging/<src>/source.md`, `reconciliation.json`, `windows.jsonl`, `workorder.yaml`.
+- `pipeline-workspace/staging/<src>/assets/pXXXX.png` (needs_vision pages).
+- `pipeline-workspace/reports/source-preflight/<src>.md` (if written, deterministic facts only).
 
-## 6. CLI 命令
+## 6. CLI commands
 
 ```text
 python scripts/pipeline.py init-vault
 python scripts/pipeline.py add-source --source <src> --domain <domain> --path <path> --fmt <fmt>
 python scripts/pipeline.py profile --source <src>
 python scripts/pipeline.py source-convert --source <src>
-python scripts/pipeline.py source-audit --source <src> [--strict]   # PDF 双审：MinerU 复核 PyMuPDF → reconciliation.json
+python scripts/pipeline.py source-audit --source <src> [--strict]   # PDF dual-audit: MinerU reviews PyMuPDF → reconciliation.json
 python scripts/pipeline.py windows --source <src>
 python scripts/pipeline.py workorder --source <src>
 python scripts/pipeline.py preflight-eval --source <src> [--strict]
 python scripts/pipeline.py status
 ```
 
-每步幂等；任一步报错就停止，不跳过。PDF 源须先跑 `source-audit`（PyMuPDF×MinerU 双审 → `reconciliation.json`，因 PyMuPDF 阈值刻意宽、不可作单一真值）；`preflight-eval` 只读既有 staging 产物、零 LLM；`--strict` 下 `dual_audit` 等严重项非零退出——strict 验收要求 PDF 过双审，MinerU 不可用即 fail-closed（dev 可省 source-audit，但 preflight-eval 会标 dual_audit 降级、不算生产验收）。
+Each step is idempotent; on any error, stop — do not skip. A PDF must run `source-audit` first (PyMuPDF
+thresholds are deliberately broad and are not a single source of truth); strict acceptance requires the
+dual-audit to pass, and MinerU unavailable in strict mode is fail-closed. In dev you may omit `source-audit`,
+but `preflight-eval` then flags the `dual_audit` check as degraded — that output is **not production-accepted**.
+`preflight-eval` reads existing staging only, zero LLM; `--strict` exits non-zero on a high/fail (a hard gate before switching to ingest).
 
-## 7. 阶段拆解
+## 7. Workflow
 
-| 子单元 | 输入 | 输出 | 验收 | 持久化 | 停止点 |
+| Sub-unit | Input | Output | Acceptance | Persisted | Failure stop |
 |---|---|---|---|---|---|
-| P1 确认来源 | path/domain/src/fmt | 确认后的四要素 | src/domain 明确 | — | 用户未确认 |
-| P2 跑确定性链 | 四要素 | source/profile/windows/workorder | 每步成功或幂等 skip | staging + SQLite | 任一步报错 |
-| P3 验收产物 | staging 产物 | 可进入 ingest 的判断 | workorder.yaml 存在，windows 覆盖 source.md，preflight-eval 无 high/fail | 报告草稿 | workorder 缺失 / preflight-eval 报 high |
-| P4 公式页检查 | source-convert 输出 | needs_vision/PNG 记录 | 公式风险页须有整页 PNG（route B）| 报告 | 公式页未渲图 |
-| P5 交接 | workorder + 报告 | 下一步建议 | 明确“可转 ingest”或列阻断项 | report | 用户要求写页则转 ingest |
+| P1 confirm source | path/domain/src/fmt | confirmed 4-tuple | src/domain clear | — | user not confirmed |
+| P2 run the chain | 4-tuple | source/profile/convert/audit/windows/workorder | each step succeeds or idempotent-skips | staging + SQLite | any step errors |
+| P3 accept artifacts | staging | ingest-ready judgement | workorder.yaml exists, windows cover source.md, `reconciliation.json` present, preflight-eval no high/fail | report draft | workorder missing / preflight-eval high |
+| P4 dual-audit + formula check | source-audit + source-convert output | dual_audit + needs_vision/PNG record | PDF dual-audited (or degraded recorded); formula pages have a full-page PNG (route B) | report | not dual-audited in strict / formula page unrendered |
+| P5 handoff | workorder + report | next-step suggestion | a clear "ingest-ready" or a blocker list | report | user asks to write pages → switch to ingest |
 
-## 8. 失败停止点
+## 8. Failure stops / recovery
 
-路径不存在；fmt 不支持；CLI 任一步失败；`source-convert` 缺后端；`windows.jsonl` 未覆盖全文；`workorder.yaml` 未生成；公式风险页没有 PNG；`preflight-eval --strict` 报 high/fail（非零退出）；用户要求 LLM 拆书或语义 unit 规划。
+Path missing; unsupported fmt; any CLI step fails; `source-convert` missing backend; PDF dual-audit
+fail-closed in strict (MinerU unavailable); `windows.jsonl` does not cover the full text; `workorder.yaml`
+not generated; a formula risk page has no PNG; `preflight-eval --strict` high/fail (non-zero exit); the user
+asks for LLM unit planning or semantic splitting. **Recovery:** every step is idempotent — fix the cause and
+re-run from the failed step; `pipeline status` shows where it stopped.
 
-## 9. 验收清单
+## 9. Acceptance criteria
 
-- 没有写语义 wiki 页，没有 `status: proposed` 内容页。
-- `source.md`、`windows.jsonl`、`workorder.yaml` 存在。
-- `workorder.yaml` 含 `write_scope` 与 registry hash。
-- needs_vision 页有对应 PNG 或已记录阻断。
-- `preflight-eval` 六项确定性检查无 high/fail（`--strict` 退出 0），或已记录阻断项。
-- 报告只含确定性事实，不含语义摘要/章节解读。
+- No semantic wiki pages written, no `status: proposed` content pages.
+- `source.md`, `reconciliation.json`, `windows.jsonl`, `workorder.yaml` exist.
+- `workorder.yaml` contains `write_scope` and the registry hash.
+- PDF dual-audit recorded (`reconciliation.json` `dual_audited=true`, or a degraded/blocker recorded).
+- needs_vision pages have a PNG, or a blocker is recorded.
+- `preflight-eval` checks have no high/fail (`--strict` exit 0), or a blocker is recorded.
+- The report contains deterministic facts only — no semantic summary / chapter interpretation.

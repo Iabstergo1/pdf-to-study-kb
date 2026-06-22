@@ -1,72 +1,100 @@
 ---
 name: ingest
-description: 把一个新的外部来源（PDF/DOCX/PPTX/Markdown 文件）端到端加入学习知识库——确定性预处理 → 读整源写 status:proposed 页 + 概念归一 → 收尾 lint 发布。当用户说“把这本书/这个 PDF 加进知识库 / ingest <源> / 收录这个文档 / 把这个文件编进 wiki”时使用。仅用于新增外部来源入库；“总结这篇 / 解释这段 / 翻译一下 / 问个常识”等只读请求绝不触发本 skill。
+description: End-to-end add a new external source (PDF/DOCX/PPTX/Markdown) to the study knowledge base — deterministic preprocessing → read the whole source and write status:proposed pages + concept resolution → finish with lint and publish. Use when the user says "add this book/PDF to the KB / ingest <source> / index this document / weave this file into the wiki". Only for ingesting a new external source; read-only requests like "summarize this / explain this / translate this / answer a trivia question" must never trigger it.
 ---
 
-# ingest — 整源端到端织入 wiki（唯一 LLM 写库步骤，总编排）
+# ingest — weave a whole source into the wiki (the only LLM write step; top-level orchestration)
 
-你是知识库的维护者。把用户指定来源**以概念/主题为主**织进 wiki（lessons 跟随源 TOC 为辅），全程遵守 work order 事务协议。
-本文件只做**总编排**；每阶段细节按需读同目录 `references/*`。项目真值见 `AGENTS.md`，工程格式见 `docs/skill-runtime/skill-standard.md`。
+You are the maintainer of the knowledge base. Weave the user's source into the wiki **concept/topic-first**
+(lessons follow the source TOC as a secondary layer), under the work-order transaction protocol the whole
+way. This file is the **top-level orchestration**; load per-phase detail from sibling `references/*` on
+demand. Project truth: `AGENTS.md`. Engineering format: `docs/skill-runtime/skill-standard.md`.
 
-> **薄 skill + 厚 CLI**：执行层是确定性零 LLM CLI（`scripts/pipeline.py`），本 skill 不含业务代码、只编排它。
-> `<src>` = 本次来源 source_id；命令在项目根用 study-kb 解释器运行（Windows 用 pwsh + `$env:PYTHONUTF8=1`）。
+> **Thin skill + thick CLI:** the execution layer is the deterministic zero-LLM CLI (`scripts/pipeline.py`);
+> this skill carries no business code, only orchestrates it. `<src>` = this source's source_id; run commands
+> from the project root with the study-kb interpreter (on Windows: pwsh + `$env:PYTHONUTF8=1`).
 
-## 1. 触发 / 负样本
+## 1. Triggers / Non-triggers
 
-- **触发**：「把这本书/这个 PDF 加进知识库」「ingest \<源\>」「收录这个文档」「把这个文件编进 wiki」。
-- **负样本（绝不触发）**：「总结这篇」「解释这段」「翻译一下」「问个常识」「这个 PDF 讲了什么」（仅询问、未要求入库）。
+- **Triggers:** "add this book/PDF to the KB", "ingest \<source\>", "index this document", "weave this file into the wiki".
+- **Non-triggers (never fire):** "summarize this", "explain this", "translate this", "answer a trivia question", "what is this PDF about" (a question, not an ingest request).
 
-## 2. 输入
+## 2. Inputs
 
-- 用户给：原始文件路径 `<path>`、领域 `<domain>`；格式 `<fmt>` 由扩展名推断（pdf/md/docx/pptx）；`<src>` 由文件名派生（小写、连字符化），**与用户确认一次 `<src>` 与 `<domain>`**。
-- 读：`wiki/_meta/purpose.md`（用户学习目标/讲解偏好；作为贯穿写页与综合层的全局写作偏好，不存在或为空则用默认）、`docs/skill-runtime/{schema,concept-resolution}.md`、`templates/*`、阶段 references。
+- The user gives: file path `<path>`, domain `<domain>`; format `<fmt>` is inferred from the extension
+  (pdf/md/docx/pptx); `<src>` is derived from the filename (lowercase, hyphenated). **Confirm `<src>` and
+  `<domain>` once with the user.**
+- Read: `wiki/_meta/purpose.md` (the user's learning goals / teaching preference, a global writing bias
+  across page-writing and synthesis; default if absent), `docs/skill-runtime/{schema,concept-resolution}.md`,
+  `templates/*`, and the phase references.
 
-## 3. 输出
+## 3. Outputs
 
-- vault 写页一律 `status: proposed` + `managed_by: pipeline`：lessons / concepts / topics / comparisons / synthesis / `sources/<src>.md` / `overview.md`。
-- 派生文件（`_registry.yaml` / `aliases.md` / `index.generated.md`）**不由本 skill 写**，收尾 CLI 重建。
+- Vault writes are always `status: proposed` + `managed_by: pipeline`: lessons / concepts / topics /
+  comparisons / synthesis / `sources/<src>.md` / `overview.md`.
+- Derived files (`_registry.yaml` / `aliases.md` / `index.generated.md`) are **not written by this skill** —
+  the finishing CLI rebuilds them.
 
-## 4. 依赖
+## 4. Dependencies
 
-- CLI：`scripts/pipeline.py`（见各阶段命令）。
-- 协议：`docs/skill-runtime/schema.md`（页面类型/必需小节）、`concept-resolution.md`（归一）。
-- 阶段 references：`references/preflight.md`、`references/write-pages.md`、`references/synthesis.md`、`references/finish-lint.md`。
+- CLI: `scripts/pipeline.py` (commands per phase).
+- Protocols: `docs/skill-runtime/schema.md` (page types / required sections), `concept-resolution.md` (resolution).
+- Phase references: `references/preflight.md`, `references/write-pages.md`, `references/synthesis.md`, `references/finish-lint.md`.
 
-## 5. 持久化 artifact
+## 5. Persisted artifacts
 
-- `pipeline-workspace/staging/<src>/`：`source.md`、`windows.jsonl`、`chapters.json`（确定性章节图 / 导航脊柱）、`workorder.yaml`、难页 PNG、`digest.md`（跨窗滚动摘要）。
-- `ingest_progress`（window 级记账，机器状态）。失败回滚快照在 `pipeline-workspace/snapshots/`。
+- `pipeline-workspace/staging/<src>/`: `source.md`, `blocks.jsonl`, `chapters.json` (deterministic chapter
+  map / navigation spine), `reconciliation.json` (PyMuPDF×MinerU dual-audit), `windows.jsonl`,
+  `workorder.yaml`, hard-page PNGs, `digest.md` (cross-window rolling digest with a `## RESUME` block).
+- `ingest_progress` (per-window accounting, machine state). Rollback snapshots in `pipeline-workspace/snapshots/`.
 
-## 6. CLI 命令（编排次序）
+## 6. CLI commands (orchestration order)
 
 ```text
-预处理(零 LLM)  init-vault → add-source → profile → source-convert → windows → workorder
-开工/逐窗(LLM)   ingest-start → 读 chapters.json 建全书理解 →[ 按章序 window-start → show-window → 写页(难页按类型嵌原图) → window-done --writes ]×N
-综合层(LLM)      阶段 E：更新 overview + 建 topic/comparison/synthesis（进某窗 --writes）——一等产物，缺则 lint 阻断
-收尾(零 LLM)    ingest-done → lint
-增量重开(零 LLM) reopen → ingest-start →[ 逐窗补写 ]→ ingest-done → lint
+preprocess (zero LLM)  init-vault → add-source → profile → source-convert → source-audit → windows → workorder
+start / per-window (LLM)  ingest-start → read chapters.json (build whole-book understanding)
+                          →[ in chapter order: window-start → show-window → write pages (hard pages embed source images by type) → window-done --writes ]×N
+synthesis (LLM)           phase E: update overview + build topic/comparison/synthesis (into some window's --writes) — first-class, lint blocks if missing
+finish (zero LLM)         ingest-done → lint
+incremental reopen        reopen → ingest-start →[ per-window backfill ]→ ingest-done → lint
 ```
 
-> **后端选择 / 读窗（Spec 2）**：`source-convert` 默认 `--backend auto`——Markdown / 普通 born-digital PDF 走轻量 PyMuPDF；扫描 / 低文本密度 PDF、DOCX / PPTX 走可选 MinerU 结构化后端（未装则 fail-closed，不静默回退）。逐窗写页时**优先用 `show-window` 读窗**（输出含 heading_path / page 范围 / block_ids / risk_flags / assets），**不要凭 `source.md` 的 char offset 自行猜范围**；block 模式（MinerU / 结构化源）写页要保留可追溯的 `block_ids` / `source_refs` / `assets`（含 table/equation/image 风险时，收尾 lint 会校验 lesson 的 source_refs 可追溯）。
+> **Backend selection / dual-audit / reading windows:** `source-convert` defaults to `--backend auto` —
+> Markdown / born-digital PDF take the lightweight PyMuPDF path; scanned / low-text PDF, DOCX / PPTX take
+> MinerU (fail-closed if absent, never a silent fallback). **`source-audit` runs the MinerU structural
+> review of every PDF and writes `reconciliation.json`** (PyMuPDF thresholds are deliberately broad and are
+> not a single source of truth); production / strict acceptance requires the dual-audit to pass.
+> When writing each window, **read it via `show-window`** (output carries heading_path / page range /
+> block_ids / risk_flags / assets); **do not guess ranges from `source.md` char offsets.** Block-mode
+> (MinerU / structured) pages keep traceable `block_ids` / `source_refs` / `assets`.
 
-> **reopen（增量补充已发布源）**：要给一个已收尾来源（`lint` 终态 / `ingested`）补综合层 / 公式源图 / worked example / 链接克制时，先 `python scripts/pipeline.py reopen --source <src>`——它据当前 vault 重建 work order（刷新 registry hash + 页快照，使覆盖保护与 registry 校验对当前 published 状态成立）并把状态机重置回 `workorder_ready`，再照常 `ingest-start` 起增量循环。lint 只 promote 本轮新增/改写的 `proposed` 页，既有 `published` 页原样保留（不回滚）。新建的综合页无 `source:` 归属，**务必进某 window 的 `--writes` 记账**否则判孤儿阻断。
+> **reopen (incremental backfill of a published source):** to add synthesis / formula source images /
+> worked examples to an already-finished source, first `python scripts/pipeline.py reopen --source <src>` —
+> it rebuilds the work order against the current vault and resets the state machine to `workorder_ready`;
+> then `ingest-start` as usual. lint only promotes this round's new/edited `proposed` pages; existing
+> `published` pages stay. New synthesis pages have no `source:` owner, so **account for them in some
+> window's `--writes`** or they are flagged orphan and blocked.
 
-## 7. 阶段拆解（按需读 references）
+## 7. Workflow (load references on demand)
 
-| 阶段 | 文件 | 职责 |
+| Phase | File | Responsibility |
 |---|---|---|
-| A 预处理 | `references/preflight.md` | 确定性链 + 验收（needs_vision/降级告警/windows 覆盖） |
-| B+C+D 逐窗写页 | `references/write-pages.md` | 开工守卫 + **先读 chapters.json 建全书理解** + 按章序逐窗子单元 U1–U7 + 按类型嵌入原图 + 写页纪律 + lint 硬规则 |
-| E 综合层 | `references/synthesis.md` | overview/topic/comparison/synthesis 增量维护 |
-| F 收尾 | `references/finish-lint.md` | ingest-done + lint promote/回滚 + 派生重建 |
+| A preprocess | `references/preflight.md` | deterministic chain + dual-audit acceptance (needs_vision / degraded warnings / reconciliation / window coverage) |
+| B+C+D per-window writing | `references/write-pages.md` | start guard + **read chapters.json for whole-book understanding** + per-window sub-units U1–U7 + embed source images by type + writing discipline + lint hard rules |
+| E synthesis | `references/synthesis.md` | incremental overview/topic/comparison/synthesis |
+| F finish | `references/finish-lint.md` | ingest-done + lint promote/rollback + derived rebuild |
 
-## 8. 失败停止点（其余一路自动推进并简报进度）
+## 8. Failure stops / recovery
 
-预处理任一步报错；`check-write` DENY（越界/覆盖保护）；lint 失败；`managed_by: human` 页冲突；跨域提升候选；vault 锁被占。
+Any preprocessing step errors; `check-write` DENY (out of scope / overwrite protection); lint fails;
+`managed_by: human` page conflict; cross-domain promotion candidate; the vault lock is held. **Recovery:**
+after an interruption, re-read `chapters.json` + the digest `## RESUME` block and resume from the next
+unfinished window (`pipeline.py next` is the machine anchor); otherwise auto-advance and report progress.
 
-## 9. 验收清单
+## 9. Acceptance criteria
 
-- 预处理：workorder.yaml 生成、`ingest-start` 取锁 + registry 新鲜校验通过。
-- 写页：每页 `check-write` ALLOW、page_rules 自检 0 违规、非 source 页均进 `window-done --writes`。
-- 综合层（阶段 E 必做）：overview 已更新（非纯链接清单）+ 至少一个 topic/comparison/synthesis，均进 `--writes`；漏做则 `lint` 报 `L7-synthesis-missing` 阻断回滚。
-- 收尾：`lint` 通过（promote 入 index），或失败项进 `Review-Queue/` 并已回滚。
+- Preprocess: `workorder.yaml` generated; `ingest-start` took the lock + the stale-registry check passed;
+  for PDFs, `source-audit` produced `reconciliation.json` and strict `preflight-eval` would pass the dual-audit.
+- Writing: every page `check-write` ALLOW, page_rules self-check 0 violations, every non-source page in a `window-done --writes`.
+- Synthesis (phase E mandatory): overview updated (not a bare link list) + at least one topic/comparison/synthesis, all in `--writes`; otherwise `lint` reports `L7-synthesis-missing` and rolls back.
+- Finish: `lint` passes (promoted into the index), or failures land in `Review-Queue/` and the round is rolled back.

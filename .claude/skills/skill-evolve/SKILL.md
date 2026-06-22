@@ -1,74 +1,85 @@
 ---
 name: skill-evolve
-description: 把一次反复出现的 ingest/lint 失败沉淀成对某个 skill 的有界改进——读 skill-mine 产出的 backlog → 在隔离分支写 bounded SKILL.md 编辑 → 跑 skill-gate（pytest+双树对等+gate-integrity）→ skill-stage 候选，交人 skill-adopt。当用户说“把这次踩的坑沉淀进 skill / evolve skill / 让 skill 自我改进 / 处理 skill backlog 第 N 条”时使用。仅用于改进本项目 skill 自身；“总结这篇 / 解释这段 / 翻译一下 / 把这本书加进知识库（那是 ingest）”绝不触发。
+description: Distill a recurring ingest/lint failure into a bounded improvement to one skill — read the skill-mine backlog → write a bounded SKILL.md edit on an isolated branch → run skill-gate (pytest + dual-tree parity + gate-integrity) → skill-stage the candidate, leaving skill-adopt to a human. Use when the user says "distill this failure into the skill / evolve a skill / let a skill self-improve / handle skill backlog item N". Only for improving this project's own skills; "summarize this / explain this / translate this / add this book to the KB (that is ingest)" must never trigger it.
 ---
 
-# skill-evolve —— 让 skill 在 gate 守护下越用越稳（唯一 LLM，人触发）
+# skill-evolve — make a skill steadier under a gate (the only LLM, human-triggered)
 
-把一个**反复出现**的失败，沉淀成对某个 skill 的**有界改进**；改对没改对由**确定性测试**判，发布由**人**拍板。本 skill 是六条铁律下「人触发的唯一 LLM 动作」，**绝不无人值守批跑**。
+Distill a **recurring** failure into a **bounded improvement** to one skill; whether it's correct is judged
+by **deterministic tests**, and release is decided by a **human**. This is the human-triggered "only LLM
+action" under the core constraints — **never an unattended batch run.** Project truth: `CLAUDE.md` / `AGENTS.md`.
 
-## 1. 触发 / 负样本
+## 1. Triggers / Non-triggers
 
-触发：用户要把反复出现的失败沉淀进某个 skill——“evolve skill / 处理 backlog 第 N 条 / 把这次踩的坑写进 skill / 让某 skill 自我改进”。
+- **Triggers:** the user wants to distill a recurring failure into a skill — "evolve a skill / handle backlog item N / write this lesson into the skill / let a skill self-improve".
+- **Non-triggers (never fire):**
+  - "add this book / PDF to the KB" → that is **ingest**, not a skill edit.
+  - "summarize this / explain this / translate this / query X in the KB" → read-only or ingest/kb-query, unrelated to editing a skill.
+  - a one-off, non-reproducing failure (backlog `count` = 1) → not worth a skill edit.
+  - anything that would need editing `tests/` or `pipeline.py` gate logic to "pass" → out of bounds, refuse.
 
-**负样本（绝不触发）：**
-- “把这本书 / 这个 PDF 加进知识库” → 那是 **ingest**，不是改 skill。
-- “总结这篇 / 解释这段 / 翻译一下 / 查知识库里的 X” → 只读或 ingest/kb-query，与改 skill 无关。
-- 一次性、不复现的失败（backlog `count` = 1）→ 不值得改 skill，不进。
-- 任何需要改 `tests/` 或 `pipeline.py` 的 gate 逻辑才能“通过”的诉求 → 越权，拒绝。
+## 2. Inputs
 
-## 2. 输入
+- The `skill-mine` output `pipeline-workspace/skill-evolution/backlog.yaml`: each entry has `signature / count / sources / sample_reason`.
+- The user-named backlog entry (by `signature` or index).
+- The target skill's `SKILL.md` (both trees) + failure-sample context (`review_proposals` `reason` / Review-Queue items).
 
-- `skill-mine` 产出的 `pipeline-workspace/skill-evolution/backlog.yaml`：每条带 `signature / count / sources / sample_reason`。
-- 用户指定要处理的 backlog 条目（按 `signature` 或序号）。
-- 目标 skill 的 `SKILL.md`（双树两份）+ 失败样例上下文（`review_proposals` 的 `reason` / Review-Queue 条目）。
+## 3. Outputs
 
-## 3. 输出
+- A **bounded edit** to a **single** skill: only a section or two of that `SKILL.md`; **edit both trees in sync, keep them byte-equivalent**.
+- A candidate on an isolated branch + the `skill-stage`-registered proposal `pipeline-workspace/skill-evolution/candidates/<id>/proposal.diff`.
+- **Not published directly:** a candidate is semantically `proposed`; only a human `skill-adopt` merges it into both trees (stage→adopt is the two-phase-publish analogue).
 
-- 对**单个** skill 的 **bounded 编辑**：只动该 `SKILL.md` 的一两个小节；**双树同步改、保持字节对等**。
-- 隔离分支上的候选 + `skill-stage` 登记的提案 `pipeline-workspace/skill-evolution/candidates/<id>/proposal.diff`。
-- **不直接发布**：候选语义等同 `proposed`，须人 `skill-adopt` 才合并进双树（stage→adopt 即两阶段发布的类比）。
+## 4. Dependencies
 
-## 4. 依赖
+- CLI: `skill-mine` (read backlog), `skill-gate` (deterministic gate), `skill-stage` (register a proposal), `skill-adopt` (human accept).
+- Isolation: a git branch / worktree (candidate isolated from mainline).
+- Truth: `CLAUDE.md` / `AGENTS.md` (the core constraints, especially that this is the human-triggered only-LLM action).
+- It **does not** depend on any LLM-judge / training backend / rollout-replay.
 
-- CLI：`skill-mine`（读 backlog）、`skill-gate`（确定性门）、`skill-stage`（登记提案）、`skill-adopt`（人采纳）。
-- 隔离：git 分支 / worktree（候选与线上隔离）。
-- 真值：`CLAUDE.md` / `AGENTS.md`（六条铁律，尤其铁律 #1：本 skill 是**人触发**的唯一 LLM 动作）。
-- **不依赖**任何 LLM-judge / 训练后端 / rollout-replay。
+## 5. Persisted artifacts
 
-## 5. 持久化 artifact
+All under the gitignored workspace `pipeline-workspace/skill-evolution/`:
+- `backlog.yaml` (skill-mine output, the input).
+- `candidates/<id>/proposal.diff` (skill-stage output, for human review).
+- `audit.jsonl` (staged / adopted / rejected "dead-end" negatives, append-only).
 
-全部落 gitignored 工作区 `pipeline-workspace/skill-evolution/`：
-- `backlog.yaml`（skill-mine 产出，输入）。
-- `candidates/<id>/proposal.diff`（skill-stage 产出，供人审）。
-- `audit.jsonl`（staged / adopted / 被拒“此路不通”负样本，append-only 留痕）。
-
-## 6. CLI 命令（业务逻辑全在这里）
+## 6. CLI commands (all business logic here)
 
 ```bash
-python scripts/pipeline.py skill-mine                       # 失败信号 → backlog.yaml
-# 人读 backlog，挑一条 count>=2（反复出现）的 signature
-git switch -c skill-cand/<id>                               # 隔离分支
-#   在该分支写 bounded SKILL.md 编辑（双树同步，保持字节对等）
-python scripts/pipeline.py skill-gate  --candidate <id>     # pytest + 双树对等 + gate-integrity
-python scripts/pipeline.py skill-stage --candidate <id>     # 绿则登记提案，线上不动
-#   把 proposal.diff 汇报给人，等确认
-python scripts/pipeline.py skill-adopt --candidate <id>     # 人触发：重跑 gate 兜底 + 提交双树
+python scripts/pipeline.py skill-mine                       # failure signals → backlog.yaml
+# a human reads the backlog and picks a count>=2 (recurring) signature
+git switch -c skill-cand/<id>                               # isolated branch
+#   write the bounded SKILL.md edit on that branch (both trees in sync, byte-equivalent)
+python scripts/pipeline.py skill-gate  --candidate <id>     # pytest + dual-tree parity + gate-integrity
+python scripts/pipeline.py skill-stage --candidate <id>     # green → register the proposal, mainline untouched
+#   report proposal.diff to the human, await confirmation
+python scripts/pipeline.py skill-adopt --candidate <id>     # human-triggered: re-run the gate + commit both trees
 ```
 
-## 8. 失败停止点
+## 7. Workflow
 
-- `skill-gate` 红即停，不 stage：
-  - **gate-integrity**：候选动了 skill 两树以外的文件（尤其 `tests/`）→ 立即停。这是越权 / 游戏自己的门。
-  - **pytest 红**（含双树对等 T2）→ 停；把失败贴回，audit 记一条“此路不通”负样本，重写或放弃。
-- backlog 该条 `count` = 1（不复现）→ 不值得改，停。
-- 要靠改 `tests/` 或 gate 逻辑才能过 → 绝不做，停交人。
-- `skill-adopt` 一律由**人**触发；本 skill 不自动 adopt。
+| Sub-unit | Input | Output | Acceptance | Persisted | Failure stop |
+|---|---|---|---|---|---|
+| E1 mine | review_proposals | backlog.yaml entries (count≥2) | recurring signature only | backlog.yaml | nothing recurring |
+| E2 bounded edit | one signature + target SKILL.md | a 1–2 section edit, both trees | byte-equivalent across trees | branch worktree | edit needs tests/pipeline changes |
+| E3 gate | candidate id | gate result | gate-integrity PASS + pytest green | — | gate red |
+| E4 stage | green candidate | proposal.diff + audit entry | mainline untouched | candidates/<id>/ + audit.jsonl | — |
+| E5 adopt (human) | proposal | both-tree commit | gate re-run passes | git commit + audit | gate red on re-run |
 
-## 9. 验收清单
+## 8. Failure stops / recovery
 
-- [ ] 候选 diff 只动 `.claude/skills/` 与 `.agents/skills/`（`skill-gate` 的 gate-integrity PASS）。
-- [ ] 双树字节对等保持（pytest T2 绿）。
-- [ ] `pytest tests` 全绿（`skill-gate` PASS）。
-- [ ] 编辑是 bounded（一两个小节），且针对 backlog 那条 `signature`。
-- [ ] 提案已 `skill-stage`、`audit.jsonl` 有记录；`skill-adopt` 留给人。
+- `skill-gate` red → stop, do not stage:
+  - **gate-integrity:** the candidate touched anything outside the two skill trees (especially `tests/`) → stop immediately. That is out-of-bounds / gaming its own gate.
+  - **pytest red** (incl. dual-tree parity T2) → stop; paste the failure back, log a "dead-end" negative in audit, rewrite or abandon.
+- the backlog entry's `count` = 1 (not reproducing) → not worth it, stop.
+- it would require editing `tests/` or gate logic to pass → never do it, stop and hand back.
+- `skill-adopt` is always human-triggered; this skill never auto-adopts. **Recovery:** the audit.jsonl trail records every staged/rejected attempt.
+
+## 9. Acceptance criteria
+
+- [ ] The candidate diff only touches `.claude/skills/` and `.agents/skills/` (`skill-gate` gate-integrity PASS).
+- [ ] Dual-tree byte-equivalence holds (pytest T2 green).
+- [ ] `pytest tests` all green (`skill-gate` PASS).
+- [ ] The edit is bounded (a section or two) and targets that backlog `signature`.
+- [ ] The proposal is `skill-stage`-d; `audit.jsonl` has a record; `skill-adopt` is left to a human.

@@ -1,11 +1,11 @@
-"""T1–T5：skill 工程标准合规套件（docs/skill-runtime/skill-standard.md §测试口径）。
+"""T1–T5: skill engineering-standard compliance (docs/skill-runtime/skill-standard.md test rubric).
 
-遍历 .claude/skills 与 .agents/skills 两棵树，把双 agent 协作的人工核验固化为自动测试：
-- T1 九段契约合规（两树）
-- T2 双 agent 对等（skill 集合一致 + 内容对等，仅 per-agent 真值指针可不同）
-- T3 卫生（无死 spec/ADR/superpowers 指针、无 pythonProject、无 .Codex）
-- T4 协议词不丢（跨 SKILL.md + references）
-- T5 source-xray 守卫显式声明
+Walks both `.claude/skills` and `.agents/skills`, turning the dual-agent review into automated tests:
+- T1 nine-section contract (both trees)
+- T2 dual-agent parity (same skill set + byte-equivalent content, modulo the per-agent truth pointer)
+- T3 hygiene (no dead spec/ADR/superpowers pointers, no pythonProject, no .Codex)
+- T4 protocol keywords intact (across SKILL.md + references)
+- T5 source-xray guard declared
 """
 import re
 from pathlib import Path
@@ -26,7 +26,7 @@ def _skill_md(tree: Path, name: str) -> str:
 
 
 def _skill_all(tree: Path, name: str) -> str:
-    # 复杂 skill 阶段细节拆到 references/*.md；协议词跨 SKILL.md + references 校验。
+    # Complex skills push phase detail to references/*.md; protocol words are checked across both.
     parts = [_skill_md(tree, name)]
     refs = tree / name / "references"
     if refs.is_dir():
@@ -36,40 +36,40 @@ def _skill_all(tree: Path, name: str) -> str:
 
 
 def _norm_agent_truth(text: str) -> str:
-    # 双树唯一合法差异：per-agent 真值文件指针（Claude 指 CLAUDE.md / Codex 指 AGENTS.md）。
+    # The only legitimate cross-tree difference: the per-agent truth pointer (Claude → CLAUDE.md / Codex → AGENTS.md).
     return text.replace("CLAUDE.md", "<AGENT_TRUTH>").replace("AGENTS.md", "<AGENT_TRUTH>")
 
 
-# 九段必填项（第 7 段「阶段拆解」对简单 skill 可省，故不强制）。
-_MANDATORY_SECTIONS = {1: "触发", 2: "输入", 3: "输出", 4: "依赖",
-                       5: "持久化", 6: "CLI", 8: "停止", 9: "验收"}
+# Mandatory sections (section 7 "Workflow" is optional for simple skills).
+_MANDATORY_SECTIONS = {1: "Triggers", 2: "Inputs", 3: "Outputs", 4: "Dependencies",
+                       5: "Persisted", 6: "CLI", 8: "Failure", 9: "Acceptance"}
 
 
 def test_t1_nine_section_contract_both_trees():
     for tree_name, tree in TREES.items():
         names = _skills_in(tree)
-        assert names, f"{tree_name} 树没有任何 skill"
+        assert names, f"{tree_name} tree has no skills"
         for name in sorted(names):
             md = _skill_md(tree, name)
-            assert md.startswith("---"), f"[{tree_name}/{name}] 缺 frontmatter"
-            assert f"name: {name}" in md, f"[{tree_name}/{name}] frontmatter name 不匹配目录"
-            assert "description:" in md, f"[{tree_name}/{name}] 缺 description"
+            assert md.startswith("---"), f"[{tree_name}/{name}] missing frontmatter"
+            assert f"name: {name}" in md, f"[{tree_name}/{name}] frontmatter name != directory"
+            assert "description:" in md, f"[{tree_name}/{name}] missing description"
             for num, kw in _MANDATORY_SECTIONS.items():
                 assert re.search(rf"(?m)^## {num}\. .*{kw}", md), \
-                    f"[{tree_name}/{name}] 缺第 {num} 段（关键词 {kw}）"
-            assert "负样本" in md, f"[{tree_name}/{name}] 第 1 段缺负样本"
+                    f"[{tree_name}/{name}] missing section {num} (keyword {kw})"
+            assert "Non-triggers" in md, f"[{tree_name}/{name}] section 1 missing Non-triggers"
 
 
 def test_t2_dual_agent_parity():
     claude_set = _skills_in(TREES["claude"])
     agents_set = _skills_in(TREES["agents"])
     assert claude_set == agents_set, (
-        f"两树 skill 集合不一致：仅 claude={claude_set - agents_set} "
-        f"仅 agents={agents_set - claude_set}")
+        f"skill sets differ: claude-only={claude_set - agents_set} "
+        f"agents-only={agents_set - claude_set}")
     for name in sorted(claude_set):
         c = _norm_agent_truth(_skill_all(TREES["claude"], name))
         a = _norm_agent_truth(_skill_all(TREES["agents"], name))
-        assert c == a, f"[{name}] 两树内容不对等（归一 per-agent 真值指针后仍有差异）"
+        assert c == a, f"[{name}] trees not equivalent (still differ after normalizing the truth pointer)"
 
 
 _FORBIDDEN = ["docs/superpowers", "docs/adr", "docs/agents",
@@ -85,20 +85,20 @@ def test_t3_hygiene_no_dead_pointers():
     for f in files:
         text = f.read_text(encoding="utf-8")
         for bad in _FORBIDDEN:
-            assert bad not in text, f"{f} 含死指针/禁用 token：{bad!r}"
+            assert bad not in text, f"{f} contains a dead pointer / forbidden token: {bad!r}"
 
 
 _PROTOCOL_KEYWORDS = {
     "ingest": ["workorder.yaml", "resolve-concept", "check-write", "window-done",
-               "status: proposed", "lint"],
+               "status: proposed", "lint", "source-audit"],
     "kb-query": ["check-session", "query-session", "candidate_write_set", "evidence_refs"],
     "kb-save": ["resolve-concept", "check-write", "check-session", "save-back-policy",
                 "status: proposed"],
     "kb-review": ["Review-Queue", "review_proposals", "promote-concept"],
-    "wiki-lint-semantic": ["L4", "矛盾", "Q2", "proposal"],
-    "source-preflight": ["workorder", "source-convert", "windows", "write_scope", "零 LLM"],
-    "kb-qa": ["Q 链", "Review-Queue", "覆盖率", "互斥"],
-    "source-xray": ["reports/source-xray", "已发布", "kb-save"],
+    "wiki-lint-semantic": ["L4", "contradiction", "Q2", "proposal"],
+    "source-preflight": ["workorder", "source-convert", "source-audit", "windows", "write_scope", "zero-LLM"],
+    "kb-qa": ["Q-chain", "Review-Queue", "coverage", "mutually exclusive"],
+    "source-xray": ["reports/source-xray", "published", "kb-save"],
     "skill-evolve": ["skill-mine", "skill-gate", "skill-stage", "skill-adopt", "backlog"],
 }
 
@@ -107,19 +107,19 @@ def test_t4_protocol_keywords_present_both_trees():
     for tree_name, tree in TREES.items():
         present = _skills_in(tree)
         for name, keywords in _PROTOCOL_KEYWORDS.items():
-            assert name in present, f"[{tree_name}] 缺 skill：{name}"
+            assert name in present, f"[{tree_name}] missing skill: {name}"
             text = _skill_all(tree, name)
             for kw in keywords:
-                assert kw in text, f"[{tree_name}/{name}] 丢协议词：{kw!r}"
+                assert kw in text, f"[{tree_name}/{name}] lost protocol word: {kw!r}"
 
 
-# source-xray 守卫（frontmatter 与 §9 措辞不同，用宽松子串）。
-_XRAY_GUARDS = ["不参与预处理", "不决定窗口", "不决定写页范围", "合并概念页",
-                "只基于已发布内容", "不写 vault"]
+# source-xray guard (frontmatter and §9 phrase it slightly differently; use loose substrings).
+_XRAY_GUARDS = ["does not preprocess", "does not decide windows", "does not decide write scope",
+                "merge concept pages", "published content only", "does not write the vault"]
 
 
 def test_t5_source_xray_guard_declared_both_trees():
     for tree_name, tree in TREES.items():
         md = _skill_md(tree, "source-xray")
         for guard in _XRAY_GUARDS:
-            assert guard in md, f"[{tree_name}/source-xray] 缺守卫声明：{guard!r}"
+            assert guard in md, f"[{tree_name}/source-xray] missing guard declaration: {guard!r}"

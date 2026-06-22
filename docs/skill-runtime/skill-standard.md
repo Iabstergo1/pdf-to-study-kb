@@ -1,50 +1,80 @@
-# Skill 工程标准（薄 skill + 厚 CLI）
+# Skill engineering standard (thin skill + thick CLI)
 
-> 本项目所有 `.claude/skills/*/SKILL.md`（Claude）与 `.agents/skills/*/SKILL.md`（Codex）的统一工程格式。
-> 真值口径：`CLAUDE.md` / `AGENTS.md` + 本目录 `docs/skill-runtime/*`。**不引用任何已删的 spec / ADR。**
+> The shared format for every `.claude/skills/*/SKILL.md` (Claude Code) and `.agents/skills/*/SKILL.md`
+> (Codex). Source of truth: `CLAUDE.md` / `AGENTS.md` + this `docs/skill-runtime/*` directory.
+> **Never reference any deleted spec / ADR.**
 
-## 总原则
+## Principle
 
-**薄 skill + 厚 CLI。** `scripts/pipeline.py` 是唯一业务契约：确定性、可恢复、可审计、带门禁的重活都在 CLI、状态机、lint 里。
-SKILL.md 只做四件事：**编排 CLI、提示验收、标失败停点、约束中间产物**。
-**业务逻辑绝不写进 prose**；prose 的职责是把 CLI 已强制的契约「显式镜像」给模型看，降低临场发挥。
+**Thin skill, thick CLI.** `scripts/pipeline.py` is the only business contract: every deterministic,
+recoverable, auditable, gated operation lives in the CLI, the state machine, and lint. A `SKILL.md`
+does four things only: **orchestrate the CLI, surface acceptance checks, mark failure stops, and
+constrain intermediate artifacts.** Business logic never goes in prose; prose mirrors the contract the
+CLI already enforces so the model improvises less.
 
-## 九段契约（每个 SKILL.md 必含）
+A complex skill is an **engineered workflow**, not a one-shot prompt. It must name its responsibilities,
+inputs, outputs, dependencies, persisted intermediate artifacts, recovery/retry points, and acceptance
+criteria — i.e. the nine-section contract below.
 
-Frontmatter：`name` + `description`（描述里嵌一句话正向 trigger）。正文九段：
+## Nine-section contract (every SKILL.md)
 
-1. **触发 / 负样本** —— 何时触发；**显式列负样本**（不该触发的请求，如「总结这篇 / 翻译」不进写库流程）。
-2. **输入** —— 需用户/对话给什么 + 读哪些文件。
-3. **输出** —— 产出什么（vault 页 / staging 产物 / 报告）；**写库一律 `status: proposed`**。
-4. **依赖** —— 依赖哪些 `pipeline.py` 命令 / 其他 skill / `docs/skill-runtime/*` 协议 / `references/*`。
-5. **持久化 artifact** —— 必须落盘的关键中间结果 + 位置（`ingest_progress` / `staging/<src>/digest.md` / `query-sessions/` / `staging/<src>/llm-notes/` / `pipeline-workspace/reports/`）。
-6. **CLI 命令** —— 编排的确切命令（**业务逻辑在这里**）。
-7. **阶段拆解**（仅复杂 skill）—— 子单元清单；每个子单元带 输入 / 输出 / 验收 / 持久化 / 停止点。复杂 skill 的阶段细节拆到同目录 `references/*.md`，SKILL.md 只做总编排与索引。
-8. **失败停止点** —— 何时停下交人（check-write DENY / lint 失败 / `managed_by: human` 页冲突 / 锁竞争 / 预处理报错）。
-9. **验收清单** —— 可核验项，对齐 CLI 门：check-write ALLOW、lint 通过、check-session、0 个 `page_rules` 违规。
+Frontmatter: `name` + `description` (the description embeds a one-line positive trigger). Body sections:
 
-> 简单 skill（如 kb-query）第 7 段可省；其余八段必填。
+1. **Triggers / Non-triggers** — when to fire; **list Non-triggers explicitly** (requests that must NOT
+   fire, e.g. "summarize this / translate" never enter the write path).
+2. **Inputs** — what the user/conversation must supply + which files to read.
+3. **Outputs** — what is produced (vault pages / staging artifacts / reports); **every vault write is
+   `status: proposed`**.
+4. **Dependencies** — which `pipeline.py` commands / other skills / `docs/skill-runtime/*` protocols /
+   `references/*` the skill relies on.
+5. **Persisted artifacts** — the intermediate results that must hit disk + where (`ingest_progress`,
+   `staging/<src>/digest.md`, `query-sessions/`, `pipeline-workspace/reports/`).
+6. **CLI commands** — the exact orchestrated commands (**business logic lives here**).
+7. **Workflow** (complex skills only) — sub-units, each with inputs / outputs / acceptance / persisted
+   artifact / failure stop. Complex skills split phase detail into sibling `references/*.md`; the
+   SKILL.md keeps only the top-level orchestration and an index.
+8. **Failure stops / recovery** — when to stop and hand back (check-write DENY / lint fail /
+   `managed_by: human` conflict / lock contention / preprocessing error), and the recovery anchor
+   (`pipeline.py next` + digest `## RESUME`).
+9. **Acceptance criteria** — verifiable items aligned with the CLI gates: check-write ALLOW, lint pass,
+   check-session, zero `page_rules` violations.
 
-## 复杂 skill 的 references/ 拆分
+> A simple skill (e.g. kb-query) may omit section 7; the other eight are mandatory.
 
-`ingest` 等多阶段 skill：主 `SKILL.md` 只承载九段契约的**总编排**；阶段细节落同目录 `references/`：
-`references/{preflight,write-pages,synthesis,finish-lint}.md`，每个文件本身按「输入 / 输出 / 验收 / 持久化 / 停止点」组织。
-主文件用相对路径指向这些 references，模型按需加载。**协议关键词（workorder.yaml、resolve-concept、check-write、window-done、status: proposed、lint 等）允许落在 references 里，但不得丢失**（测试跨 `SKILL.md + references/*` 校验）。
+## references/ split for complex skills
 
-## 三条特定边界（v1 binding）
+Multi-phase skills like `ingest` keep only the nine-section **orchestration** in `SKILL.md`; phase detail
+lives in sibling `references/{preflight,write-pages,synthesis,finish-lint}.md`, each organized as
+inputs / outputs / acceptance / persisted / failure stop. The main file points at them by relative path
+and the model loads them on demand. **Protocol keywords (workorder.yaml, resolve-concept, check-write,
+window-done, status: proposed, lint, source-audit, reconciliation.json …) may live in references but must
+not be lost** — tests check across `SKILL.md + references/*`.
 
-1. **source-xray 默认不写 vault。** 拆书式结构提取的产物默认落
-   `pipeline-workspace/reports/source-xray/<src>.md` 或 `pipeline-workspace/staging/<src>/llm-notes/`；
-   **只基于已发布的 source/concept/topic** 生成阅读笔记 / synthesis 候选。**不参与预处理、不决定 windows、不决定写页范围、不创建/合并概念页。**
-   仅当用户明确要存进 wiki 时，才转交 `kb-save` 走两阶段发布 + lint 门禁（守住「写库必须 proposed + promote」）。
-2. **kb-qa 与 wiki-lint-semantic 不抢同一触发词。** `kb-qa` = 更宽的发布后/保存前 QA 报告（覆盖率、ljg-qa 式 Q 链、概念污染、跨页矛盾、公式/证据抽查），产出报告 + Review-Queue proposal；
-   `wiki-lint-semantic` 保留为「语义 lint」的专门入口（L4/矛盾/Q2）。v1 两者触发词**互斥**（语义体检类词归 wiki-lint-semantic，QA/审计/覆盖率类词归 kb-qa）；后续可把 wiki-lint-semantic 并入 kb-qa，但不在第一版双触发。
-3. **预处理零 LLM。** `source-preflight` 只编排并验收 `add-source → profile → source-convert → windows → workorder`，**不做任何 LLM 语义拆书 / unit 规划**（守住 CLAUDE.md / AGENTS.md 的「不拆分」）。
+## Three binding boundaries (v1)
 
-## 测试口径（落地于 tests/）
+1. **source-xray never writes the vault.** Reading-note / structural extraction lands in
+   `pipeline-workspace/reports/source-xray/<src>.md` or `pipeline-workspace/staging/<src>/llm-notes/`,
+   and is built **from published source/concept/topic content only**. It **does not preprocess, does not
+   decide windows, does not decide write scope, and never creates or merges concept pages.** Only when
+   the user explicitly wants it in the wiki does it hand off to `kb-save` for two-phase publish + lint.
+2. **kb-qa and wiki-lint-semantic do not share triggers.** `kb-qa` is the broader post-publish /
+   pre-save QA report (coverage, ljg-qa-style Q-chain, concept pollution, cross-page contradiction,
+   formula/evidence spot-checks) → report + Review-Queue proposal. `wiki-lint-semantic` is the dedicated
+   semantic-lint entry (L4 / contradiction / Q2). In v1 their triggers are **mutually exclusive**.
+3. **Preprocessing is zero-LLM.** `source-preflight` only orchestrates and accepts
+   `add-source → profile → source-convert → source-audit → windows → workorder`; it performs **no LLM
+   semantic splitting / unit planning** (honoring the "no splitting" rule in CLAUDE.md / AGENTS.md).
 
-- **T1 标准合规**：遍历 **`.claude/skills/*` 与 `.agents/skills/*` 两棵树**，每个 SKILL.md（含 references）覆盖九段必填项。两树都查，避免漏掉 Codex 侧。
-- **T2 双 agent 对等**：`.agents/skills/*` 与 `.claude/skills/*` skill 集合一致、协议关键词一致。
-- **T3 卫生**：agent 面向文件无死 `spec`/`ADR`/`docs/superpowers|adr|agents` 指针、无 `pythonProject`、无 `.Codex`。
-- **T4 协议词不丢**：跨 `SKILL.md + references/*` 校验关键协议词仍在（ingest：workorder.yaml/resolve-concept/check-write/window-done/status: proposed/lint；kb-* 各自关键词）。
-- **T5 source-xray 守卫**：其 SKILL.md 显式声明「不参与预处理 / 不决定窗口 / 不决定写页范围 / 不建合并概念页 / 只基于已发布内容 / 默认不写 vault」。
+## Test rubric (lives in tests/)
+
+- **T1 — nine-section compliance:** walk **both `.claude/skills/*` and `.agents/skills/*`**; every
+  SKILL.md (incl. references) covers the mandatory sections. Both trees are checked so the Codex side is
+  never missed.
+- **T2 — dual-agent parity:** the two trees have an identical skill set and byte-equivalent content,
+  modulo the single per-agent truth pointer (`CLAUDE.md` ↔ `AGENTS.md` in ingest).
+- **T3 — hygiene:** agent-facing files carry no dead `spec`/`ADR`/`docs/superpowers|adr|agents` pointers,
+  no `pythonProject`, no `.Codex`.
+- **T4 — protocol keywords intact:** key protocol words still present across `SKILL.md + references/*`.
+- **T5 — source-xray guard:** its SKILL.md explicitly declares the boundary (does not preprocess / does
+  not decide windows / does not decide write scope / never merges concept pages / published content only /
+  does not write the vault).

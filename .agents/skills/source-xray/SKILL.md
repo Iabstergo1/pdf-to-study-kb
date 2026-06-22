@@ -1,66 +1,70 @@
 ---
 name: source-xray
-description: 基于已发布的 source/concept/topic 等 wiki 内容生成一份拆书式阅读笔记或 synthesis 候选报告，默认只写 pipeline-workspace/reports/source-xray/，不写 vault。当用户说“给这个已发布来源做 xray / 拆书阅读笔记 / source-xray / 生成学习笔记候选”时使用。不参与预处理、不决定窗口、不决定写页范围、不创建或合并概念页。
+description: Generate a book-breakdown reading note or synthesis-candidate report from published source/concept/topic content, writing only pipeline-workspace/reports/source-xray/ by default (not the vault). Use when the user says "x-ray this published source / book-breakdown reading notes / source-xray / generate learning-note candidates". It does not preprocess, does not decide windows, does not decide write scope, and does not create or merge concept pages.
 ---
 
-# source-xray — 已发布来源的阅读笔记报告
+# source-xray — reading-note report from a published source
 
-基于已发布的 source/concept/topic 等 wiki 内容生成阅读笔记或 synthesis 候选。默认不写 vault；若用户要保存进 wiki，转 `kb-save` 走两阶段发布。
+Generate reading notes or synthesis candidates from published source/concept/topic content. It does not
+write the vault by default; if the user wants it saved into the wiki, hand off to `kb-save` for two-phase
+publish. This skill works from **published content only**.
 
-## 1. 触发 / 负样本
+## 1. Triggers / Non-triggers
 
-- **触发**：「给这个已发布来源做 xray」「拆书阅读笔记」「source-xray」「生成学习笔记候选」「从已发布内容整理一份学习路线」。
-- **负样本**：新来源预处理（用 `source-preflight`）；新来源入库（用 `ingest`）；查询已有知识（用 `kb-query`）；保存报告进 wiki（用 `kb-save`）；语义体检（用 `wiki-lint-semantic`）。
+- **Triggers:** "x-ray this published source", "book-breakdown reading notes", "source-xray", "generate learning-note candidates", "organize a learning path from published content".
+- **Non-triggers:** preprocessing a new source (use `source-preflight`); ingesting a new source (use `ingest`); querying existing knowledge (use `kb-query`); saving the report into the wiki (use `kb-save`); a semantic health check (use `wiki-lint-semantic`).
 
-## 2. 输入
+## 2. Inputs
 
-- `<src>` 或已发布 source 页路径。
-- 读：`wiki/sources/<src>.md`、该 source 相关 published lessons/concepts/topics/comparisons/synthesis、`wiki/index.generated.md`。
-- 只基于已发布内容；若 source 还未发布，停止并建议先完成 `ingest`/`lint`。
+- `<src>` or a published source page path.
+- Read: `wiki/sources/<src>.md`, that source's published lessons/concepts/topics/comparisons/synthesis, and `wiki/index.generated.md`.
+- Published content only; if the source is not yet published, stop and suggest finishing `ingest`/`lint` first.
 
-## 3. 输出
+## 3. Outputs
 
-- 默认写 `pipeline-workspace/reports/source-xray/<src>.md`。
-- 报告可包含：核心问题、共识基线、作者/来源 delta、关键概念地图、学习路线、可转 `kb-save` 的 synthesis 候选。
-- 不写 `wiki/`，不创建 `status: proposed` 页，不更新概念页。
+- By default, write `pipeline-workspace/reports/source-xray/<src>.md`.
+- The report may include: the core question, the consensus baseline, the author/source delta, the key concept map, a learning path, and synthesis candidates that could go to `kb-save`.
+- It does not write `wiki/`, does not create `status: proposed` pages, does not update concept pages.
 
-## 4. 依赖
+## 4. Dependencies
 
-- 协议：`docs/skill-runtime/skill-standard.md` 的 source-xray 守卫、`docs/skill-runtime/schema.md` 的页面职责。
-- 后续保存：只能转 `kb-save`，并以 query-session / evidence_refs / decision.md 形式进入两阶段发布。
-- 不依赖预处理 staging，也不读取未发布 source.md 作为主要依据。
+- Protocols: the source-xray guard in `docs/skill-runtime/skill-standard.md`, page roles in `docs/skill-runtime/schema.md`.
+- Saving is handed to `kb-save` only, entering two-phase publish via a query-session / evidence_refs / decision.md.
+- It does not depend on preprocessing staging and does not read an unpublished source.md as a primary basis.
 
-## 5. 持久化 artifact
+## 5. Persisted artifacts
 
-- `pipeline-workspace/reports/source-xray/<src>.md`
-- 可选：若从报告生成保存候选，先落 query-session，再交 `kb-save`；本 skill 不直接写 vault。
+- `pipeline-workspace/reports/source-xray/<src>.md`.
+- Optional: to turn the report into a save candidate, first land a query-session, then hand to `kb-save`; this skill never writes the vault directly.
 
-## 6. CLI 命令
+## 6. CLI commands
 
 ```text
 python scripts/pipeline.py status
 ```
 
-该命令只用于确认 source 发布状态。没有专用业务 CLI；本 skill 的产物是报告文件，不是 vault 内容页。
+This only confirms the source's publish state. There is no dedicated business CLI; this skill's output is a report file, not a vault content page.
 
-## 7. 阶段拆解
+## 7. Workflow
 
-| 子单元 | 输入 | 输出 | 验收 | 持久化 | 停止点 |
+| Sub-unit | Input | Output | Acceptance | Persisted | Failure stop |
 |---|---|---|---|---|---|
-| X1 发布校验 | src/index/status | published source 判断 | 只基于已发布内容 | 报告草稿 | source 未发布 |
-| X2 收集材料 | source + related pages | 材料清单 | 页面路径真实，含 source refs | 报告草稿 | 相关页缺失 |
-| X3 结构提取 | 已发布材料 | 核心问题/基线/delta/概念地图 | 不改变写页范围，不做 unit 规划 | 报告 | 证据不足 |
-| X4 候选标注 | 报告内容 | synthesis/learning path 候选 | 候选有 evidence refs | 报告 | 无证据候选剔除 |
-| X5 交接 | 报告 | 是否转 kb-save 的建议 | 默认不写 vault | report | 用户要求保存则转 kb-save |
+| X1 publish check | src/index/status | published-source judgement | published content only | report draft | source unpublished |
+| X2 collect material | source + related pages | material list | paths real, with source refs | report draft | related pages missing |
+| X3 structural extract | published material | core question/baseline/delta/concept map | does not change write scope, no unit planning | report | evidence thin |
+| X4 candidate tagging | report content | synthesis/learning-path candidates | candidates carry evidence refs | report | drop candidates without evidence |
+| X5 handoff | report | whether to switch to kb-save | does not write the vault by default | report | user asks to save → switch to kb-save |
 
-## 8. 失败停止点
+## 8. Failure stops / recovery
 
-source 未发布；只能找到 staging 未发布内容；用户要求预处理、决定 windows、决定写页范围、创建/合并概念页；证据不足；用户要求直接写 vault。
+source unpublished; only unpublished staging content is found; the user asks to preprocess, decide windows,
+decide write scope, or create/merge concept pages; evidence thin; the user asks to write the vault directly.
+**Recovery:** the report is the durable output; on a save request, hand off to `kb-save`.
 
-## 9. 验收清单
+## 9. Acceptance criteria
 
-- 显式遵守：不参与预处理 / 不决定窗口 / 不决定写页范围 / 不建合并概念页 / 只基于已发布内容 / 默认不写 vault。
-- 报告写入 `pipeline-workspace/reports/source-xray/<src>.md`。
-- 每个候选 synthesis 或学习路线都有 evidence refs。
-- 没有修改 `wiki/`。
-- 若用户要保存，已转交 `kb-save` 而不是本 skill 直接写库。
+- Explicitly honored: **does not preprocess** / **does not decide windows** / **does not decide write scope** / does not create or **merge concept pages** / **published content only** / **does not write the vault** by default.
+- The report is written to `pipeline-workspace/reports/source-xray/<src>.md`.
+- Every synthesis or learning-path candidate carries evidence refs.
+- No change under `wiki/`.
+- If the user wants it saved, it was handed to `kb-save` rather than written directly.

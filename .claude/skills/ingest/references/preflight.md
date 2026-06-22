@@ -1,24 +1,32 @@
-# ingest / 阶段 A — 确定性预处理（零 LLM，可重跑，幂等跳过）
+# ingest / phase A — deterministic preprocessing (zero LLM, re-runnable, idempotent skip)
 
-**输入**：`<src>` / `<domain>` / `<path>` / `<fmt>`。**输出**：`staging/<src>/{source.md, windows.jsonl, workorder.yaml}` + 难页 PNG。
-**持久化**：以上 staging 产物 + SQLite 阶段状态。**停止点**：任一步报错则停下报告，不要跳过。
+**Inputs:** `<src>` / `<domain>` / `<path>` / `<fmt>`.
+**Outputs:** `staging/<src>/{source.md, blocks.jsonl, chapters.json, parse_report.json, reconciliation.json, windows.jsonl, workorder.yaml}` + hard-page PNGs.
+**Persisted:** the staging artifacts above + SQLite stage state.
+**Failure stop:** any step errors → stop and report; never skip ahead.
 
-## 步骤
+## Steps
 
-1. 若 `wiki/` 不存在：`python scripts/pipeline.py init-vault`（幂等，绝不覆盖已有文件）。
-2. 依次跑（每步幂等，输入未变会 `[skip]`）：
+1. If `wiki/` is absent: `python scripts/pipeline.py init-vault` (idempotent, never overwrites existing files).
+2. Run in order (each idempotent; unchanged input prints `[skip]`):
    - `python scripts/pipeline.py add-source --source <src> --domain <domain> --path <path> --fmt <fmt>`
    - `python scripts/pipeline.py profile --source <src>`
    - `python scripts/pipeline.py source-convert --source <src>`
-   - `python scripts/pipeline.py source-audit --source <src>`（PDF 双审：MinerU 复核 PyMuPDF → `reconciliation.json`；生产/严格验收加 `--strict`，MinerU 不可用即 fail-closed）
+   - `python scripts/pipeline.py source-audit --source <src>` (PDF dual-audit: MinerU reviews PyMuPDF → `reconciliation.json`; add `--strict` for production / strict acceptance, fail-closed if MinerU is unavailable)
    - `python scripts/pipeline.py windows --source <src>`
    - `python scripts/pipeline.py workorder --source <src>`
-3. 读 `pipeline-workspace/staging/<src>/workorder.yaml`——它定义你的全部写入边界（`write_scope`）、registry hash、页面快照。**没有 work order 不进入阶段 B。**
+3. Read `pipeline-workspace/staging/<src>/workorder.yaml` — it defines your entire write boundary
+   (`write_scope`), the registry hash, and page snapshots. **No work order, no phase B.**
 
-## 验收（进入阶段 B 前必须满足）
+## Acceptance (must hold before phase B)
 
-- `workorder.yaml` 已生成，`write_scope` 覆盖 `domains/<domain>/**` 等。
-- **needs_vision 合理**：`source-convert` 输出的难页数不应为 0（含公式 / 图表的书应有若干页被标记）；为 0 且源含公式或插图则可疑，复核。
-- **难页（route B）**：`source-convert` 对难页（公式 / 矢量图 / 表 / 图表标题，高召回）打 `[info]`——纯文本会拍平上/下标、且看不见矢量图与无框线表，每页渲整页 PNG 供 ingest 读图保真。确认难页 PNG 已生成、`pages.jsonl` 有 `needs_vision_reason` 即可（不依赖任何 OCR/ML 后端）。
-- **windows 覆盖**：`windows.jsonl` 的 char 范围应覆盖 `source.md` 全文（无大段漏读）。
-- **PDF 双审**：PDF 源须有 `reconciliation.json`（`source-audit` 产出）；strict 验收要 `dual_audited=true`，否则 `preflight-eval` 标 `dual_audit` fail（PyMuPDF 阈值刻意宽、不可作单一真值，PyMuPDF-only 未双审不算生产验收）。
+- `workorder.yaml` is generated and `write_scope` covers `domains/<domain>/**` etc.
+- **Dual-audit (PDF):** `reconciliation.json` exists (from `source-audit`). Strict acceptance requires
+  `dual_audited=true`; otherwise `preflight-eval` reports a `dual_audit` failure (PyMuPDF thresholds are
+  deliberately broad and are not a single source of truth — PyMuPDF-only output is not production-accepted).
+- **needs_vision sane:** `source-convert`'s hard-page count should not be 0 (a book with formulas/figures
+  should flag some pages); 0 on such a source is suspicious — review.
+- **Hard pages (route B):** `source-convert` marks hard pages (formula / vector figure / table / caption,
+  high recall) with `[info]` and renders a full-page PNG each. Confirm the PNGs exist and `pages.jsonl`
+  carries `needs_vision_reason`.
+- **Window coverage:** `windows.jsonl` char ranges cover all of `source.md` (no large gaps).
