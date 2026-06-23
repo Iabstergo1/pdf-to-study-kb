@@ -196,6 +196,13 @@ def _write_evidence_and_queue(staging_dir, raw_path, primary_pages, primary_bloc
     model = arb.build_evidence_model(primary_pages, primary_blocks, review_blocks)
     (sd / arb.EVIDENCE_FILE).write_text(json.dumps(model, ensure_ascii=False, indent=2), encoding="utf-8")
     candidates = arb.select_candidates(model)
+    # 非阻断 risk（soft + has_asset 的 hard）确定性写进 blocks.jsonl（不依赖任何裁决，zero-LLM）；
+    # windowing 自动把 block.risk_flags 并入 window.risk_flags，让 ingest LLM 经最小标签知道哪页文本不可信。
+    blocks_path = sd / "blocks.jsonl"
+    if blocks_path.exists():
+        nb = arb.apply_nonblocking_risk_flags(primary_blocks or [], model)
+        if nb != (primary_blocks or []):
+            sa.write_blocks(blocks_path, nb)
     text_by_page = {int(b.get("page", 0)): (b.get("text") or "") for b in (primary_blocks or [])}
     packets = arb.build_packets(model, page_text=lambda p: text_by_page.get(p, ""))
     (sd / arb.ARB_DIR).mkdir(parents=True, exist_ok=True)

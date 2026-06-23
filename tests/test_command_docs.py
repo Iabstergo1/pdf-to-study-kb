@@ -61,7 +61,8 @@ def test_ingest_skill_dual_audit_wiring():
     # (preprocessing → auto-arbitration → materialization → closed-loop acceptance).
     text = _skill_all("ingest")
     for must in ["source-audit", "reconciliation.json", "dual-audit", "MinerU", "PyMuPDF",
-                 "arbitration", "evidence.json", "arbitration-apply", "check_evidence_bundle"]:
+                 "arbitration", "evidence.json", "arbitration-apply", "check_evidence_bundle",
+                 "arbitration-resolve", "formula_text_loss"]:
         assert must in text, f"ingest missing dual-audit/evidence-loop element: {must}"
     assert (SKILLS / "ingest" / "references" / "arbitrate.md").exists(), "ingest missing references/arbitrate.md"
 

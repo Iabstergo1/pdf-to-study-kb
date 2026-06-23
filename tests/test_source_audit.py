@@ -249,6 +249,32 @@ def test_audit_emits_evidence_and_queue_when_mineru_finds_missed_structure(tmp_p
     assert rendered["pages"] == [2] and (d / "arbitration" / "p0002.png").exists()
 
 
+def test_audit_writes_soft_risk_flags_into_blocks(tmp_path):
+    # soft risk（reading_order：block 流里 page 倒退）被确定性写进 blocks.jsonl，不经任何裁决。
+    d = _staging(tmp_path, blocks=[_pblock("b1", 2), _pblock("b2", 1)],
+                 pages=[_ppage(1), _ppage(2)])
+    sa_audit.audit(d, tmp_path / "x.pdf", source_type="native_pdf", primary_backend="pymupdf",
+                   input_hash="h", mineru_review=lambda *a: [_rblock(1, "text"), _rblock(2, "text")],
+                   render_packets=lambda *a: None)
+    blocks = [json.loads(l) for l in (d / "blocks.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert any("reading_order_risk" in (b.get("risk_flags") or []) for b in blocks)
+
+
+def test_audit_writes_hard_risk_flag_on_page_with_asset(tmp_path):
+    # has_asset=True 的 hard-risk 页（formula_text_loss）不进 candidate，但 hard flag 确定性写进 blocks.jsonl。
+    blk = {"block_id": "b1", "type": "text", "text": "MPL\nw\n=\nMPK\nr", "page": 1,
+           "char_start": 0, "char_end": 13, "source_ref": "p0001#b1", "chapter_id": "",
+           "asset_path": "assets/p0001.png", "risk_flags": []}
+    d = _staging(tmp_path, blocks=[blk], pages=[_ppage(1, needs_vision=True, reasons=["formula"])])
+    sa_audit.audit(d, tmp_path / "x.pdf", source_type="native_pdf", primary_backend="pymupdf",
+                   input_hash="h", mineru_review=lambda *a: [_rblock(1, "equation")],
+                   render_packets=lambda *a: None)
+    ev = json.loads((d / "evidence.json").read_text(encoding="utf-8"))
+    assert ev["candidates"] == []                              # 已有 asset → 不进 candidate
+    blocks = [json.loads(l) for l in (d / "blocks.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert "formula_text_loss" in (blocks[0].get("risk_flags") or [])
+
+
 def test_audit_empty_queue_when_no_disagreement(tmp_path):
     d = _staging(tmp_path, blocks=[_pblock("b1", 1)], pages=[_ppage(1)])
     sa_audit.audit(d, tmp_path / "x.pdf", source_type="native_pdf", primary_backend="pymupdf",

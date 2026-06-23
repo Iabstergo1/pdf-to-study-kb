@@ -48,6 +48,7 @@ python scripts/pipeline.py profile --source <src>
 python scripts/pipeline.py source-convert --source <src>
 python scripts/pipeline.py source-audit --source <src> [--strict]   # PDF dual-audit → reconciliation.json + evidence.json + arbitration/queue.json
 python scripts/pipeline.py arbitration-status --source <src>        # if pending: agent auto-arbitrates the queue → arbitration-apply (protocol: ingest/references/arbitrate.md), before windows
+python scripts/pipeline.py arbitration-resolve --source <src> --page <n> --decision render|ignore --reason "..."  # optional: close a needs_human page, then re-apply
 python scripts/pipeline.py windows --source <src>
 python scripts/pipeline.py workorder --source <src>
 python scripts/pipeline.py preflight-eval --source <src> [--strict]

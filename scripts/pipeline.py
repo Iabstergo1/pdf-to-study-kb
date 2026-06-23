@@ -256,6 +256,45 @@ def cmd_arbitration_status(args):
     if pending:
         print(f"  pending pages need agent arbitration: {pending}")
         print(f"  read packets → {staging / arb.QUEUE_FILE}; write decisions → {staging / arb.DECISIONS_FILE}")
+    nh_pages = sorted(int(p) for p, dec in by_page.items() if dec == arb.NEEDS_HUMAN)
+    if nh_pages:
+        print(f"  needs_human pages (resolve with: arbitration-resolve --page <n> "
+              f"--decision render|ignore --reason ...): {nh_pages}")
+
+
+def cmd_arbitration_resolve(args):
+    """把某 needs_human 页改成合法裁决（render|ignore），人工/agent 闭环（确定性，零 LLM）。
+
+    reason 必填（记入 audit.jsonl）；只允许 needs_human → render|ignore。改 decisions.json 后须重跑
+    arbitration-apply → windows → preflight-eval 才真正闭环（windows/preflight 仍对未决 needs_human fail-closed）。"""
+    import json as _json
+    import arbitration as arb
+    staging = _staging_dir(args.source)
+    dec_path = staging / arb.DECISIONS_FILE
+    if not dec_path.exists():
+        raise SystemExit(f"缺 {arb.DECISIONS_FILE}（先 source-audit + 仲裁产出裁决）")
+    reason = (args.reason or "").strip()
+    if not reason:
+        raise SystemExit("--reason 必填：人工/agent 裁决须给出理由（记入 audit）")
+    doc = _json.loads(dec_path.read_text(encoding="utf-8"))
+    decisions = doc.get("decisions", [])
+    page = int(args.page)
+    found = next((d for d in decisions if int(d.get("page", 0)) == page), None)
+    if found is None:
+        raise SystemExit(f"page {page} 不在 {arb.DECISIONS_FILE}")
+    if found.get("decision") != arb.NEEDS_HUMAN:
+        raise SystemExit(f"page {page} 当前裁决是 {found.get('decision')!r}，不是 needs_human（无需 resolve）")
+    found["decision"] = args.decision
+    found["reason"] = reason
+    found["resolved_from"] = arb.NEEDS_HUMAN
+    dec_path.write_text(_json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    ap = staging / arb.AUDIT_FILE
+    ap.parent.mkdir(parents=True, exist_ok=True)
+    with open(ap, "a", encoding="utf-8") as f:
+        f.write(_json.dumps({"page": page, "decision": args.decision, "reason": reason,
+                             "resolved_from": arb.NEEDS_HUMAN}, ensure_ascii=False) + "\n")
+    print(f"[OK] arbitration-resolve → page {page}: needs_human → {args.decision}。"
+          f"现在重跑 arbitration-apply → windows → preflight-eval 闭环。")
 
 
 def _apply_resolutions(staging, decisions):
@@ -711,6 +750,19 @@ def cmd_show_window(args):
         print(f"<!-- window-meta: heading_path={hp} "
               f"pages={selected.get('page_start')}-{selected.get('page_end')} "
               f"contains={contains} block_ids={bids} risk_flags={rf} assets={assets} -->")
+    # 默认 ingest 输入只含 risk_flags 标签（最小标记），不含仲裁 reason/audit；--verbose 才打印（debug 用）。
+    if getattr(args, "verbose", False):
+        dec_path = staging / "arbitration" / "decisions.json"
+        if dec_path.exists():
+            ps, pe_ = int(selected.get("page_start", 0)), int(selected.get("page_end", 0))
+            decs = json.loads(dec_path.read_text(encoding="utf-8")).get("decisions", [])
+            rows = [d for d in decs if ps <= int(d.get("page", 0)) <= pe_]
+            if rows:
+                print("<!-- arbitration (verbose; NOT part of default ingest input) -->")
+                for d in rows:
+                    print(f"- page={d.get('page')} decision={d.get('decision')} "
+                          f"reason={d.get('reason', '')}")
+                print("<!-- /arbitration -->")
     if not getattr(args, "plain", False):
         pages = _pages_overlapping_range(_page_ranges_for_md(md), start, end)
         page_meta = {}
@@ -1283,6 +1335,12 @@ def main():
     arap = subparsers.add_parser("arbitration-apply",
                                  help="物化 decisions.json（render 补图+标记 / ignore / needs_human）；须在 windows 前跑")
     arap.add_argument("--source", required=True, help="source_id")
+    arrp = subparsers.add_parser("arbitration-resolve",
+                                 help="把某 needs_human 页改成 render|ignore（人工/agent 闭环，reason 必填）")
+    arrp.add_argument("--source", required=True, help="source_id")
+    arrp.add_argument("--page", required=True, type=int, help="needs_human 页号")
+    arrp.add_argument("--decision", required=True, choices=["render", "ignore"], help="改判为 render|ignore")
+    arrp.add_argument("--reason", required=True, help="裁决理由（必填，记入 audit）")
     pep = subparsers.add_parser("preflight-eval",
                                 help="L4：确定性验收 staging 预处理产物（零-LLM，可 CI 化）")
     pep.add_argument("--source", required=True, help="source_id")
@@ -1302,6 +1360,8 @@ def main():
     swp.add_argument("--source", required=True)
     swp.add_argument("--window", required=True)
     swp.add_argument("--plain", action="store_true", help="只打印窗口文本，不打印 route B 难页资产头（调试用）")
+    swp.add_argument("--verbose", action="store_true",
+                     help="额外打印本窗页的仲裁裁决/理由（debug 用；默认 ingest 输入不含 reason/audit）")
     for name, help_text in [("ingest-start", "/ingest 开工：锁 + stale registry 校验 + ingesting"),
                             ("ingest-done", "/ingest 收工：ingested(proposed) + 释放锁")]:
         p = subparsers.add_parser(name, help=help_text)
@@ -1375,6 +1435,7 @@ def main():
         'source-audit': cmd_source_audit,
         'arbitration-status': cmd_arbitration_status,
         'arbitration-apply': cmd_arbitration_apply,
+        'arbitration-resolve': cmd_arbitration_resolve,
         'windows': cmd_windows,
         'preflight-eval': cmd_preflight_eval,
         'fail': cmd_fail,

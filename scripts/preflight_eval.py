@@ -21,8 +21,8 @@ import arbitration   # 分歧闭环验收（check_closure）
 # 严重度排序：high > warn > info（strict 判定取 high）。状态：ok / warn / fail。
 __all__ = ["evaluate", "check_artifact_schema", "check_page_coverage",
            "check_window_monotonic", "check_window_contract", "check_asset_traceability",
-           "check_dual_audit", "check_evidence_bundle", "check_risk_signals", "check_orphan_blocks",
-           "check_source_ref_integrity", "check_detection_distribution"]
+           "check_dual_audit", "check_evidence_bundle", "check_risk_coverage", "check_risk_signals",
+           "check_orphan_blocks", "check_source_ref_integrity", "check_detection_distribution"]
 
 # 四层必备字段契约（artifact contract gate）：
 _REQUIRED_REPORT = ("source_type", "selected_backend", "backend_reason")   # L1
@@ -216,6 +216,39 @@ def check_evidence_bundle(evidence: dict, decisions: list, blocks: list, windows
     return _check("evidence_bundle", "high", "fail", detail)
 
 
+def check_risk_coverage(evidence: dict, windows: list, report: dict) -> dict:
+    """soft 证据风险（reading_order/heading_structure）是否已记录进窗口 risk_flags（观测，不阻断）。
+
+    与 hard-risk 的 check_evidence_bundle 区分：soft risk 只让 ingest LLM 经最小标签知情，不补图、不要求
+    裁决、不阻断 strict。非 PDF / 无 soft risk → info/ok；soft 标签已进某窗 risk_flags → info/ok；
+    有 soft 风险页的标签未进任何窗 → warn（提示重跑 windows，不阻断）。"""
+    pdf = (report.get("source_type") in source_audit.PDF_TYPES
+           or bool(report.get("dual_audit_required")))
+    soft_pages = (evidence or {}).get("soft_risk_pages", [])
+    if not pdf or not soft_pages:
+        return _check("risk_coverage", "info", "ok", "无 soft 证据风险（不适用或无）")
+    by_page = (evidence or {}).get("risk_flags_by_page", {}) or {}
+    uncovered = []
+    for pg in soft_pages:
+        soft = {f for f in (by_page.get(str(pg)) or by_page.get(pg) or []) if f in arbitration.SOFT_RISKS}
+        if not soft:
+            continue
+        # 按页判覆盖：只看覆盖本页的窗（page_start≤pg≤page_end），且要求该页**全部** soft flag 都被
+        # 这些窗携带——不能用全书并集（那会让无标签页搭别页的便车）、也不能任一命中即算（缺一类也漏）。
+        covered: set = set()
+        for w in windows or []:
+            if int(w.get("page_start", 0)) <= int(pg) <= int(w.get("page_end", 0)):
+                covered |= set(w.get("risk_flags") or [])
+        if not soft <= covered:
+            uncovered.append(pg)
+    if uncovered:
+        return _check("risk_coverage", "warn", "warn",
+                      f"{len(uncovered)} 个 soft 证据风险页的标记未进任何窗口 risk_flags："
+                      f"{sorted(uncovered)[:20]}（不阻断；重跑 windows 让 block.risk_flags 并入窗口）")
+    return _check("risk_coverage", "info", "ok",
+                  f"{len(soft_pages)} 个 soft 证据风险页已记录进窗口 risk_flags")
+
+
 def check_risk_signals(report: dict, *, low_confidence_pages: list) -> dict:
     """OCR/扫描风险。**硬规则**：扫描件/疑似扫描却没走 OCR（ocr_used=False）→ 扫描内容可能被当
     文本悄悄丢失（最危险）→ high/fail。其余：low_confidence_pages 非空 → warn（提示复核）；否则 ok。"""
@@ -338,6 +371,7 @@ def evaluate(staging_dir) -> dict:
         check_asset_traceability(d, blocks, windows),
         check_dual_audit(reconciliation, report),
         check_evidence_bundle(evidence, arb_decisions, blocks, windows, report),
+        check_risk_coverage(evidence, windows, report),
         check_risk_signals(report, low_confidence_pages=report.get("low_confidence_pages", [])),
         check_orphan_blocks(blocks, windows),
         check_source_ref_integrity(blocks, windows),

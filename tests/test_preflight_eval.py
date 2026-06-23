@@ -342,6 +342,67 @@ def test_check_evidence_bundle_na_for_markdown():
     assert c["status"] == "ok" and c["severity"] == "info"
 
 
+# ---- check_risk_coverage（soft 证据风险是否记录进窗口；观测，不阻断）----
+
+def test_check_risk_coverage_ok_when_soft_recorded():
+    ev = {"soft_risk_pages": [1], "risk_flags_by_page": {"1": ["reading_order_risk"]}}
+    ws = [_window("w0", 0, 200, ["b1"], ps=1, pe_=1)]
+    ws[0]["risk_flags"] = ["reading_order_risk"]                  # 已写进窗口
+    c = pe.check_risk_coverage(ev, ws, _ok_report())
+    assert c["name"] == "risk_coverage" and c["status"] == "ok" and c["severity"] == "info"
+
+
+def test_check_risk_coverage_warn_when_uncovered():
+    ev = {"soft_risk_pages": [1], "risk_flags_by_page": {"1": ["reading_order_risk"]}}
+    ws = [_window("w0", 0, 200, ["b1"], ps=1, pe_=1)]            # 默认 risk_flags=[] → 未记录
+    c = pe.check_risk_coverage(ev, ws, _ok_report())
+    assert c["status"] == "warn" and c["severity"] == "warn"
+
+
+def test_check_risk_coverage_na_for_markdown():
+    ev = {"soft_risk_pages": [1], "risk_flags_by_page": {"1": ["reading_order_risk"]}}
+    c = pe.check_risk_coverage(ev, [], _ok_report(source_type="markdown", dual_audit_required=False))
+    assert c["status"] == "ok" and c["severity"] == "info"
+
+
+def test_check_risk_coverage_na_when_no_soft_risk():
+    c = pe.check_risk_coverage({"soft_risk_pages": []}, [], _ok_report())
+    assert c["status"] == "ok" and c["severity"] == "info"
+
+
+def test_check_risk_coverage_warn_when_only_some_pages_covered():
+    # per-page（非全书）：page1 窗带 flag、page2 窗不带 → page2 未覆盖 → warn。
+    ev = {"soft_risk_pages": [1, 2],
+          "risk_flags_by_page": {"1": ["reading_order_risk"], "2": ["reading_order_risk"]}}
+    w1 = _window("w0", 0, 100, ["b1"], ps=1, pe_=1)
+    w1["risk_flags"] = ["reading_order_risk"]
+    w2 = _window("w1", 100, 200, ["b2"], ps=2, pe_=2)   # risk_flags=[]（page2 未带）
+    c = pe.check_risk_coverage(ev, [w1, w2], _ok_report())
+    assert c["status"] == "warn" and "2" in c["detail"]
+
+
+def test_check_risk_coverage_warn_when_covering_window_missing_one_flag():
+    # 该页有两类 soft，覆盖窗只带一类 → warn（另一类未覆盖；要求全部 soft flag 都被覆盖窗携带）。
+    ev = {"soft_risk_pages": [1],
+          "risk_flags_by_page": {"1": ["heading_structure_risk", "reading_order_risk"]}}
+    w1 = _window("w0", 0, 100, ["b1"], ps=1, pe_=1)
+    w1["risk_flags"] = ["reading_order_risk"]            # 缺 heading_structure_risk
+    c = pe.check_risk_coverage(ev, [w1], _ok_report())
+    assert c["status"] == "warn"
+
+
+def test_check_risk_coverage_ok_when_each_page_window_carries_its_flags():
+    # 每页的覆盖窗都带全该页 soft flags → ok。
+    ev = {"soft_risk_pages": [1, 2],
+          "risk_flags_by_page": {"1": ["reading_order_risk"], "2": ["reading_order_risk"]}}
+    w1 = _window("w0", 0, 100, ["b1"], ps=1, pe_=1)
+    w1["risk_flags"] = ["reading_order_risk"]
+    w2 = _window("w1", 100, 200, ["b2"], ps=2, pe_=2)
+    w2["risk_flags"] = ["reading_order_risk"]
+    c = pe.check_risk_coverage(ev, [w1, w2], _ok_report())
+    assert c["status"] == "ok" and c["severity"] == "info"
+
+
 # ---- check_risk_signals ----
 
 def test_check_risk_signals_info_when_clean():
@@ -469,7 +530,7 @@ def test_evaluate_all_ok(tmp_path):
     names = {c["name"] for c in rep["checks"]}
     assert names == {"artifact_schema", "page_coverage", "window_monotonic", "window_contract",
                      "asset_traceability", "risk_signals", "orphan_blocks", "source_ref_integrity",
-                     "detection_distribution", "dual_audit", "evidence_bundle"}
+                     "detection_distribution", "dual_audit", "evidence_bundle", "risk_coverage"}
     assert rep["summary"]["fail"] == 0
     assert rep["summary"]["ok"] >= 9
 

@@ -85,6 +85,97 @@ def test_no_candidate_when_parsers_agree_nothing():
     assert arb.select_candidates(m) == []
 
 
+# ---- evidence-risk layer: assess_risks + generalized candidates (②③) ----
+
+def test_formula_text_loss_both_detect_but_pymupdf_fragmented():
+    # 两边都检到公式，但 PyMuPDF 文本碎片化（多短行）→ formula_text_loss（hard）→ candidate。
+    pages = [_ppage(1, needs_vision=True, reasons=["formula"])]   # PyMuPDF formula presence
+    blocks = [_pblock("b1", 1, text="MPL\nw\n=\nMPK\nr")]         # fragmented, no asset
+    review = [_rblock(1, "equation")]                            # MinerU formula too
+    flags = arb.assess_risks(pages, blocks, review)
+    assert "formula_text_loss" in flags.get(1, [])
+    assert 1 in arb.select_candidates(arb.build_evidence_model(pages, blocks, review))
+
+
+def test_table_linearization_becomes_candidate():
+    # MinerU 检到表，但 source.md 该页只有线性文本（无 table 块/无管道符/无 asset）→ table_linearization。
+    pages = [_ppage(1)]
+    blocks = [_pblock("b1", 1, text="row one row two row three flattened text")]
+    review = [_rblock(1, "table")]
+    assert "table_linearization" in arb.assess_risks(pages, blocks, review).get(1, [])
+    assert 1 in arb.select_candidates(arb.build_evidence_model(pages, blocks, review))
+
+
+def test_figure_missing_asset_becomes_candidate():
+    pages = [_ppage(1)]
+    blocks = [_pblock("b1", 1, text="see the figure below")]
+    review = [_rblock(1, "image")]
+    assert "figure_missing_asset" in arb.assess_risks(pages, blocks, review).get(1, [])
+    assert 1 in arb.select_candidates(arb.build_evidence_model(pages, blocks, review))
+
+
+def test_hard_risk_with_asset_is_closed_not_candidate():
+    # 同样的图风险，但该页已有视觉资产 → 已闭环 → 不进 candidate。
+    pages = [_ppage(1, needs_vision=True, reasons=["vector-figure"])]
+    blocks = [_pblock("b1", 1, asset="assets/p0001.png", text="fig")]
+    review = [_rblock(1, "image")]
+    assert arb.select_candidates(arb.build_evidence_model(pages, blocks, review)) == []
+
+
+def test_soft_reading_order_risk_recorded_not_candidate():
+    # blocks 流里 page 倒退（2 在 1 前）→ reading_order_risk（soft）：记录但不进 candidate、不阻断。
+    pages = [_ppage(1), _ppage(2)]
+    blocks = [_pblock("b1", 2, text="later page appears first in stream"),
+              _pblock("b2", 1, text="earlier page appears second")]
+    review = [_rblock(1, "text"), _rblock(2, "text")]
+    flags = arb.assess_risks(pages, blocks, review)
+    assert any("reading_order_risk" in v for v in flags.values())
+    m = arb.build_evidence_model(pages, blocks, review)
+    assert arb.select_candidates(m) == []                        # soft 不进 candidate
+    assert m["soft_risk_pages"]                                  # 但被记录
+
+
+def test_evidence_model_exposes_risk_flags_per_page():
+    pages = [_ppage(1)]
+    blocks = [_pblock("b1", 1, text="row a row b row c flattened")]
+    review = [_rblock(1, "table")]
+    m = arb.build_evidence_model(pages, blocks, review)
+    assert "table_linearization" in m["pages"][1]["risk_flags"]
+    assert m["risk_flags_by_page"].get(1) == m["pages"][1]["risk_flags"]
+
+
+def test_windows_blockers_covers_generalized_risk_candidate():
+    # 泛化候选（table_linearization）未仲裁 → windows_blockers 阻断（闭环走 candidates，自动覆盖新风险）。
+    pages = [_ppage(1)]
+    blocks = [_pblock("b1", 1, text="row one row two flattened")]
+    review = [_rblock(1, "table")]
+    m = arb.build_evidence_model(pages, blocks, review)
+    assert ("un_arbitrated", 1) in arb.windows_blockers(m, [], blocks)
+
+
+def test_nonblocking_writes_hard_flag_on_page_with_asset():
+    # has_asset=True 的 hard-risk 页（formula_text_loss）不进 candidate，但 hard flag 仍确定性写进 block。
+    pages = [_ppage(1, needs_vision=True, reasons=["formula"])]
+    blocks = [_pblock("b1", 1, asset="assets/p0001.png", text="MPL\nw\n=\nMPK\nr")]
+    review = [_rblock(1, "equation")]
+    m = arb.build_evidence_model(pages, blocks, review)
+    assert "formula_text_loss" in m["pages"][1]["risk_flags"]
+    assert arb.select_candidates(m) == []                     # 已有图 → 已闭环 → 不进 candidate
+    nb = arb.apply_nonblocking_risk_flags(blocks, m)
+    assert "formula_text_loss" in nb[0]["risk_flags"]         # 但 hard flag 仍写进 block（LLM 知文本不可信）
+
+
+def test_nonblocking_skips_hard_flag_on_candidate_page():
+    # hard ∧ !has_asset 的候选页：flag 不在 nonblocking 写（由 arbitration render 物化，避免绕过仲裁）。
+    pages = [_ppage(1)]
+    blocks = [_pblock("b1", 1, text="row one row two flattened")]
+    review = [_rblock(1, "table")]
+    m = arb.build_evidence_model(pages, blocks, review)
+    assert 1 in arb.select_candidates(m)                      # !has_asset → candidate
+    nb = arb.apply_nonblocking_risk_flags(blocks, m)
+    assert "table_linearization" not in (nb[0].get("risk_flags") or [])
+
+
 # ---- packet build ----
 
 def test_build_packets_minimal_evidence():

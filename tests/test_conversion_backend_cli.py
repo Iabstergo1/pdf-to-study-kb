@@ -285,6 +285,94 @@ def test_arbitration_cli_help(tmp_path):
     assert "--source" in _run(["arbitration-apply", "--help"], tmp_path).stdout
 
 
+def test_arbitration_resolve_help(tmp_path):
+    out = _run(["arbitration-resolve", "--help"], tmp_path).stdout
+    assert "--page" in out and "--decision" in out and "--reason" in out
+
+
+def test_arbitration_resolve_closes_needs_human(tmp_path):
+    # ⑤ needs_human 经 arbitration-resolve 改 render（reason 必填）→ status 列出 → apply 闭环。
+    import importlib.util as u
+    if u.find_spec("fitz") is None:
+        import pytest; pytest.skip("pymupdf not installed")
+    import fitz
+    import json
+    sid = "arbresolve"
+    raw = tmp_path / f"{sid}.pdf"
+    doc = fitz.open()
+    for _ in range(2):
+        doc.new_page().insert_text((72, 72), "page body text here")
+    doc.save(str(raw)); doc.close()
+    assert _run(["add-source", "--source", sid, "--domain", "d", "--path", str(raw), "--fmt", "pdf"],
+                tmp_path).returncode == 0
+    staging = tmp_path / "pipeline-workspace" / "staging" / sid
+    staging.mkdir(parents=True)
+    (staging / "blocks.jsonl").write_text(json.dumps(
+        {"block_id": "b2", "type": "text", "text": "MPL w = MPK r", "page": 2, "char_start": 0,
+         "char_end": 13, "heading_path": "", "asset_path": None, "risk_flags": [], "chapter_id": "",
+         "source_ref": "p0002#b2"}), encoding="utf-8")
+    (staging / "pages.jsonl").write_text(json.dumps(
+        {"page": 2, "needs_vision": False, "needs_vision_reason": []}), encoding="utf-8")
+    (staging / "evidence.json").write_text(json.dumps(
+        {"pages": {"2": {}}, "candidates": [2], "initial_needs_vision": [], "reviewer_structural": [2],
+         "final_hard_pages": []}), encoding="utf-8")
+    (staging / "arbitration").mkdir()
+    (staging / "arbitration" / "decisions.json").write_text(json.dumps(
+        {"decisions": [{"page": 2, "decision": "needs_human", "reason": "ambiguous"}]}), encoding="utf-8")
+    # arbitration-status 明确列出 needs_human 页
+    st = _run(["arbitration-status", "--source", sid], tmp_path)
+    assert "needs_human" in st.stdout and "2" in st.stdout
+    # 空 reason → 非零（reason 必填校验）
+    assert _run(["arbitration-resolve", "--source", sid, "--page", "2", "--decision", "render",
+                 "--reason", ""], tmp_path).returncode != 0
+    # resolve render
+    r = _run(["arbitration-resolve", "--source", sid, "--page", "2", "--decision", "render",
+              "--reason", "real flattened formula"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    decs = json.loads((staging / "arbitration" / "decisions.json").read_text(encoding="utf-8"))["decisions"]
+    assert next(d for d in decs if d["page"] == 2)["decision"] == "render"
+    # apply 后闭环（render 物化）
+    assert _run(["arbitration-apply", "--source", sid], tmp_path).returncode == 0
+    assert (staging / "assets" / "p0002.png").exists()
+
+
+def test_arbitration_apply_does_not_modify_source_md(tmp_path):
+    # ② arbitration-apply 只动 blocks/pages/assets/evidence，绝不改 source.md（不重写主抽取文本）。
+    import importlib.util as u
+    if u.find_spec("fitz") is None:
+        import pytest; pytest.skip("pymupdf not installed")
+    import fitz
+    import json
+    sid = "arbsrcmd"
+    raw = tmp_path / f"{sid}.pdf"
+    doc = fitz.open()
+    for _ in range(2):
+        doc.new_page().insert_text((72, 72), "page body text here")
+    doc.save(str(raw)); doc.close()
+    assert _run(["add-source", "--source", sid, "--domain", "d", "--path", str(raw), "--fmt", "pdf"],
+                tmp_path).returncode == 0
+    staging = tmp_path / "pipeline-workspace" / "staging" / sid
+    staging.mkdir(parents=True)
+    (staging / "source.md").write_text(
+        "<!-- page 1 -->\nintro\n<!-- page 2 -->\nMPL w = MPK r\n", encoding="utf-8")
+    (staging / "blocks.jsonl").write_text(json.dumps(
+        {"block_id": "b2", "type": "text", "text": "MPL w = MPK r", "page": 2, "char_start": 0,
+         "char_end": 13, "heading_path": "", "asset_path": None, "risk_flags": [], "chapter_id": "",
+         "source_ref": "p0002#b2"}), encoding="utf-8")
+    (staging / "pages.jsonl").write_text(json.dumps(
+        {"page": 2, "needs_vision": False, "needs_vision_reason": []}), encoding="utf-8")
+    (staging / "evidence.json").write_text(json.dumps(
+        {"pages": {"2": {}}, "candidates": [2], "initial_needs_vision": [], "reviewer_structural": [2],
+         "final_hard_pages": []}), encoding="utf-8")
+    (staging / "arbitration").mkdir()
+    (staging / "arbitration" / "decisions.json").write_text(json.dumps({"decisions": [
+        {"page": 2, "decision": "render", "risk_flags": ["formula_text_loss"], "reason": "flattened"}]}),
+        encoding="utf-8")
+    before = (staging / "source.md").read_bytes()
+    assert _run(["arbitration-apply", "--source", sid], tmp_path).returncode == 0
+    assert (staging / "source.md").read_bytes() == before    # source.md 字节不变
+
+
 # --- windows 闸门：未闭环双审分歧时 fail-closed（除非显式 --dev-bypass） ---
 
 def _stage_pending_arbitration(tmp_path, sid):
@@ -376,3 +464,30 @@ def test_windows_fail_closed_when_pdf_missing_parse_report(tmp_path):
     r = _run(["windows", "--source", sid], tmp_path)
     assert r.returncode != 0
     assert not (staging / "windows.jsonl").exists()       # 仍被判为 PDF → 三件套缺 → 拒绝构窗
+
+
+# --- ④ show-window 默认输出不污染：只含 risk_flags 标签，不含仲裁 reason/audit（--verbose 才有） ---
+
+def test_show_window_default_excludes_arbitration_reason(tmp_path):
+    import json
+    sid = "swclean"
+    staging = tmp_path / "pipeline-workspace" / "staging" / sid
+    staging.mkdir(parents=True)
+    (staging / "source.md").write_text(
+        "<!-- block:b1 page:1 type:text -->\nbody text here\n", encoding="utf-8")
+    w = {"window_id": "w0000", "mode": "blocks", "heading_path": "T", "char_start": 0,
+         "char_end": 40, "overlap_before": 0, "block_ids": ["b1"], "page_start": 1, "page_end": 1,
+         "token_estimate": 10, "contains": ["text"], "assets": [], "risk_flags": ["formula_text_loss"],
+         "source_refs": ["p0001#b1"], "chapter_ids": [], "source_id": sid, "chapter_title": ""}
+    (staging / "windows.jsonl").write_text(json.dumps(w), encoding="utf-8")
+    (staging / "arbitration").mkdir()
+    (staging / "arbitration" / "decisions.json").write_text(json.dumps({"decisions": [
+        {"page": 1, "decision": "render", "reason": "SECRET_REASON_TEXT flattened fraction"}]}),
+        encoding="utf-8")
+    r = _run(["show-window", "--source", sid, "--window", "w0000"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "formula_text_loss" in r.stdout            # 最小风险标签在默认输出
+    assert "SECRET_REASON_TEXT" not in r.stdout       # 但仲裁 reason 不在默认输出
+    rv = _run(["show-window", "--source", sid, "--window", "w0000", "--verbose"], tmp_path)
+    assert rv.returncode == 0, rv.stderr
+    assert "SECRET_REASON_TEXT" in rv.stdout          # --verbose 才显示仲裁详情
