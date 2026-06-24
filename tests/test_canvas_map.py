@@ -55,3 +55,31 @@ def test_build_graph_degree_cap(tmp_path, monkeypatch):
     nodes, edges = cm.build_graph(cm.collect_map_pages(v))
     hub_deg = sum(1 for a, b in edges if "hub.md" in a or "hub.md" in b)
     assert hub_deg == 5                          # capped
+
+
+def test_topic_membership_and_unassigned(tmp_path):
+    v = tmp_path / "wiki"
+    _page(v, "topics/t.md", type="topic", domain="d", links=["domains/d/concepts/a.md"])
+    _page(v, "domains/d/concepts/a.md", type="concept", domain="d")
+    _page(v, "domains/d/concepts/orphan.md", type="concept", domain="d")  # no topic links it
+    nodes, _ = cm.build_graph(cm.collect_map_pages(v))
+    membership, unassigned = cm.topic_membership(nodes)
+    assert membership["topics/t.md"] == ["domains/d/concepts/a.md"]
+    assert unassigned["d"] == ["domains/d/concepts/orphan.md"]
+
+
+def test_layout_deterministic_and_covers_all_nodes(tmp_path):
+    v = tmp_path / "wiki"
+    _page(v, "overview.md", type="overview")
+    _page(v, "topics/t.md", type="topic", domain="d", links=["domains/d/concepts/a.md"])
+    _page(v, "domains/d/concepts/a.md", type="concept", domain="d")
+    _page(v, "domains/d/concepts/orphan.md", type="concept", domain="d")
+    nodes, _ = cm.build_graph(cm.collect_map_pages(v))
+    membership, unassigned = cm.topic_membership(nodes)
+    pos1, groups1 = cm.layout(nodes, membership, unassigned)
+    pos2, groups2 = cm.layout(nodes, membership, unassigned)
+    assert pos1 == pos2 and groups1 == groups2                 # deterministic
+    assert set(pos1) == set(nodes)                             # every node placed
+    labels = [g["label"] for g in groups1]
+    assert any("未分类" in l for l in labels)                  # unassigned subregion exists
+    assert any(l == "领域: d" for l in labels)                 # domain group exists
