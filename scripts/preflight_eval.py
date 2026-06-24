@@ -1,11 +1,12 @@
 """L4 调用与评测层：确定性预处理产物验收（零-LLM，纯函数 + check_*）。
 
-读 staging/<source>/ 的 blocks.jsonl / windows.jsonl / parse_report.json（+ 可选 pages.jsonl
-/ assets/），对预处理产物做 6 项确定性结构检查，产出可 CI 化的 JSON 报告。
+读 staging/<source>/ 的 blocks.jsonl / windows.jsonl / parse_report.json / reconciliation.json /
+evidence.json（+ 可选 pages.jsonl / arbitration/decisions.json / assets/），对预处理产物做 11 项确定性
+结构检查，产出可 CI 化的 JSON 报告。验收的不是"双审跑没跑"，而是"交给 ingest LLM 的证据是否完整闭环"。
 
-**不是 RAG**：不实现 search_PDF / 向量召回 / LLM 评判；只在既有确定性产物上做结构断言。
-每个 check_* 是独立纯函数（输入已解析的 blocks/windows/report），便于合成 staging 单测；
-evaluate() 负责 I/O + 组装 + summary。算不出的字段保守跳过，不伪造。
+只在既有确定性产物上做结构断言：不调用任何模型、不做任何召回式查询，纯逐项检查。每个 check_* 是独立纯函数
+（输入已解析的 blocks/windows/report），便于合成 staging 单测；evaluate() 负责 I/O + 组装 + summary。
+算不出的字段保守跳过，不伪造。
 """
 from __future__ import annotations
 

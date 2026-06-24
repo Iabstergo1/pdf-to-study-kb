@@ -1,7 +1,7 @@
 # ingest / phase A — deterministic preprocessing (zero LLM, re-runnable, idempotent skip)
 
 **Inputs:** `<src>` / `<domain>` / `<path>` / `<fmt>`.
-**Outputs:** `staging/<src>/{source.md, blocks.jsonl, chapters.json, parse_report.json, reconciliation.json, windows.jsonl, workorder.yaml}` + hard-page PNGs.
+**Outputs:** `staging/<src>/{source.md, blocks.jsonl, chapters.json, parse_report.json, reconciliation.json, evidence.json, arbitration/queue.json, windows.jsonl, workorder.yaml}` + hard-page PNGs.
 **Persisted:** the staging artifacts above + SQLite stage state.
 **Failure stop:** any step errors → stop and report; never skip ahead.
 
@@ -28,6 +28,11 @@
 - **Evidence bundle closed (PDF):** every dual-audit disagreement candidate has been arbitrated and
   materialized — `preflight-eval`'s `check_evidence_bundle` is green (no un-arbitrated / un-materialized /
   pending `needs_human`); the windows ingest reads carry the source images for arbitrated pages.
+- **Evidence-risk recorded (PDF):** `evidence.json` carries per-page `risk_flags` — hard (`formula_text_loss`
+  / `formula_undetected` / `table_linearization` / `figure_missing_asset`) become arbitration candidates when
+  the page has no visual asset; soft (`reading_order_risk` / `heading_structure_risk`) are written into the
+  window's `risk_flags` deterministically and only observed by `check_risk_coverage` (never blocking).
+  `source.md` stays the **primary extracted text** — risk is recorded beside it, never by rewriting it.
 - **needs_vision sane:** `source-convert`'s hard-page count should not be 0 (a book with formulas/figures
   should flag some pages); 0 on such a source is suspicious — review.
 - **Hard pages (route B):** `source-convert` marks hard pages (formula / vector figure / table / caption,
