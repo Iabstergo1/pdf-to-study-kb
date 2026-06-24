@@ -17,6 +17,10 @@ import thresholds  # 门禁阈值单一真值（env 可覆盖）
 _EXCLUDE_TOP = {"Review-Queue", "_meta", "assets"}
 _DERIVED = {"index.generated.md", "aliases.md"}
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)")
+# callout 学习白名单（设宽；不强制必须用 callout，只禁未知类型，防 LLM 乱编导致 Obsidian 不渲染）
+CALLOUT_WHITELIST = frozenset({"note", "tip", "info", "important", "warning", "question",
+                               "example", "abstract", "summary", "quote", "success", "todo"})
+_CALLOUT = re.compile(r"^>\s*\[!([A-Za-z][\w-]*)\]", re.MULTILINE)
 _RULE_BY_TYPE = {"concept": "L2", "topic": "L3", "overview": "L5"}
 _PLACEHOLDER = re.compile(r"（待 /ingest 填写[^）]*）")
 
@@ -114,6 +118,11 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
                 continue
             if not _link_exists(vault, target):
                 hit(rel, "broken-link", f"[[{target}]] not found")
+        # callout 类型白名单（未知类型 → 阻断，复用现有 lint 通道）
+        for ct in _CALLOUT.findall(page_rules.strip_code_blocks(body)):
+            if ct.lower() not in CALLOUT_WHITELIST:
+                hit(rel, "callout-unknown",
+                    f"未知 callout 类型 [!{ct}]（白名单：{', '.join(sorted(CALLOUT_WHITELIST))}）")
     # 综合层缺失（阶段 E 是一等产物，spec §3）：本批产出 concept 却无任何综合层页 → fail-closed
     n_skip = concepts_without_synthesis(pages)
     if n_skip:
