@@ -28,7 +28,7 @@
 | **`scripts/canvas_map.py`**（新，纯函数为主） | published 页 → 节点/边模型 → 确定性布局 → 序列化 JSON Canvas | `concept_store` / `source_artifacts` 的纯函数风格 |
 | **`pipeline.py` `cmd_rebuild_canvas` + `rebuild-canvas` 子命令**（新） | 扫 `wiki/` → 调 `canvas_map` → 写 `knowledge-map.generated.canvas`；**fail-hard**（用户主动跑，失败非零退出） | `cmd_rebuild_registry` |
 | **`pipeline.py` `cmd_lint` 收尾钩子**（改） | publish/registry/aliases/index 成功后**再**生成 canvas；**隔离失败**（见下） | 现有收尾派生重建 |
-| **`scripts/wiki_gate.py` callout check**（改） | 扫 published 页 `> [!type]`，未知类型 → 走现有 `lint_pages()` 阻断通道 hard fail | 现有 lint 检查 |
+| **`scripts/wiki_gate.py` callout check**（改） | 在 `lint_pages(vault, pages)` 内对传入的 **proposed 页**扫描 `> [!type]`，未知类型 → 走现有 `lint_pages()` 阻断通道 hard fail（promote 前拦住，不扫 published——否则错误 callout 会先被发布出去） | 现有 lint 检查 |
 | **`write-pages.md`（双树）+ 模板 + `thresholds.py`**（改） | callout/embed-width 写作规范；`CANVAS_MAX_DEGREE` 阈值 | 现有写作协议 |
 
 ## 数据流
@@ -49,12 +49,20 @@ wiki/**/*.md (published, frontmatter type ∈ {overview,topic,concept,comparison
 - **file node**：`{id, type:"file", file:<vault 相对路径>, x, y, width, height, color}`；`color` 按页 `type` 映射，**复用 `.obsidian` graph 的 1-6 配色**（concept/topic/comparison/synthesis/overview 各一色）。
 - **group node**：每 `domain` 一个大组 + 组内每 `topic` 一个子组 + 每 domain 一个 **"未分类"子组**（容纳无 topic 收录的 concept）。
 
-**边**：节点集内页面已有 wikilink → `{id, fromNode, toNode}`，双向去重；**默认不设 `color`/`side`**（让 Obsidian 自动布线、保持视觉稀疏）。
-- **密度控制**：某 node 的 degree > `thresholds.CANVAS_MAX_DEGREE`（默认 12，env 可调）→ 按确定性优先级（如目标页 type 权重 + `canonical_id` 字典序）裁到前 N 条，防 hub 压垮图。
+**domain 分组 fallback 规则**（模板 frontmatter 不全有 domain）：
+- `concept`：取 `frontmatter.domain`；缺失则归 `_unclassified`。
+- `topic`：`domains` 数组单元素 → 归该 domain 组；多元素 → 归 `_cross-domain` 组。
+- `overview` / `comparison` / `synthesis`：无 domain 字段 → 归 **`_global` 顶层组**（置于所有 domain 组上方，充当跨域导航入口）。
+
+**边**：节点集内页面已有 wikilink → `{id, fromNode, toNode}`，**默认不设 `color`/`side`**（让 Obsidian 自动布线、保持视觉稀疏）。
+- **去重与方向**：同源同目标的重复链接去重；若 A→B 与 B→A 同时存在，折叠成一条无向阅读边，方向按 `min(page_path) → max(page_path)`（字典序）；edge `id` = `sha256(from_node_id + "->" + to_node_id)[:16]`。
+- **密度控制**：某 node 的 degree > `thresholds.CANVAS_MAX_DEGREE`（默认 12，env 可调）→ 按确定性优先级（目标页 type 权重 + `canonical_id` 字典序）裁到前 N 条，防 hub 压垮图。
 
 **布局（确定性、幂等）**：
 - `domain` 按名排序，横向铺开成大 group。
 - 组内：`overview` / `comparison` / `synthesis` 置顶行；每个 `topic` 一个子组，其下 **4 列网格**排该 topic 收录的 `concept`；最后一个**"未分类"子组**排无 topic 的 concept（按 `canonical_name` → `page_path` 稳定排序，**故意暴露"哪些概念还没被 topic 收编"的结构债**）。
+
+**"topic 收录 concept"判定源**：优先从 **topic 正文 full-path wikilink** 中提取指向 concept 节点的链接（`[[domains/x/concepts/y.md]]`）；`related_concepts` frontmatter 作为可选补充（支持 `canonical_id` 和 `page_path` 两种格式，缺省跳过）。两者取并集，去重。
 - 位置 = `f(domain序, topic序, concept序)`，对齐 20px 网格、group padding 30px、节点间隔 ~80px。
 - **稳定 id**：每节点 16-hex id = `sha256(canonical_id or page_path)[:16]` → 重建幂等，Obsidian 里节点位置不乱跳。
 
@@ -72,7 +80,7 @@ wiki/**/*.md (published, frontmatter type ∈ {overview,topic,concept,comparison
 
 - **callout 白名单**（`wiki_gate.py` 常量，设宽）：`note, tip, info, important, warning, question, example, abstract, summary, quote, success, todo`。**不强制必须使用** callout，只**禁止未知类型**。
 - **`write-pages.md`（双树）约定**：难点 → `> [!warning]`、自测 → `> [!question]`、例子 → `> [!example]`、关键结论 → `> [!tip]`；难页嵌图用 `![[…png|宽度]]` 控制大小。
-- **callout lint**（`wiki_gate.py`）：扫 published 页的 `> [!type]`，`type` 不在白名单 → **hard fail**（复用现有 `lint_pages()` 阻断通道，不新建 warning 语义）。
+- **callout lint**（`wiki_gate.py`）：在 `lint_pages(vault, pages)` 内扫 **proposed 页**的 `> [!type]`，`type` 不在白名单 → **hard fail**（复用现有 `lint_pages()` 阻断通道，promote 前拦住，不新建 warning 语义；不扫 published——否则错误 callout 会先被发布出去）。
 - **反面参考**：kepano 默认教 basename wikilink `[[Note]]`，**不采纳**——项目硬规则是全 vault 相对路径，更稳。
 
 ## 文件清单
