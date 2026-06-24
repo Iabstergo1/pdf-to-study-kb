@@ -639,6 +639,16 @@ def cmd_rebuild_registry(args):
     print(f"[OK] registry: {len(registry)} concepts ({shared} shared), sha256={sha[:12]}")
 
 
+def cmd_rebuild_canvas(args):
+    """从 published 概念图谱确定性重建 wiki/knowledge-map.generated.canvas（零 LLM，fail-hard）。"""
+    import canvas_map
+    vault = _vault_dir()
+    if not vault.exists():
+        raise SystemExit("no wiki/ vault yet")
+    out = canvas_map.write_canvas(vault)
+    print(f"[OK] knowledge map -> {out}")
+
+
 def _record_workorder(db, source_id, src_row, staging):
     """据当前 vault 构建 + 落盘 + 记账 work order，返回 (path, wo, output_hash)。
     单一真值，供 workorder（首次）与 reopen（增量重开）共用——保证 reopen 的 registry hash /
@@ -1350,6 +1360,8 @@ def main():
     subparsers.add_parser("apply-obsidian-style",
                           help="落地学习库观感 CSS snippet + merge appearance.json（幂等，纯配置层零内容改动）")
     subparsers.add_parser("rebuild-registry", help="从概念页 frontmatter 重建 _registry.yaml + aliases.md")
+    subparsers.add_parser("rebuild-canvas",
+                          help="从 published 概念图谱重建 knowledge-map.generated.canvas（派生阅读层）")
     wop = subparsers.add_parser("workorder", help="生成 source 级 ingest work order")
     wop.add_argument("--source", required=True)
     rop = subparsers.add_parser("reopen", help="重开已收尾来源做增量补充（重建 workorder + 状态机回 workorder_ready）")
@@ -1442,6 +1454,7 @@ def main():
         'init-vault': cmd_init_vault,
         'apply-obsidian-style': cmd_apply_obsidian_style,
         'rebuild-registry': cmd_rebuild_registry,
+        'rebuild-canvas': cmd_rebuild_canvas,
         'workorder': cmd_workorder,
         'reopen': cmd_reopen,
         'sync-assets': cmd_sync_assets,

@@ -491,3 +491,33 @@ def test_show_window_default_excludes_arbitration_reason(tmp_path):
     rv = _run(["show-window", "--source", sid, "--window", "w0000", "--verbose"], tmp_path)
     assert rv.returncode == 0, rv.stderr
     assert "SECRET_REASON_TEXT" in rv.stdout          # --verbose 才显示仲裁详情
+
+
+# --- rebuild-canvas CLI (Task 4) ---
+
+def test_rebuild_canvas_writes_canvas(tmp_path):
+    import json
+    vault = tmp_path / "wiki"
+    _mk_concept(vault, domain="d", name="A")          # existing helper writes a concept page (proposed)
+    # promote it to published so canvas picks it up:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("mdpage", ROOT / "scripts" / "mdpage.py")
+    mp = importlib.util.module_from_spec(spec); spec.loader.exec_module(mp)
+    cpath = next((vault / "domains" / "d" / "concepts").glob("*.md"))
+    meta, body = mp.read_page(cpath); meta["status"] = "published"; mp.write_page(cpath, meta, body)
+    r = _run(["rebuild-canvas"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    out = vault / "knowledge-map.generated.canvas"
+    assert out.exists()
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert any(n.get("type") == "file" for n in data["nodes"])
+
+
+def test_rebuild_canvas_no_vault_fail_hard(tmp_path):
+    r = _run(["rebuild-canvas"], tmp_path)
+    assert r.returncode != 0                            # fail-hard when no wiki/
+
+
+def test_rebuild_canvas_help(tmp_path):
+    assert "rebuild-canvas" in _run(["rebuild-canvas", "--help"], tmp_path).stdout or \
+           _run(["rebuild-canvas", "--help"], tmp_path).returncode == 0
