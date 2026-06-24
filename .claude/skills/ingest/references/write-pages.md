@@ -100,3 +100,12 @@ Sub-unit command detail:
 6. **Ownership (most-missed):** a page with no `source:` frontmatter (`topics/**`/`comparisons/**`/`synthesis/**`/`overview.md`) **must be in some window's `window-done --writes`**, or it is fail-closed as an orphan.
 7. **No bare `|` in table-cell formulas:** use `\lvert S \rvert` for `|S|` (or escape `\|`, or move the formula out of the table) — a bare `|` is read as a column separator and breaks KaTeX (`formula-table-pipe` hard-block).
 8. **Synthesis (phase E) mandatory:** after producing concepts you must update overview + build topic/comparison/synthesis as needed (into `--writes`), else lint `L7-synthesis-missing` blocks.
+
+## Callouts & figure width (Obsidian rendering)
+
+- **Callouts** (whitelist — unknown types hard-fail lint): pitfalls → `> [!warning]`, self-test →
+  `> [!question]`, worked examples → `> [!example]`, key takeaways → `> [!tip]`. Whitelist:
+  `note tip info important warning question example abstract summary quote success todo`. Not required
+  to use callouts — just never invent a type outside the whitelist.
+- **Figure width**: when embedding a hard-page image, size it with `![[assets/<src>/pNNNN.png|640]]`
+  (formula pages narrower, full-page figures wider) so it does not overflow the reading column.
