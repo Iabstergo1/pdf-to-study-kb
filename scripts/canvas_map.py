@@ -1,11 +1,13 @@
 """knowledge-map canvas：从 published 概念图谱确定性生成 JSON Canvas（零 LLM，纯函数 + 一个 IO 写）。
 
 节点 = 概念导航页（type ∈ MAP_TYPES，排除 lesson/source）；边 = 受控 wikilink；
-布局 = 领域组 → 主题子组 → 概念网格 + 未分类子区。派生覆盖，不是发布门禁。
+布局 = _global 顶行 → 领域组（含 _cross-domain）→ 主题子组 → 概念网格 + 未分类子区。
+派生覆盖，不是发布门禁。设计真值见 docs/superpowers/specs/2026-06-24-knowledge-map-canvas-design.md。
 """
 from __future__ import annotations
 
 import hashlib
+import json as _json
 import re
 from pathlib import Path
 import sys
@@ -23,13 +25,42 @@ _EXCLUDE_TOP = {"Review-Queue", "_meta", "assets"}
 _DERIVED = {"index.generated.md", "aliases.md"}
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)")
 
+# spec 2：JSON Canvas 预设色 "1"-"6" 常量映射（硬编码，不读 .obsidian/graph.json 的 RGB int）。
+_TYPE_COLOR = {"concept": "5", "topic": "6", "comparison": "3",
+               "synthesis": "4", "overview": "2"}
+_VALID_COLORS = {"1", "2", "3", "4", "5", "6"}
+
+# spec 4：degree 裁剪的"目标页 type 权重"（越小越优先保留）。nav 页（overview/topic）连边优先于
+# concept-concept，hub 超额时先保住通往导航中枢的边。
+_EDGE_TYPE_WEIGHT = {"overview": 0, "topic": 1, "comparison": 2, "synthesis": 2, "concept": 3}
+
+_GLOBAL = "_global"
+_CROSS = "_cross-domain"
+
 
 def _h16(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
 
 
+def _color(ptype: str):
+    return _TYPE_COLOR.get(ptype)
+
+
+def _node_domain(page: dict) -> str:
+    """spec 3 domain 归属：concept→frontmatter.domain；topic→单 domains[] 取唯一值，多/空→_cross-domain；
+    overview/comparison/synthesis（视为无 domain）→ _global。topic 缺 domains[] 时回退到 domain 单值。"""
+    t = page["type"]
+    if t == "concept":
+        return page.get("domain") or ""
+    if t == "topic":
+        doms = page.get("domains") or ([page["domain"]] if page.get("domain") else [])
+        return doms[0] if len(doms) == 1 else _CROSS
+    return _GLOBAL  # overview / comparison / synthesis
+
+
 def collect_map_pages(vault) -> list[dict]:
-    """扫 published 页 → 节点集（type ∈ MAP_TYPES，排除 lesson/source/派生/_meta 等）。"""
+    """扫 published 页 → 节点集（type ∈ MAP_TYPES，排除 lesson/source/派生/_meta 等）。
+    捕获 domain（concept）/ domains[]（topic）/ canonical_id（concept）/ related_concepts[]（topic）。"""
     vault = Path(vault)
     pages = []
     for f in sorted(vault.rglob("*.md")):
@@ -43,13 +74,25 @@ def collect_map_pages(vault) -> list[dict]:
                  if not t.strip().startswith(("http://", "https://"))}
         pages.append({"page_path": rel, "type": meta.get("type"),
                       "domain": meta.get("domain", "") or "",
+                      "domains": meta.get("domains") or [],
+                      "canonical_id": meta.get("canonical_id", "") or "",
+                      "related_concepts": meta.get("related_concepts") or [],
                       "title": meta.get("title") or meta.get("canonical_name") or rel,
                       "links": links})
     return pages
 
 
+def _edge_key(edge: tuple, nodes: dict) -> tuple:
+    """spec 4 全局优先级：按两端点中更高优先（更小权重）的目标 type 排序，再按 page_path 字典序。"""
+    a, b = edge
+    w = min(_EDGE_TYPE_WEIGHT.get(nodes[a]["type"], 9),
+            _EDGE_TYPE_WEIGHT.get(nodes[b]["type"], 9))
+    return (w, a, b)
+
+
 def build_graph(pages: list[dict]) -> tuple[dict, list[tuple]]:
-    """nodes {page_path: page} + edges [(a,b)] —— 只连节点集内、无向去重、per-node degree 裁剪。"""
+    """nodes {page_path: page} + edges [(a,b)] —— 只连节点集内、无向去重折叠、按确定性优先级全局排序后
+    贪心 per-node degree 裁剪（spec：输出与输入顺序无关）。"""
     nodes = {p["page_path"]: p for p in pages}
     raw: set[tuple] = set()
     for p in pages:
@@ -57,13 +100,12 @@ def build_graph(pages: list[dict]) -> tuple[dict, list[tuple]]:
         for tgt in p["links"]:
             for cand in ((tgt,) if tgt.endswith(".md") else (tgt, f"{tgt}.md")):
                 if cand in nodes and cand != src:
-                    raw.add(tuple(sorted((src, cand))))
+                    raw.add(tuple(sorted((src, cand))))     # 双向折叠：min→max
                     break
-    # Read threshold dynamically to support test monkeypatching
     max_deg = getattr(thresholds, "CANVAS_MAX_DEGREE")
     deg: dict[str, int] = {}
     edges: list[tuple] = []
-    for a, b in sorted(raw):
+    for a, b in sorted(raw, key=lambda e: _edge_key(e, nodes)):
         if deg.get(a, 0) >= max_deg or deg.get(b, 0) >= max_deg:
             continue
         edges.append((a, b))
@@ -81,15 +123,27 @@ _BAND_GAP = 160
 
 
 def topic_membership(nodes: dict) -> tuple[dict, dict]:
+    """topic 收录 concept = 正文 full-path wikilink ∪ frontmatter.related_concepts[]（canonical_id 解析）。
+    返回 (membership {topic_path: [concept_path...]}, unassigned {concept.domain: [concept_path...]})。"""
     concepts = {pp for pp, p in nodes.items() if p["type"] == "concept"}
+    cid_index = {p["canonical_id"]: pp for pp, p in nodes.items()
+                 if p["type"] == "concept" and p.get("canonical_id")}
     membership: dict[str, list] = {}
     claimed: set = set()
     for tp in sorted(pp for pp, p in nodes.items() if p["type"] == "topic"):
-        members = []
+        members: list[str] = []
+        seen: set = set()
+        # 正文 wikilink → concept（只识别 full vault 相对路径；裸名宽容补 .md）
         for tgt in sorted(nodes[tp]["links"]):
             for cand in ((tgt,) if tgt.endswith(".md") else (tgt, f"{tgt}.md")):
-                if cand in concepts:
-                    members.append(cand); claimed.add(cand); break
+                if cand in concepts and cand not in seen:
+                    members.append(cand); seen.add(cand); break
+        # related_concepts[]（canonical_id）作可选补充，解析到 concept page_path，取并集
+        for rc in sorted(str(x) for x in (nodes[tp].get("related_concepts") or [])):
+            cp = cid_index.get(rc)
+            if cp and cp not in seen:
+                members.append(cp); seen.add(cp)
+        claimed |= seen
         membership[tp] = members
     unassigned: dict[str, list] = {}
     for cp in sorted(concepts - claimed):
@@ -112,29 +166,26 @@ def _group(key: str, label: str, members: list, pos: dict, pad: int = _PAD) -> d
 
 
 def layout(nodes: dict, membership: dict, unassigned: dict) -> tuple[dict, list[dict]]:
+    """确定性、幂等布局：_global 独立顶行 → 领域组（含 _cross-domain，按名排序）横向铺开。
+    组内每 topic 一子组（topic 锚 + 4 列 concept 网格）+ 一个未分类子组。"""
     pos: dict[str, tuple] = {}
     groups: list[dict] = []
     y = 0
-    # overview（全局置顶横排）
-    x = _PAD
-    for pp in sorted(pp for pp, p in nodes.items() if p["type"] == "overview"):
-        pos[pp] = (x, y, _NODE_W, _NODE_H); x += _NODE_W + _GX
-    if x > _PAD:
+    # 第一行：_global（overview + 无 domain 的 comparison / synthesis），横排
+    glob = sorted(pp for pp, p in nodes.items() if _node_domain(p) == _GLOBAL)
+    if glob:
+        x = _PAD
+        for pp in glob:
+            pos[pp] = (x, y, _NODE_W, _NODE_H); x += _NODE_W + _GX
+        groups.append(_group("global", "全局（总览 / 跨域综合）", glob, pos, pad=_PAD * 2))
         y += _NODE_H + _BAND_GAP
-    domains = sorted({p["domain"] for p in nodes.values()
-                      if p["type"] in ("concept", "topic", "comparison", "synthesis")})
+    # 第二行起：所有领域组（含 _cross-domain）按名排序
+    domains = sorted({_node_domain(p) for p in nodes.values()} - {_GLOBAL})
     for dom in domains:
         dom_members: list[str] = []
-        # 顶行：comparison + synthesis
-        x = _PAD
-        for pp in sorted(pp for pp, p in nodes.items()
-                         if p["domain"] == dom and p["type"] in ("comparison", "synthesis")):
-            pos[pp] = (x, y, _NODE_W, _NODE_H); x += _NODE_W + _GX; dom_members.append(pp)
-        if x > _PAD:
-            y += _NODE_H + _GY
         # 各 topic 行（topic 锚 + concept 网格）
         for tp in sorted(pp for pp, p in nodes.items()
-                         if p["domain"] == dom and p["type"] == "topic"):
+                         if p["type"] == "topic" and _node_domain(p) == dom):
             ty = y
             pos[tp] = (_PAD, ty, _NODE_W, _NODE_H); dom_members.append(tp)
             members = membership.get(tp, [])
@@ -146,7 +197,7 @@ def layout(nodes: dict, membership: dict, unassigned: dict) -> tuple[dict, list[
             groups.append(_group("topic:" + tp, f"主题: {nodes[tp]['title']}", [tp] + members, pos))
             rows = max(1, (len(members) + _COL - 1) // _COL)
             y = ty + rows * (_NODE_H + _GY)
-        # 未分类
+        # 未分类子组（无 topic 收录的 concept，故意暴露结构债）
         un = unassigned.get(dom, [])
         if un:
             uy = y
@@ -157,20 +208,10 @@ def layout(nodes: dict, membership: dict, unassigned: dict) -> tuple[dict, list[
             groups.append(_group("unassigned:" + dom, "未分类（待 topic 收编）", un, pos))
             y = uy + ((len(un) + _COL - 1) // _COL) * (_NODE_H + _GY)
         if dom_members:
-            groups.append(_group("domain:" + dom, f"领域: {dom}", dom_members, pos, pad=_PAD * 2))
+            label = "跨域主题" if dom == _CROSS else f"领域: {dom}"
+            groups.append(_group("domain:" + dom, label, dom_members, pos, pad=_PAD * 2))
         y += _BAND_GAP
     return pos, groups
-
-
-import json as _json
-
-_TYPE_RGB = {"overview": 15054183, "topic": 5214681, "comparison": 10181558,
-             "synthesis": 10181558, "concept": 5744499}  # 与 .obsidian graph.json 一致
-
-
-def _color(ptype: str):
-    rgb = _TYPE_RGB.get(ptype)
-    return f"#{rgb:06X}" if rgb is not None else None
 
 
 def to_canvas(vault) -> dict:
@@ -178,8 +219,7 @@ def to_canvas(vault) -> dict:
     nodes, edges = build_graph(pages)
     membership, unassigned = topic_membership(nodes)
     pos, groups = layout(nodes, membership, unassigned)
-    cnodes: list[dict] = []
-    cnodes.extend(groups)                                   # groups render under files (array order = z)
+    cnodes: list[dict] = list(groups)                       # groups render under files (array order = z)
     for pp in sorted(nodes):
         x, y, w, h = pos[pp]
         node = {"id": _h16(pp), "type": "file", "file": pp, "x": x, "y": y,
@@ -188,26 +228,35 @@ def to_canvas(vault) -> dict:
         if col:
             node["color"] = col
         cnodes.append(node)
-    cedges = [{"id": _h16(f"{a}->{b}"), "fromNode": _h16(a), "toNode": _h16(b)}
+    # spec 6：edge id = sha256(from_id + "->" + to_id)[:16]（节点 id，非 path）
+    cedges = [{"id": _h16(f"{_h16(a)}->{_h16(b)}"), "fromNode": _h16(a), "toNode": _h16(b)}
               for a, b in edges]
     return {"nodes": cnodes, "edges": cedges}
 
 
 def validate_canvas(canvas: dict, valid_files: set[str]) -> list[str]:
-    """kepano json-canvas 的 8 条自检 + file 指向 published 页。返回问题列表（[] = 合法）。"""
+    """kepano json-canvas 自检 + file 指向 published 页。返回问题列表（[] = 合法）。
+    ① id 唯一 ② edge 引用存在节点 ③ file 指向 published ④ type 白名单 ⑥ color 合法
+    ⑦ JSON 可解析 ⑧ 必需字段（id/x/y/width/height）齐全。"""
     problems: list[str] = []
     ids: list[str] = []
     node_ids: set[str] = set()
     for n in canvas.get("nodes", []):
-        ids.append(n.get("id"))
-        node_ids.add(n.get("id"))
+        nid = n.get("id")
+        if nid is None:
+            problems.append(f"node missing id: {n.get('type')} {n.get('label') or n.get('file')}")
+        ids.append(nid)
+        node_ids.add(nid)
         if n.get("type") not in ("file", "group", "text", "link"):
             problems.append(f"bad node type: {n.get('type')}")
         if n.get("type") == "file" and n.get("file") not in valid_files:
             problems.append(f"file node points to non-published page: {n.get('file')}")
+        if "color" in n and not (n["color"] in _VALID_COLORS
+                                 or (isinstance(n["color"], str) and n["color"].startswith("#"))):
+            problems.append(f"bad color (not preset 1-6 or #hex): {n.get('color')}")
         for k in ("x", "y", "width", "height"):
             if k not in n:
-                problems.append(f"node {n.get('id')} missing {k}")
+                problems.append(f"node {nid} missing {k}")
     for e in canvas.get("edges", []):
         ids.append(e.get("id"))
         if e.get("fromNode") not in node_ids:

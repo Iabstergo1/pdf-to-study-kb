@@ -128,3 +128,92 @@ def test_validate_canvas_catches_dangling_file_and_edge(tmp_path):
     problems = cm.validate_canvas(canvas, valid_files=set())
     assert any("ghost.md" in p for p in problems)            # file not in published set
     assert any("missing" in p for p in problems)             # edge → nonexistent node
+
+
+# ── spec-alignment（详细版 spec：预设色 / _global / 类型权重裁剪 / related_concepts 并集）──
+
+def _raw(vault, rel, frontmatter: dict, body=""):
+    """写任意 frontmatter 的 published 页（测细节字段：domains[]/canonical_id/related_concepts[]）。"""
+    p = vault / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["---"]
+    for k, v in frontmatter.items():
+        if isinstance(v, list):
+            lines.append(f"{k}: [{', '.join(v)}]")
+        else:
+            lines.append(f"{k}: {v}")
+    lines.append("---")
+    p.write_text("\n".join(lines) + "\n" + body, encoding="utf-8")
+
+
+def test_color_uses_canvas_presets_not_hex(tmp_path):
+    # spec 2：color 用 JSON Canvas 预设色 "1"-"6" 常量映射，不读 graph.json 的 RGB int
+    v = tmp_path / "wiki"
+    _page(v, "overview.md", type="overview")
+    _page(v, "domains/d/concepts/a.md", type="concept", domain="d")
+    canvas = cm.to_canvas(v)
+    by_file = {n["file"]: n for n in canvas["nodes"] if n["type"] == "file"}
+    assert by_file["overview.md"]["color"] == "2"            # overview → "2"
+    assert by_file["domains/d/concepts/a.md"]["color"] == "5"  # concept → "5"
+
+
+def test_global_row_and_cross_domain_grouping(tmp_path):
+    # spec 3：overview/comparison/synthesis(无 domain)→ _global 独立顶行；多/空 domains[] 的 topic → _cross-domain
+    v = tmp_path / "wiki"
+    _page(v, "overview.md", type="overview")
+    _page(v, "syntheses/s.md", type="synthesis")                       # 无 domain → _global
+    _raw(v, "topics/cd.md", {"type": "topic", "status": "published",
+                             "domains": ["d1", "d2"], "title": "跨域主题页"})  # 多 domains → _cross-domain
+    _page(v, "domains/d1/concepts/a.md", type="concept", domain="d1")
+    nodes, _ = cm.build_graph(cm.collect_map_pages(v))
+    membership, unassigned = cm.topic_membership(nodes)
+    pos, groups = cm.layout(nodes, membership, unassigned)
+    assert set(pos) == set(nodes)                                       # 全节点有位置
+    labels = [g["label"] for g in groups]
+    assert any("全局" in l for l in labels)                             # _global 组存在
+    assert any("跨域" in l for l in labels)                             # _cross-domain 组存在
+    # _global 顶行在最上方：其 y 不大于任一 domain 组
+    gy = [g["y"] for g in groups if "全局" in g["label"]][0]
+    other_y = [g["y"] for g in groups if "全局" not in g["label"]]
+    assert all(gy <= oy for oy in other_y)
+
+
+def test_degree_cap_prioritizes_high_weight_target(tmp_path, monkeypatch):
+    # spec 4：裁剪按确定性优先级（目标页 type 权重），高权重(overview)边优先保留
+    v = tmp_path / "wiki"
+    links = ["overview.md"] + [f"domains/d/concepts/c{i}.md" for i in range(20)]
+    _page(v, "topics/hub.md", type="topic", domain="d", links=links)
+    _page(v, "overview.md", type="overview")
+    for i in range(20):
+        _page(v, f"domains/d/concepts/c{i}.md", type="concept", domain="d")
+    import thresholds; monkeypatch.setattr(thresholds, "CANVAS_MAX_DEGREE", 3)
+    nodes, edges = cm.build_graph(cm.collect_map_pages(v))
+    hub_edges = [tuple(sorted(e)) for e in edges if "topics/hub.md" in e]
+    assert len(hub_edges) == 3                                          # capped
+    assert ("overview.md", "topics/hub.md") in hub_edges               # 高权重边幸存
+
+
+def test_topic_membership_unions_related_concepts(tmp_path):
+    # spec 5：topic.related_concepts[]（canonical_id 格式）作可选补充，解析进 concept 节点取并集
+    v = tmp_path / "wiki"
+    _raw(v, "domains/d/concepts/b.md",
+         {"type": "concept", "status": "published", "domain": "d",
+          "canonical_id": "concept.d.b", "title": "B"})
+    _raw(v, "topics/t.md",
+         {"type": "topic", "status": "published", "domains": ["d"],
+          "related_concepts": ["concept.d.b"], "title": "T"})            # 正文无链接，仅 related_concepts
+    nodes, _ = cm.build_graph(cm.collect_map_pages(v))
+    membership, unassigned = cm.topic_membership(nodes)
+    assert membership["topics/t.md"] == ["domains/d/concepts/b.md"]      # canonical_id 解析到 page_path
+    assert unassigned == {}                                              # b 已被收录，不算未分类
+
+
+def test_validate_rejects_bad_color_and_missing_id(tmp_path):
+    # spec 自检 ⑥ color 合法 + ⑧ 必需字段（id）齐全
+    bad = {"nodes": [{"id": "a" * 16, "type": "file", "file": "x.md",
+                      "x": 0, "y": 0, "width": 1, "height": 1, "color": "banana"},
+                     {"type": "group", "label": "g", "x": 0, "y": 0, "width": 1, "height": 1}],
+           "edges": []}
+    problems = cm.validate_canvas(bad, valid_files={"x.md"})
+    assert any("color" in p for p in problems)                          # "banana" 不是合法 color
+    assert any("id" in p for p in problems)                             # group 缺 id
