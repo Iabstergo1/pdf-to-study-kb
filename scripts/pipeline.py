@@ -1073,6 +1073,12 @@ def cmd_lint(args):
     concept_store.write_registry(vault, registry)
     concept_store.write_aliases(vault, registry)
     wiki_gate.write_index(vault)
+    # 派生阅读层（不阻断发布）：发布/registry/aliases/index 已成功，再建 canvas；失败只 warn、留旧图。
+    try:
+        import canvas_map
+        canvas_map.write_canvas(vault)
+    except Exception as e:
+        print(f"[WARN] knowledge-map canvas 重建失败：{e}；已保留旧 canvas，请手动跑 rebuild-canvas")
     log = vault / "log.md"
     with open(log, "a", encoding="utf-8", newline="\n") as f:
         f.write(f"\n## [{date.today().isoformat()}] lint | {args.source} | promoted {n} pages\n")

@@ -241,3 +241,38 @@ def test_lint_fail_blocks_rolls_back_and_queues(tmp_path):
     # 回流：lint failed 后状态机允许回 ingest_waiting
     state_store.start_stage(db, "note", "ingest_waiting", input_hash="retry")
     assert state_store.get_source(db, "note")["current_stage"] == "ingest_waiting"
+
+
+# ---------------------------------------------------------------------------
+# Task 5: cmd_lint finish hook — canvas 生成 + 发布隔离
+# ---------------------------------------------------------------------------
+
+def _setup_one_proposed(tmp_path, sid="note"):
+    """ingest_ready + 一个合格 proposed lesson + ingest-done（不含 lint）。返回 vault 路径。"""
+    _ingest_ready(tmp_path, sid)
+    mdpage.write_page(tmp_path / f"wiki/domains/misc/lessons/{sid}.md",
+                      {"type": "lesson", "status": "proposed", "managed_by": "pipeline",
+                       "title": f"{sid} 课", "source": sid}, GOOD_LESSON)
+    assert _run(["ingest-done", "--source", sid], tmp_path).returncode == 0
+    return tmp_path / "wiki"
+
+
+def test_lint_finish_builds_canvas(tmp_path):
+    vault = _setup_one_proposed(tmp_path)
+    assert _run(["lint", "--source", "note"], tmp_path).returncode == 0
+    assert (vault / "knowledge-map.generated.canvas").exists()
+
+
+def test_lint_canvas_failure_does_not_break_publish(tmp_path):
+    vault = _setup_one_proposed(tmp_path)
+    # 用"目标路径预先是个目录"制造真实的 write 失败（跨子进程有效，monkeypatch 不行）
+    canvas_path = vault / "knowledge-map.generated.canvas"
+    canvas_path.mkdir(parents=True, exist_ok=True)
+    (canvas_path / "keep.txt").write_text("old", encoding="utf-8")  # 非空目录，确保 write_text 失败
+    r = _run(["lint", "--source", "note"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr          # canvas 失败不回滚发布
+    assert (vault / "index.generated.md").exists()          # 发布已完成
+    meta, _ = mdpage.read_page(vault / "domains/misc/lessons/note.md")
+    assert meta["status"] == "published"                    # lesson 已发布
+    assert canvas_path.is_dir()                             # 旧 canvas（此处是目录）被保留
+    assert "[WARN]" in r.stdout                             # 打印了 warning
