@@ -57,7 +57,7 @@ wiki/**/*.md (published, frontmatter type ∈ {overview,topic,concept,comparison
 - **第一行**：`_global` 组独立顶行（容纳 `overview`、无 domain 的 `comparison` / `synthesis`）。
 - **第二行起**：所有 `domain` 组（含 `_cross-domain`）按名排序，横向铺开成大 group。
 - 组内：`overview` / `comparison` / `synthesis` 置顶行；每个 `topic` 一个子组，其下 **4 列网格**排该 topic 收录的 `concept`；最后一个**"未分类"子组**排无 topic 的 concept（按 `canonical_name` → `page_path` 稳定排序，**故意暴露"哪些概念还没被 topic 收编"的结构债**）。
-- **topic 收录 concept 判定**：优先从 topic 页**正文 wikilink**中提取指向 concept 节点集内页面的链接（full vault 相对路径 / `canonical_id` 两种格式均识别）；`frontmatter.related_concepts[]` 仅作可选补充（同样支持 full-path / `canonical_id`）。两者取并集。
+- **topic 收录 concept 判定**：优先从 topic 页**正文 wikilink**中提取指向 concept 节点集内页面的链接——**只识别 full vault 相对路径**（如 `[[domains/x/concepts/y.md|Y]]`，和项目硬规则一致；`[[canonical_id]]` 格式会被 broken-link lint 拦掉，不鼓励）。`frontmatter.related_concepts[]` 作可选补充，此处允许 `canonical_id` 格式（它不是正文 wikilink，不受 broken-link lint 约束）。canvas parser 把两者都解析到 concept 节点，取并集。
 - 位置 = `f(domain序, topic序, concept序)`，对齐 20px 网格、group padding 30px、节点间隔 ~80px。
 - **稳定 id**：每节点 16-hex id = `sha256(canonical_id or page_path)[:16]` → 重建幂等，Obsidian 里节点位置不乱跳。
 
