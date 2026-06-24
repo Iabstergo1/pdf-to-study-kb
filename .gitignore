@@ -46,3 +46,6 @@ tmp/
 Thumbs.db
 
 .codegraph/
+
+# MinerU models moved off C: (2.4GB; re-download via modelscope if deleted)
+.mineru-models/
