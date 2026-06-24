@@ -83,3 +83,48 @@ def test_layout_deterministic_and_covers_all_nodes(tmp_path):
     labels = [g["label"] for g in groups1]
     assert any("未分类" in l for l in labels)                  # unassigned subregion exists
     assert any(l == "领域: d" for l in labels)                 # domain group exists
+
+
+import json
+
+
+def test_to_canvas_valid_shape_and_self_check(tmp_path):
+    v = tmp_path / "wiki"
+    _page(v, "overview.md", type="overview")
+    _page(v, "topics/t.md", type="topic", domain="d", links=["domains/d/concepts/a.md"])
+    _page(v, "domains/d/concepts/a.md", type="concept", domain="d", links=["topics/t.md"])
+    canvas = cm.to_canvas(v)
+    file_nodes = [n for n in canvas["nodes"] if n["type"] == "file"]
+    assert {n["file"] for n in file_nodes} == {"overview.md", "topics/t.md", "domains/d/concepts/a.md"}
+    ids = [n["id"] for n in canvas["nodes"]] + [e["id"] for e in canvas["edges"]]
+    assert len(ids) == len(set(ids))                        # rule 1: ids unique
+    node_ids = {n["id"] for n in canvas["nodes"]}
+    for e in canvas["edges"]:                               # rule 2: edges reference existing nodes
+        assert e["fromNode"] in node_ids and e["toNode"] in node_ids
+    valid = {n["file"] for n in file_nodes}
+    assert cm.validate_canvas(canvas, valid) == []          # all 8 rules pass
+
+
+def test_to_canvas_deterministic(tmp_path):
+    v = tmp_path / "wiki"
+    _page(v, "topics/t.md", type="topic", domain="d", links=["domains/d/concepts/a.md"])
+    _page(v, "domains/d/concepts/a.md", type="concept", domain="d")
+    assert cm.to_canvas(v) == cm.to_canvas(v)               # byte-stable
+
+
+def test_write_canvas_emits_parseable_file(tmp_path):
+    v = tmp_path / "wiki"
+    _page(v, "domains/d/concepts/a.md", type="concept", domain="d")
+    out = cm.write_canvas(v)
+    assert out.name == "knowledge-map.generated.canvas"
+    data = json.loads(out.read_text(encoding="utf-8"))      # rule 7: parseable JSON
+    assert "nodes" in data and "edges" in data
+
+
+def test_validate_canvas_catches_dangling_file_and_edge(tmp_path):
+    canvas = {"nodes": [{"id": "a" * 16, "type": "file", "file": "ghost.md",
+                         "x": 0, "y": 0, "width": 10, "height": 10}],
+              "edges": [{"id": "b" * 16, "fromNode": "a" * 16, "toNode": "missing"}]}
+    problems = cm.validate_canvas(canvas, valid_files=set())
+    assert any("ghost.md" in p for p in problems)            # file not in published set
+    assert any("missing" in p for p in problems)             # edge → nonexistent node

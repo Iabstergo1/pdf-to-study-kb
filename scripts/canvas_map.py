@@ -160,3 +160,77 @@ def layout(nodes: dict, membership: dict, unassigned: dict) -> tuple[dict, list[
             groups.append(_group("domain:" + dom, f"领域: {dom}", dom_members, pos, pad=_PAD * 2))
         y += _BAND_GAP
     return pos, groups
+
+
+import json as _json
+
+_TYPE_RGB = {"overview": 15054183, "topic": 5214681, "comparison": 10181558,
+             "synthesis": 10181558, "concept": 5744499}  # 与 .obsidian graph.json 一致
+
+
+def _color(ptype: str):
+    rgb = _TYPE_RGB.get(ptype)
+    return f"#{rgb:06X}" if rgb is not None else None
+
+
+def to_canvas(vault) -> dict:
+    pages = collect_map_pages(vault)
+    nodes, edges = build_graph(pages)
+    membership, unassigned = topic_membership(nodes)
+    pos, groups = layout(nodes, membership, unassigned)
+    cnodes: list[dict] = []
+    cnodes.extend(groups)                                   # groups render under files (array order = z)
+    for pp in sorted(nodes):
+        x, y, w, h = pos[pp]
+        node = {"id": _h16(pp), "type": "file", "file": pp, "x": x, "y": y,
+                "width": w, "height": h}
+        col = _color(nodes[pp]["type"])
+        if col:
+            node["color"] = col
+        cnodes.append(node)
+    cedges = [{"id": _h16(f"{a}->{b}"), "fromNode": _h16(a), "toNode": _h16(b)}
+              for a, b in edges]
+    return {"nodes": cnodes, "edges": cedges}
+
+
+def validate_canvas(canvas: dict, valid_files: set[str]) -> list[str]:
+    """kepano json-canvas 的 8 条自检 + file 指向 published 页。返回问题列表（[] = 合法）。"""
+    problems: list[str] = []
+    ids: list[str] = []
+    node_ids: set[str] = set()
+    for n in canvas.get("nodes", []):
+        ids.append(n.get("id"))
+        node_ids.add(n.get("id"))
+        if n.get("type") not in ("file", "group", "text", "link"):
+            problems.append(f"bad node type: {n.get('type')}")
+        if n.get("type") == "file" and n.get("file") not in valid_files:
+            problems.append(f"file node points to non-published page: {n.get('file')}")
+        for k in ("x", "y", "width", "height"):
+            if k not in n:
+                problems.append(f"node {n.get('id')} missing {k}")
+    for e in canvas.get("edges", []):
+        ids.append(e.get("id"))
+        if e.get("fromNode") not in node_ids:
+            problems.append(f"edge fromNode missing node: {e.get('fromNode')}")
+        if e.get("toNode") not in node_ids:
+            problems.append(f"edge toNode missing node: {e.get('toNode')}")
+    if len(ids) != len(set(ids)):
+        problems.append("duplicate id across nodes/edges")
+    try:
+        _json.dumps(canvas)                                 # parseable, no unencodable
+    except (TypeError, ValueError) as e:
+        problems.append(f"not JSON-serializable: {e}")
+    return problems
+
+
+def write_canvas(vault) -> Path:
+    vault = Path(vault)
+    canvas = to_canvas(vault)
+    valid = {n["file"] for n in canvas["nodes"] if n["type"] == "file"}
+    problems = validate_canvas(canvas, valid)
+    if problems:
+        raise ValueError("canvas self-check failed: " + "; ".join(problems[:10]))
+    out = vault / CANVAS_FILE
+    out.write_text(_json.dumps(canvas, ensure_ascii=False, indent=2) + "\n",
+                   encoding="utf-8", newline="\n")
+    return out
