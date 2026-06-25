@@ -109,3 +109,25 @@ Sub-unit command detail:
   to use callouts — just never invent a type outside the whitelist.
 - **Figure width**: when embedding a hard-page image, size it with `![[assets/<src>/pNNNN.png|640]]`
   (formula pages narrower, full-page figures wider) so it does not overflow the reading column.
+
+## Precise links & inline markup (Obsidian Flavored Markdown)
+
+Obsidian extends Markdown; use these to make the knowledge web precise and readable — **wikilinks always
+stay full vault-relative paths** (hard rule #1); the extensions below only add anchors/display on top (the
+link regex stops at `|`/`#`, so they are lint-safe).
+
+- **Targeted wikilinks** (full path + anchor/display):
+  - `[[domains/x/concepts/y.md|布雷斯悖论]]` — custom display text: read naturally, link precisely.
+  - `[[domains/x/lessons/z.md#纳什均衡]]` — link to a specific **section heading** of the target page.
+  - `[[domains/x/lessons/z.md#^thm-2]]` — link to a specific **block** (paragraph / formula / theorem).
+- **Block IDs** make one line linkable: append `^block-id` to the end of a paragraph, or on its own line
+  after a list / quote / `$$…$$`. Use for a key theorem / definition / formula another page should cite
+  exactly — `… 故均衡唯一。 ^thm-2` → cite as `[[…/z.md#^thm-2]]`. Keep ids short, ascii-kebab.
+- **Highlight** a term with `==…==` only on its **first, defining** occurrence (`==纳什均衡==`), to mark
+  "this is the term being defined here" — not for decoration.
+- **Editorial comments** `%%…%%` are hidden in reading view: only for non-substantive notes to a future
+  editor. **Never hide substantive content or an unresolved problem inside `%%…%%`** — open issues go to the
+  Review-Queue, not into invisible text the lint cannot see.
+- **Mermaid** (` ```mermaid `) is allowed only for an **LLM-authored conceptual diagram** you genuinely
+  understand (e.g. a small concept-dependency graph); add `class NodeName internal-link;` to make a node a
+  vault link. It is **not** a way to reproduce a source figure — source figures stay image-authoritative (phase D).
