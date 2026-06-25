@@ -25,7 +25,7 @@ preprocess (zero-LLM CLI):  add-source → profile → source-convert → source
 same session (the LLM): read chapters.json (whole-book map) + source.md / hard-page images
                         → write status:proposed pages (hard pages embed source images by type)
                         → concept resolution → synthesis layer
-finish (zero LLM):      lint → promote(proposed→published) or rollback + Review-Queue → rebuild index/registry/aliases
+finish (zero LLM):      lint → promote(proposed→published) or rollback + Review-Queue → rebuild index/registry/aliases + knowledge-map canvas (derived reading layer; rebuild-canvas CLI / lint hook; publish-isolated — canvas failure never blocks publish)
 ```
 
 ## 3. Core constraints
@@ -35,7 +35,7 @@ finish (zero LLM):      lint → promote(proposed→published) or rollback + Rev
 3. **Concept dedup:** every concept create/update goes through the single `resolve-concept`; a `canonical_id` hit merges, **never creates a duplicate**. `_registry.yaml` / `aliases.md` are derived — skills never hand-write them.
 4. **Two-phase publish:** skills only write `status: proposed`; the finishing gate promotes to `published` and indexes it; failure rolls back (`pipeline-workspace/snapshots/`) + enqueues to `Review-Queue/`.
 5. **Overwrite protection:** writing an existing page requires "in work-order snapshot + `managed_by != human` + hash match"; otherwise refuse and emit a proposal. **Never silently edit a human-owned page.**
-6. **Fail-closed lint:** broken links, missing required sections, orphan pages (unaccounted ownership), duplicate `canonical_id`, formula pages missing their source image — any one blocks publish.
+6. **Fail-closed lint:** broken links, missing required sections, orphan pages (unaccounted ownership), duplicate `canonical_id`, formula pages missing their source image, unknown callout type (outside the whitelist) — any one blocks publish.
 
 ## 4. PDF preprocessing contract (PyMuPDF + MinerU dual-audit)
 

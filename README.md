@@ -191,7 +191,7 @@ pdf-to-study-kb/
 ├── README.md                 # 本文件
 ├── requirements.txt          # 仅 PyMuPDF + PyYAML + pytest
 ├── scripts/
-│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（35 子命令，全部业务逻辑在此）
+│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（36 子命令，全部业务逻辑在此）
 │   ├── state_store.py / locks.py                # 业务 SQLite 状态机 / 单-ingest 并发锁
 │   ├── source_profile.py / source_convert.py / source_artifacts.py / chaptering.py   # L1 解析 + L2 结构契约
 │   ├── source_backends/      # 后端：pymupdf（fast path）/ markdown / 可选 mineru（结构化）
@@ -236,14 +236,14 @@ pdf-to-study-kb/
 
 所有 skill 背后调用的都是 `python scripts/pipeline.py <command>`（零 LLM、可独立运行，**全部业务逻辑与安全守卫都在这里**）。日常对话无需手动输入；该接口面向**精细控制、问题排查、手动重跑某一阶段、无人值守脚本化**等高级场景。
 
-命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 35 个子命令：
+命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 36 个子命令：
 
 <details>
 <summary><b>展开：完整 CLI 命令参考</b></summary>
 
 ### 状态与维护
 
-> **为什么有这组**：ingest 是可中断的长任务，且同一 vault 受并发锁保护。这组命令让你不依赖 LLM 就能"看清现状 + 崩溃自救"——`status`/`next` 回答"每个来源走到哪一步、锁在谁手里、下一步该做什么"；`fail` 把崩溃残留的 `running` 阶段标记 `failed` 以便重跑；`unlock` 受控回收超时的 stale 锁（活锁拒绝，防误删）；`rebuild-registry` 从概念页 frontmatter 重建派生索引；`init-vault` 幂等搭起空脚手架。
+> **为什么有这组**：ingest 是可中断的长任务，且同一 vault 受并发锁保护。这组命令让你不依赖 LLM 就能"看清现状 + 崩溃自救"——`status`/`next` 回答"每个来源走到哪一步、锁在谁手里、下一步该做什么"；`fail` 把崩溃残留的 `running` 阶段标记 `failed` 以便重跑；`unlock` 受控回收超时的 stale 锁（活锁拒绝，防误删）；`rebuild-registry` 从概念页 frontmatter 重建派生索引；`rebuild-canvas` 从 published 图谱重建知识地图 canvas（派生阅读层，fail-hard）；`init-vault` 幂等搭起空脚手架。
 
 | 命令 | 作用 | 关键参数 |
 |------|------|------|
@@ -253,6 +253,7 @@ pdf-to-study-kb/
 | `unlock` | 受控回收 stale vault 锁；活锁拒绝 | `--ttl 1800` |
 | `fail` | 把崩溃残留的 `running` 阶段标记 `failed` | `--source --stage --error` |
 | `rebuild-registry` | 从概念页 frontmatter 重建 `_registry.yaml` + `aliases.md` | — |
+| `rebuild-canvas` | 从 published 概念图谱重建 `knowledge-map.generated.canvas`（派生阅读层，fail-hard） | — |
 
 ### 预处理（零 LLM，顺序固定，幂等跳过）
 
@@ -286,11 +287,11 @@ pdf-to-study-kb/
 
 ### 收尾、提升与查询
 
-> **为什么有这组**：发布是**一道门**而非直接写盘（核心约束③两阶段发布）。`lint` 是收尾门禁——proposed 全部过检才 promote 成 published 并重建 index，任一不过（断链 / 缺必需小节 / 孤儿页 / 重复 canonical_id / 公式页缺源图）即回滚就地修改、把违规项写进 `Review-Queue/`；`promotion-candidates`/`promote-concept` 处理"领域私有概念何时升为跨域 shared"（人工确认后机械执行）；`check-session` 守 query-session 的只读目录契约。
+> **为什么有这组**：发布是**一道门**而非直接写盘（核心约束③两阶段发布）。`lint` 是收尾门禁——proposed 全部过检才 promote 成 published 并重建 index，任一不过（断链 / 缺必需小节 / 孤儿页 / 重复 canonical_id / 公式页缺源图 / 未知 callout 类型）即回滚就地修改、把违规项写进 `Review-Queue/`。**发布成功后**再确定性重建 `knowledge-map.generated.canvas`（派生阅读层，见〈在 Obsidian 中阅读〉）——这一步**发布隔离**：canvas 重建失败只告警、保留旧图、绝不回滚已发布内容（派生阅读层不当内容发布门禁）。`promotion-candidates`/`promote-concept` 处理"领域私有概念何时升为跨域 shared"（人工确认后机械执行）；`check-session` 守 query-session 的只读目录契约。
 
 | 命令 | 作用 | 关键参数 |
 |------|------|------|
-| `lint` | 收尾门禁：proposed 过则 promote、败则回滚 + Review-Queue | `--source` |
+| `lint` | 收尾门禁：proposed 过则 promote + 重建 index/registry/aliases/canvas、败则回滚 + Review-Queue | `--source` |
 | `promotion-candidates` | 检测跨域提升候选（人工确认） | `--propose` |
 | `promote-concept` | 机械提升一个概念为 shared | `--id concept.<domain>.<slug>` |
 | `check-session` | query-session 目录契约检查（Q1） | `--id <run_id> [--saved]` |
