@@ -98,6 +98,18 @@ On Windows, prefer the native tools (Glob/Grep/Read/Edit — no path issues). To
 (PowerShell 7) + the study-kb interpreter directly; do not drive PowerShell through Git Bash. Set
 `$env:PYTHONUTF8=1` before Python (CJK sources/paths).
 
+**Testing tiers (markers).** The suite is layered by pytest marker (registered in `pytest.ini`, applied
+per-file in `tests/conftest.py`; rationale + audit in `pipeline-workspace/reports/test-audit-2026-06-25.md`):
+`fast` (default), `cli`, `slow`, `skill`, `realbook`. Do **not** treat full `pytest tests` as the per-edit
+default — run the fast tier for ordinary edits, the full gate before publish/refactor. Always pass a fresh
+`--basetemp` (a prior run can leave a locked `pytest-of-Lenovo` temp dir that blocks default cleanup).
+
+```powershell
+$env:PYTHONUTF8=1; $bt="$PWD\tmp\pt-$(Get-Random)"
+python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt   # daily ~16s / 441 tests
+python -m pytest tests -q --basetemp=$bt                                  # full gate ~93s / 501 tests
+```
+
 ## 9. Authority & do-not-reintroduce
 
 - **This file = Codex's project truth;** `CLAUDE.md` = Claude's (equivalent). On conflict, prefer the safer
