@@ -217,3 +217,94 @@ def test_validate_rejects_bad_color_and_missing_id(tmp_path):
     problems = cm.validate_canvas(bad, valid_files={"x.md"})
     assert any("color" in p for p in problems)                          # "banana" 不是合法 color
     assert any("id" in p for p in problems)                             # group 缺 id
+
+
+# ── spec-faithfulness 收紧（复核发现的 4 处未钉住分歧）──
+
+def test_node_id_uses_canonical_id_not_path(tmp_path):
+    # spec：稳定 id = sha256(canonical_id or page_path)[:16]。概念页改路径不应抖动节点身份。
+    import hashlib
+
+    def h16(s):
+        return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
+
+    v = tmp_path / "wiki"
+    _raw(v, "domains/d/concepts/x.md",
+         {"type": "concept", "status": "published", "domain": "d",
+          "canonical_id": "concept.d.x", "title": "X"})
+    _page(v, "topics/t.md", type="topic", domain="d", links=["domains/d/concepts/x.md"])
+    canvas = cm.to_canvas(v)
+    by_file = {n["file"]: n for n in canvas["nodes"] if n["type"] == "file"}
+    # 概念页 id 由 canonical_id 派生，而非 page path
+    assert by_file["domains/d/concepts/x.md"]["id"] == h16("concept.d.x")
+    assert by_file["domains/d/concepts/x.md"]["id"] != h16("domains/d/concepts/x.md")
+    # 无 canonical_id 的 topic 回退到 page path
+    assert by_file["topics/t.md"]["id"] == h16("topics/t.md")
+    # 边端点引用与节点 id 一致（指向 canonical_id 派生的 concept 节点）
+    node_ids = {n["id"] for n in canvas["nodes"]}
+    for e in canvas["edges"]:
+        assert e["fromNode"] in node_ids and e["toNode"] in node_ids
+    assert any(h16("concept.d.x") in (e["fromNode"], e["toNode"]) for e in canvas["edges"])
+
+
+def test_concept_in_two_topics_placed_once_under_primary(tmp_path):
+    # spec：每页一个 file node。被两个 topic 收录的 concept 由 sorted-first topic（primary）承载布局，
+    # 不被后一个 topic 覆盖坐标；两个 topic 仍各自连边到它。
+    v = tmp_path / "wiki"
+    _page(v, "topics/t_a.md", type="topic", domain="d", links=["domains/d/concepts/c.md"])
+    _page(v, "topics/t_b.md", type="topic", domain="d", links=["domains/d/concepts/c.md"])
+    _page(v, "domains/d/concepts/c.md", type="concept", domain="d")
+    nodes, edges = cm.build_graph(cm.collect_map_pages(v))
+    membership, _ = cm.topic_membership(nodes)
+    # primary = sorted-first topic 独占 member；另一个 topic 不重复收录
+    assert membership["topics/t_a.md"] == ["domains/d/concepts/c.md"]
+    assert membership["topics/t_b.md"] == []
+    pos, groups = cm.layout(nodes, membership, {})
+    assert set(pos) == set(nodes)                                       # 每节点恰一坐标
+    # concept 坐标落在其 primary topic group 的包围盒内
+    g_a = next(g for g in groups if g["label"] == "主题: topics/t_a.md")
+    cx, cy, cw, ch = pos["domains/d/concepts/c.md"]
+    assert g_a["x"] <= cx and cx + cw <= g_a["x"] + g_a["width"]
+    assert g_a["y"] <= cy and cy + ch <= g_a["y"] + g_a["height"]
+    # 两个 topic 都连边到 concept（primary 只决定布局，不影响连边）
+    inc = {tuple(sorted(e)) for e in edges if "domains/d/concepts/c.md" in e}
+    assert ("domains/d/concepts/c.md", "topics/t_a.md") in inc
+    assert ("domains/d/concepts/c.md", "topics/t_b.md") in inc
+
+
+def test_domains_laid_out_horizontally(tmp_path):
+    # spec：各 domain 组按名横向铺开（不同 x 带），不是纵向堆叠在同一 x。
+    v = tmp_path / "wiki"
+    _page(v, "topics/t1.md", type="topic", domain="d1", links=["domains/d1/concepts/a.md"])
+    _page(v, "domains/d1/concepts/a.md", type="concept", domain="d1")
+    _page(v, "topics/t2.md", type="topic", domain="d2", links=["domains/d2/concepts/b.md"])
+    _page(v, "domains/d2/concepts/b.md", type="concept", domain="d2")
+    nodes, _ = cm.build_graph(cm.collect_map_pages(v))
+    membership, unassigned = cm.topic_membership(nodes)
+    _, groups = cm.layout(nodes, membership, unassigned)
+    d1 = next(g for g in groups if g["label"] == "领域: d1")
+    d2 = next(g for g in groups if g["label"] == "领域: d2")
+    assert d1["x"] != d2["x"]                                           # 不同列（横向，非堆叠）
+    assert abs(d1["y"] - d2["y"]) < max(d1["height"], d2["height"])     # 同一横带，不是上下堆
+    lo, hi = sorted((d1, d2), key=lambda g: g["x"])
+    assert hi["x"] >= lo["x"] + lo["width"] - 40                        # 横向不重叠（容 20px 对齐）
+
+
+def test_degree_cap_tiebreak_by_canonical_id(tmp_path, monkeypatch):
+    # spec 4：同权重边的 tie-break 用 canonical_id 字典序（非 page path）。
+    # 构造 path 序与 canonical_id 序相反的两条同权重边，cap=1 只留一条 → 由 canonical_id 决定幸存者。
+    v = tmp_path / "wiki"
+    _page(v, "topics/hub.md", type="topic", domain="d",
+          links=["domains/d/concepts/m_zzz.md", "domains/d/concepts/m_aaa.md"])
+    _raw(v, "domains/d/concepts/m_zzz.md",       # path 大、canonical_id 小（a_aaa）
+         {"type": "concept", "status": "published", "domain": "d",
+          "canonical_id": "concept.d.a_aaa", "title": "X"})
+    _raw(v, "domains/d/concepts/m_aaa.md",       # path 小、canonical_id 大（z_zzz）
+         {"type": "concept", "status": "published", "domain": "d",
+          "canonical_id": "concept.d.z_zzz", "title": "Y"})
+    import thresholds; monkeypatch.setattr(thresholds, "CANVAS_MAX_DEGREE", 1)
+    nodes, edges = cm.build_graph(cm.collect_map_pages(v))
+    hub_edges = [tuple(sorted(e)) for e in edges if "topics/hub.md" in e]
+    assert len(hub_edges) == 1
+    # canonical_id 序：a_aaa < z_zzz → X(m_zzz.md) 幸存；若按 path 序则会是 Y(m_aaa.md)
+    assert "domains/d/concepts/m_zzz.md" in hub_edges[0]

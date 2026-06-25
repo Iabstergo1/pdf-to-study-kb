@@ -42,6 +42,11 @@ def _h16(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
 
 
+def _node_id(page: dict) -> str:
+    """spec：稳定 16-hex id = sha256(canonical_id or page_path)[:16]。概念页改路径不抖动身份。"""
+    return _h16(page.get("canonical_id") or page["page_path"])
+
+
 def _color(ptype: str):
     return _TYPE_COLOR.get(ptype)
 
@@ -83,11 +88,14 @@ def collect_map_pages(vault) -> list[dict]:
 
 
 def _edge_key(edge: tuple, nodes: dict) -> tuple:
-    """spec 4 全局优先级：按两端点中更高优先（更小权重）的目标 type 排序，再按 page_path 字典序。"""
+    """spec 4 全局优先级：按两端点中更高优先（更小权重）的目标 type 排序，再按 canonical_id 字典序
+    （无 canonical_id 的页回退到 page_path）。"""
     a, b = edge
     w = min(_EDGE_TYPE_WEIGHT.get(nodes[a]["type"], 9),
             _EDGE_TYPE_WEIGHT.get(nodes[b]["type"], 9))
-    return (w, a, b)
+    ka = nodes[a].get("canonical_id") or a
+    kb = nodes[b].get("canonical_id") or b
+    return (w, tuple(sorted((ka, kb))))
 
 
 def build_graph(pages: list[dict]) -> tuple[dict, list[tuple]]:
@@ -124,6 +132,8 @@ _BAND_GAP = 160
 
 def topic_membership(nodes: dict) -> tuple[dict, dict]:
     """topic 收录 concept = 正文 full-path wikilink ∪ frontmatter.related_concepts[]（canonical_id 解析）。
+    **primary assignment**：一个 concept 可被多个 topic 链接，但布局上只归属 sorted-first 的 topic
+    （每页一个 file node，spec），后续 topic 不重复收录、只各自连边。
     返回 (membership {topic_path: [concept_path...]}, unassigned {concept.domain: [concept_path...]})。"""
     concepts = {pp for pp, p in nodes.items() if p["type"] == "concept"}
     cid_index = {p["canonical_id"]: pp for pp, p in nodes.items()
@@ -132,18 +142,17 @@ def topic_membership(nodes: dict) -> tuple[dict, dict]:
     claimed: set = set()
     for tp in sorted(pp for pp, p in nodes.items() if p["type"] == "topic"):
         members: list[str] = []
-        seen: set = set()
         # 正文 wikilink → concept（只识别 full vault 相对路径；裸名宽容补 .md）
         for tgt in sorted(nodes[tp]["links"]):
             for cand in ((tgt,) if tgt.endswith(".md") else (tgt, f"{tgt}.md")):
-                if cand in concepts and cand not in seen:
-                    members.append(cand); seen.add(cand); break
+                if cand in concepts and cand not in claimed and cand not in members:
+                    members.append(cand); break
         # related_concepts[]（canonical_id）作可选补充，解析到 concept page_path，取并集
         for rc in sorted(str(x) for x in (nodes[tp].get("related_concepts") or [])):
             cp = cid_index.get(rc)
-            if cp and cp not in seen:
-                members.append(cp); seen.add(cp)
-        claimed |= seen
+            if cp and cp not in claimed and cp not in members:
+                members.append(cp)
+        claimed |= set(members)                              # primary：先到先得，后续 topic 不再收录
         membership[tp] = members
     unassigned: dict[str, list] = {}
     for cp in sorted(concepts - claimed):
@@ -179,21 +188,25 @@ def layout(nodes: dict, membership: dict, unassigned: dict) -> tuple[dict, list[
             pos[pp] = (x, y, _NODE_W, _NODE_H); x += _NODE_W + _GX
         groups.append(_group("global", "全局（总览 / 跨域综合）", glob, pos, pad=_PAD * 2))
         y += _NODE_H + _BAND_GAP
-    # 第二行起：所有领域组（含 _cross-domain）按名排序
+    # 第二行起：所有领域组（含 _cross-domain）按名排序，**横向铺开**（各占独立 x 带，组内向下流）
+    band_y0 = y
+    dom_x = _PAD
     domains = sorted({_node_domain(p) for p in nodes.values()} - {_GLOBAL})
     for dom in domains:
         dom_members: list[str] = []
-        # 各 topic 行（topic 锚 + concept 网格）
+        y = band_y0
+        dom_max_x = dom_x + _NODE_W                          # 至少 topic 列宽
+        # 各 topic 行（topic 锚 + 4 列 concept 网格），在本 domain 的 x 带内向下排
         for tp in sorted(pp for pp, p in nodes.items()
                          if p["type"] == "topic" and _node_domain(p) == dom):
             ty = y
-            pos[tp] = (_PAD, ty, _NODE_W, _NODE_H); dom_members.append(tp)
+            pos[tp] = (dom_x, ty, _NODE_W, _NODE_H); dom_members.append(tp)
             members = membership.get(tp, [])
-            cx0 = _PAD + _NODE_W + _GX
+            cx0 = dom_x + _NODE_W + _GX
             for i, cp in enumerate(members):
-                pos[cp] = (cx0 + (i % _COL) * (_NODE_W + _GX),
-                           ty + (i // _COL) * (_NODE_H + _GY), _NODE_W, _NODE_H)
-                dom_members.append(cp)
+                cx = cx0 + (i % _COL) * (_NODE_W + _GX)
+                pos[cp] = (cx, ty + (i // _COL) * (_NODE_H + _GY), _NODE_W, _NODE_H)
+                dom_members.append(cp); dom_max_x = max(dom_max_x, cx + _NODE_W)
             groups.append(_group("topic:" + tp, f"主题: {nodes[tp]['title']}", [tp] + members, pos))
             rows = max(1, (len(members) + _COL - 1) // _COL)
             y = ty + rows * (_NODE_H + _GY)
@@ -202,15 +215,15 @@ def layout(nodes: dict, membership: dict, unassigned: dict) -> tuple[dict, list[
         if un:
             uy = y
             for i, cp in enumerate(un):
-                pos[cp] = (_PAD + (i % _COL) * (_NODE_W + _GX),
-                           uy + (i // _COL) * (_NODE_H + _GY), _NODE_W, _NODE_H)
-                dom_members.append(cp)
+                cx = dom_x + (i % _COL) * (_NODE_W + _GX)
+                pos[cp] = (cx, uy + (i // _COL) * (_NODE_H + _GY), _NODE_W, _NODE_H)
+                dom_members.append(cp); dom_max_x = max(dom_max_x, cx + _NODE_W)
             groups.append(_group("unassigned:" + dom, "未分类（待 topic 收编）", un, pos))
             y = uy + ((len(un) + _COL - 1) // _COL) * (_NODE_H + _GY)
         if dom_members:
             label = "跨域主题" if dom == _CROSS else f"领域: {dom}"
             groups.append(_group("domain:" + dom, label, dom_members, pos, pad=_PAD * 2))
-        y += _BAND_GAP
+        dom_x = dom_max_x + _BAND_GAP                        # 下一 domain 排到右侧
     return pos, groups
 
 
@@ -222,15 +235,17 @@ def to_canvas(vault) -> dict:
     cnodes: list[dict] = list(groups)                       # groups render under files (array order = z)
     for pp in sorted(nodes):
         x, y, w, h = pos[pp]
-        node = {"id": _h16(pp), "type": "file", "file": pp, "x": x, "y": y,
+        node = {"id": _node_id(nodes[pp]), "type": "file", "file": pp, "x": x, "y": y,
                 "width": w, "height": h}
         col = _color(nodes[pp]["type"])
         if col:
             node["color"] = col
         cnodes.append(node)
     # spec 6：edge id = sha256(from_id + "->" + to_id)[:16]（节点 id，非 path）
-    cedges = [{"id": _h16(f"{_h16(a)}->{_h16(b)}"), "fromNode": _h16(a), "toNode": _h16(b)}
-              for a, b in edges]
+    cedges = []
+    for a, b in edges:
+        fid, tid = _node_id(nodes[a]), _node_id(nodes[b])
+        cedges.append({"id": _h16(f"{fid}->{tid}"), "fromNode": fid, "toNode": tid})
     return {"nodes": cnodes, "edges": cedges}
 
 
