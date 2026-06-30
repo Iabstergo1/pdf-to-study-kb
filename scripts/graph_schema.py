@@ -1,7 +1,6 @@
 """Knowledge Graph v2.0 schema constants + deterministic id helper（零 LLM、零兄弟依赖）。
 
-设计真值见 docs/specs/knowledge-graph-v2.md。v2.0 关系白名单刻意收窄到三类（轻标注、重确定性
-分析）；八类细关系与 source_spine 完整脊柱属 v2.1。
+v2.0 关系白名单刻意收窄到三类（轻标注、重确定性分析）。
 """
 from __future__ import annotations
 

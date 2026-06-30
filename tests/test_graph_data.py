@@ -48,20 +48,18 @@ graph_data = _load("graph_data")
 def test_to_graph_data_shape_and_test_mode(monkeypatch):
     monkeypatch.setenv("STUDY_KB_GRAPH_TEST_MODE", "1")
     analyzed = {"nodes": [], "edges": [], "communities": [], "learning_paths": [],
-                "insights": [], "source_spine": []}
+                "insights": []}
     data = graph_data.to_graph_data(analyzed)
     assert set(data) == {"version", "generated_at", "scope", "nodes", "edges", "communities",
-                         "learning_paths", "insights", "source_spine", "stats"}
+                         "learning_paths", "insights", "stats"}
     assert data["version"] == 2 and data["scope"] == "v2.0"
     assert data["generated_at"] == "2026-01-01T00:00:00Z"
-    assert data["source_spine"] == []          # v2.0 刻意留空，脊柱属 v2.1
     assert data["stats"] == {"node_count": 0, "edge_count": 0, "community_count": 0}
 
 
 def test_to_graph_data_sorts_by_id():
     analyzed = {"nodes": [{"id": "b"}, {"id": "a"}], "edges": [{"id": "e2"}, {"id": "e1"}],
-                "communities": [{"id": "c2"}, {"id": "c1"}], "learning_paths": [], "insights": [],
-                "source_spine": []}
+                "communities": [{"id": "c2"}, {"id": "c1"}], "learning_paths": [], "insights": []}
     data = graph_data.to_graph_data(analyzed)
     assert [n["id"] for n in data["nodes"]] == ["a", "b"]
     assert [e["id"] for e in data["edges"]] == ["e1", "e2"]
@@ -75,7 +73,7 @@ def test_write_graph_data_roundtrip(tmp_path, monkeypatch):
     vault = tmp_path / "wiki"
     vault.mkdir()
     analyzed = {"nodes": [], "edges": [], "communities": [], "learning_paths": [],
-                "insights": [], "source_spine": []}
+                "insights": []}
     out = graph_data.write_graph_data(vault, analyzed)
     assert out.name == "graph-data.generated.json"
     data = json.loads(out.read_text(encoding="utf-8"))

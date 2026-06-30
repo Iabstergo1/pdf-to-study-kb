@@ -20,7 +20,7 @@ gh = _load("graph_html")
 
 def _empty():
     return {"version": 2, "scope": "v2.0", "nodes": [], "edges": [], "communities": [],
-            "learning_paths": [], "insights": [], "source_spine": [], "stats": {}}
+            "learning_paths": [], "insights": [], "stats": {}}
 
 
 def test_embeds_graph_data_and_escapes_script_end():

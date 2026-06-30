@@ -35,7 +35,6 @@ def to_graph_data(analyzed: dict) -> dict:
         "communities": communities,
         "learning_paths": analyzed.get("learning_paths", []),
         "insights": analyzed.get("insights", []),
-        "source_spine": analyzed.get("source_spine", []),
         "stats": {
             "node_count": len(nodes),
             "edge_count": len(edges),

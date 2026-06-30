@@ -19,7 +19,7 @@ gl = _load("graph_lint")
 def _base():
     return {"version": 2, "generated_at": "2026-01-01T00:00:00Z", "scope": "v2.0",
             "nodes": [], "edges": [], "communities": [], "learning_paths": [],
-            "insights": [], "source_spine": [], "stats": {}}
+            "insights": [], "stats": {}}
 
 
 def _concept(nid, **kw):

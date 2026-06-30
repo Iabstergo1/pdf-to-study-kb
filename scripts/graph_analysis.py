@@ -302,7 +302,7 @@ def _insights(nodes, edges, degree):
     return out
 
 
-def analyze_graph(model: dict, source_spine=None) -> dict:
+def analyze_graph(model: dict) -> dict:
     nodes_in = model.get("nodes", [])
     by_id = {n["id"]: n for n in nodes_in}
     inlinks = defaultdict(set)
@@ -363,5 +363,4 @@ def analyze_graph(model: dict, source_spine=None) -> dict:
         n.pop("_bridge", None)
         n.pop("_comms", None)
     return {"nodes": out_nodes, "edges": edges, "communities": communities,
-            "learning_paths": learning, "insights": insights,
-            "source_spine": list(source_spine or [])}
+            "learning_paths": learning, "insights": insights}

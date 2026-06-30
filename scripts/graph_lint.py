@@ -18,7 +18,7 @@ import mdpage
 import thresholds
 
 REQUIRED_TOP = {"version", "generated_at", "scope", "nodes", "edges", "communities",
-                "learning_paths", "insights", "source_spine", "stats"}
+                "learning_paths", "insights", "stats"}
 _DENSE_DEGREE = thresholds.GRAPH_DENSE_DEGREE
 _EXCLUDE_TOP = {"Review-Queue", "_meta", "assets"}
 _DERIVED = {"index.generated.md", "aliases.md", "knowledge-map.generated.canvas",
