@@ -25,7 +25,7 @@ preprocess (zero-LLM CLI):  add-source → profile → source-convert → source
 same session (the LLM): read chapters.json (whole-book map) + source.md / hard-page images
                         → write status:proposed pages (hard pages embed source images by type)
                         → concept resolution → synthesis layer
-finish (zero LLM):      lint → promote(proposed→published) or rollback + Review-Queue → rebuild index/registry/aliases + knowledge graph v2.0 (graph-data.generated.json → force-directed offline knowledge-graph HTML, click-node-opens-Obsidian via obsidian://; zero-LLM Louvain communities; rebuild-graph CLI + lint hook; publish-isolated — graph failure never blocks publish; design truth docs/specs/knowledge-graph-v2.md; canvas removed — topic_membership lives in graph_model and powers the A2 concept-coverage gate)
+finish (zero LLM):      lint → promote(proposed→published) or rollback + Review-Queue → rebuild index/registry/aliases + knowledge graph v2.0 (graph-data.generated.json → force-directed offline knowledge-graph HTML, click-node-opens-Obsidian via obsidian://; zero-LLM Louvain communities; rebuild-graph CLI + lint hook; publish-isolated — graph failure never blocks publish; canvas removed — topic_membership lives in graph_model and powers the A2 concept-coverage gate)
 ```
 
 ## 3. Core constraints
