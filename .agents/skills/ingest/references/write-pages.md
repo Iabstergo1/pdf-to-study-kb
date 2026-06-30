@@ -88,11 +88,14 @@ Sub-unit command detail:
   `overview.md`) wikilink only a few core concepts.
 - **Depth (do not degrade to a summary):** every concept has at least one worked example or key derivation
   step (not just a definition); a lesson gives actionable detail, not a chapter recap. Vague summary pages are unfinished.
+- **写作风格（高信息密度的学术散文，不是模板填空）：** 正文以连贯段落为主、少用机械的要点罗列；句式长短交错、节奏有起伏，用词精确多样，避免公式化、重复化、可预测的措辞；段落之间有清晰的逻辑递进，每段服务一个目的又彼此衔接，读起来像一篇打磨过的短文而非提纲。**必需小节标题保持 verbatim（lint 强制），但小节内不套固定骨架**——依内容自然展开；表格只用在确需结构化对照处（comparison 的对比维度、topic 的各来源贡献），其余以散文铺陈。不同概念/页面之间也要避免千篇一律的同构句式。
+- **页面文件名用中文：** topic/comparison/synthesis 新建页的文件名取中文（与页面 `title` 一致），如 `topics/<中文主题名>.md`、`comparisons/<甲> vs <乙>.md`；概念页文件名由 `resolve-concept` 自动取中文 `canonical_name`，无需你指定。wikilink 因此是中文全路径：`[[domains/<domain>/concepts/<中文概念名>|<中文概念名>]]`。`canonical_id` 仍是稳定 ASCII（内部去重键，不影响侧栏/画布显示）。
+- **图谱关系标注（Knowledge Graph v2.0，可选增强而非必填）：** 强 wikilink 关系处可在同段/同列表项末尾追加轻量注释 `<!-- graph: confidence=<extracted|inferred|ambiguous> relation=<depends_on|contrasts|related> evidence="<一句话、有来源依据的理由>" -->`，供确定性图谱构建赋权/分簇。**优先写 `confidence`，`relation` 可省略**；v2.0 关系白名单只有 `depends_on`/`contrasts`/`related`，未知值自动降级为 `related`/`ambiguous`（图谱 lint 记 warning）。注释只解释这条边，页面 `source_refs` 仍是证据权威；**不要给弱导航链接加注释**——无注释 wikilink 由图谱按结构信号（共引/同源/类型亲和）+ topic membership 自动赋权，不会因没标注而丢失。图谱构建全程零 LLM、只读页面已有轻量结构信息；图谱导航入口是 `knowledge-graph.generated.html`（力导向交互图，点击节点经 `obsidian://` 跳到对应 Obsidian 笔记；不再生成 Obsidian canvas）。
 - Append to `log.md`: `## [YYYY-MM-DD] ingest | <src> | <created/updated pages>` (append-only).
 
 ## Lint hard rules cheat-sheet (violating any one blocks publish; recite before each page)
 
-1. **Wikilinks use full vault-relative paths** (not Obsidian basenames): `[[domains/game-theory/concepts/cournot-model|Cournot model]]`, and the target page must exist.
+1. **Wikilinks use full vault-relative paths** (not Obsidian basenames): `[[domains/<domain>/concepts/<中文概念名>|<中文概念名>]]`（中文文件名全路径），and the target page must exist.
 2. **Every `[^e1]` reference has a `[^e1]:` definition line**; no bare `[E-...]` IDs in the body.
 3. **Required section titles match verbatim** (concept 6 / topic 3 / comparison 4 / synthesis 4 / source 6 / overview 3).
 4. **A lesson containing `$$` must embed a real source-page PNG** `![[assets/<src>/pXXXX.png]]`; a lesson is not too short after placeholders are removed.
@@ -100,6 +103,8 @@ Sub-unit command detail:
 6. **Ownership (most-missed):** a page with no `source:` frontmatter (`topics/**`/`comparisons/**`/`synthesis/**`/`overview.md`) **must be in some window's `window-done --writes`**, or it is fail-closed as an orphan.
 7. **No bare `|` in table-cell formulas:** use `\lvert S \rvert` for `|S|` (or escape `\|`, or move the formula out of the table) — a bare `|` is read as a column separator and breaks KaTeX (`formula-table-pipe` hard-block).
 8. **Synthesis (phase E) mandatory:** after producing concepts you must update overview + build topic/comparison/synthesis as needed (into `--writes`), else lint `L7-synthesis-missing` blocks.
+9. **Concept coverage (`concepts-uncovered`):** in a concept-heavy domain (≥6 concepts) **every concept must be收编 by some topic** (topic body full-path wikilink or `related_concepts[]`); any uncovered concept blocks publish (already-published pages are re-checked too).
+10. **No unfilled placeholders (`placeholder-unfilled`):** a concept/topic/comparison/overview body must not still contain「（待 /ingest 填写）」—— half-finished pages block publish (already-published pages re-checked). （`lint` 另对 0 字节 / `*.png.md` 杂物页发 `stray` 软警告，不阻断。）
 
 ## Callouts & figure width (Obsidian rendering)
 
@@ -118,12 +123,12 @@ link regex stops at `|`/`#`, so they are lint-safe).
 
 - **Targeted wikilinks** (full path + anchor/display):
   - `[[domains/x/concepts/y.md|布雷斯悖论]]` — custom display text: read naturally, link precisely.
-  - `[[domains/x/lessons/z.md#纳什均衡]]` — link to a specific **section heading** of the target page.
+  - `[[domains/x/lessons/z.md#某小节标题]]` — link to a specific **section heading** of the target page.
   - `[[domains/x/lessons/z.md#^thm-2]]` — link to a specific **block** (paragraph / formula / theorem).
 - **Block IDs** make one line linkable: append `^block-id` to the end of a paragraph, or on its own line
   after a list / quote / `$$…$$`. Use for a key theorem / definition / formula another page should cite
   exactly — `… 故均衡唯一。 ^thm-2` → cite as `[[…/z.md#^thm-2]]`. Keep ids short, ascii-kebab.
-- **Highlight** a term with `==…==` only on its **first, defining** occurrence (`==纳什均衡==`), to mark
+- **Highlight** a term with `==…==` only on its **first, defining** occurrence (`==<被定义的术语>==`), to mark
   "this is the term being defined here" — not for decoration.
 - **Editorial comments** `%%…%%` are hidden in reading view: only for non-substantive notes to a future
   editor. **Never hide substantive content or an unresolved problem inside `%%…%%`** — open issues go to the

@@ -201,6 +201,74 @@ def test_lint_blocks_concept_heavy_without_topic(tmp_path):
     assert not any(v["rule"] == "topics-missing" for v in vs2)
 
 
+_FILLED = ("## 一句话\n\n真实的一句话定义\n\n## 直觉\n\n真实直觉\n\n## 形式化\n\n$s\\in S$\n\n"
+           "## 各章如何处理\n\n§1 提到\n\n## 与其他概念的关系\n\n- 与别的有关\n\n## 自测\n\n1. 问题？\n")
+_PLACE = ("## 一句话\n\n（待 /ingest 填写）\n\n## 直觉\n\n（待 /ingest 填写）\n\n## 形式化\n\n（待 /ingest 填写）\n\n"
+          "## 各章如何处理\n\n（待 /ingest 填写）\n\n## 与其他概念的关系\n\n（待 /ingest 填写）\n\n"
+          "## 自测\n\n（待 /ingest 填写：1–3 个自测问题）\n")
+_TOPIC_OK = "# T\n\n## 核心综合\n\nx\n\n## 各来源贡献\n\nx\n\n## 未解决问题\n\nx\n"
+
+
+def test_lint_blocks_unfilled_placeholder_concept(tmp_path):
+    # A1：概念页 6 小节都在、但内容仍是"（待 /ingest 填写）"占位 → 阻断（不许静默发布半成品）
+    _page(tmp_path, "domains/d/concepts/x.md",
+          {"type": "concept", "status": "proposed", "canonical_id": "concept.d.x",
+           "canonical_name": "X", "domain": "d"}, f"# X\n\n{_PLACE}")
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert any(v["rule"] == "placeholder-unfilled" for v in vs)
+    # 填好正文 → 该规则不再触发
+    _page(tmp_path, "domains/d/concepts/x.md",
+          {"type": "concept", "status": "proposed", "canonical_id": "concept.d.x",
+           "canonical_name": "X", "domain": "d"}, f"# X\n\n{_FILLED}")
+    vs2 = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert not any(v["rule"] == "placeholder-unfilled" for v in vs2)
+
+
+def test_lint_blocks_concepts_uncovered_by_topic(tmp_path):
+    # A2：concept-heavy 域里有 topic、但只收编一部分概念 → 未收编者阻断（消灭 canvas"未分类"）
+    for i in range(6):
+        _page(tmp_path, f"domains/d/concepts/c{i}.md",
+              {"type": "concept", "status": "proposed", "canonical_id": f"concept.d.c{i}",
+               "canonical_name": f"C{i}", "domain": "d"}, f"# C{i}\n\n{_FILLED}")
+    _page(tmp_path, "topics/t.md",
+          {"type": "topic", "status": "proposed", "domains": ["d"],
+           "related_concepts": ["concept.d.c0", "concept.d.c1"]}, _TOPIC_OK)   # 只收 c0,c1
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert any(v["rule"] == "concepts-uncovered" for v in vs)
+    # 收编全部 6 个 → 不再触发
+    _page(tmp_path, "topics/t.md",
+          {"type": "topic", "status": "proposed", "domains": ["d"],
+           "related_concepts": [f"concept.d.c{i}" for i in range(6)]}, _TOPIC_OK)
+    vs2 = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert not any(v["rule"] == "concepts-uncovered" for v in vs2)
+
+
+def test_lint_catches_published_placeholder_page(tmp_path):
+    # A3：已发布页含占位（首轮漏发布的半成品，后续永不复检的洞）→ 仍要被抓出
+    _page(tmp_path, "domains/d/concepts/old.md",
+          {"type": "concept", "status": "published", "canonical_id": "concept.d.old",
+           "canonical_name": "Old", "domain": "d"}, f"# Old\n\n{_PLACE}")
+    # 本轮 proposed 是别的页；published 的 old 仍应被占位检查命中
+    _page(tmp_path, "domains/d/lessons/a.md", {"type": "lesson", "status": "proposed"}, GOOD_LESSON)
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert any(v["rule"] == "placeholder-unfilled" and "old.md" in v["path"] for v in vs)
+
+
+def test_stray_files_lists_empty_and_png_md(tmp_path):
+    # C4：0 字节 .md 与 *.png.md（Obsidian 点坏链误建）应被列出；正常页不列
+    (tmp_path / "domains/d/concepts").mkdir(parents=True)
+    (tmp_path / "domains/d/concepts/empty.md").write_text("", encoding="utf-8")
+    (tmp_path / "assets/d").mkdir(parents=True)
+    (tmp_path / "assets/d/p0001.png.md").write_text("", encoding="utf-8")
+    _page(tmp_path, "domains/d/concepts/ok.md",
+          {"type": "concept", "status": "proposed", "canonical_id": "concept.d.ok",
+           "canonical_name": "Ok", "domain": "d"}, f"# Ok\n\n{_FILLED}")
+    stray = wiki_gate.stray_files(tmp_path)
+    assert "domains/d/concepts/empty.md" in stray
+    assert "assets/d/p0001.png.md" in stray          # *.png.md 即使非 assets 顶层排除外也能命中
+    assert "domains/d/concepts/ok.md" not in stray
+
+
 def test_promote_flips_status(tmp_path):
     _page(tmp_path, "domains/d/lessons/a.md",
           {"type": "lesson", "status": "proposed"}, GOOD_LESSON)

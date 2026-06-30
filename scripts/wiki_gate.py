@@ -23,6 +23,8 @@ CALLOUT_WHITELIST = frozenset({"note", "tip", "info", "important", "warning", "q
 _CALLOUT = re.compile(r"^>\s*\[!([A-Za-z][\w-]*)\]", re.MULTILINE)
 _RULE_BY_TYPE = {"concept": "L2", "topic": "L3", "overview": "L5"}
 _PLACEHOLDER = re.compile(r"（待 /ingest 填写[^）]*）")
+# A1/A3：这些类型的页正文里残留占位 = 半成品，阻断（lesson 用 L6 长度代理，不在此列）。
+_PLACEHOLDER_TYPES = ("concept", "topic", "comparison", "overview")
 
 
 def collect_proposed(vault) -> list[dict]:
@@ -77,6 +79,74 @@ def belongs_to_source(rel_path: str, meta: dict, source_id: str, written: set[st
 def _link_exists(vault: Path, target: str) -> bool:
     t = target.strip()
     return (vault / t).exists() or (vault / f"{t}.md").exists()
+
+
+def placeholder_violations(vault, pages: list[dict]) -> list[dict]:
+    """A1+A3：占位符残留检查。concept/topic/comparison/overview 正文若仍含"（待 /ingest 填写）"
+    = 半成品 → 阻断。覆盖两处：① 本轮 proposed（pages）；② vault 内已 published 的同类页
+    （堵"首轮发布后永不复检"的洞——弱模型留的占位曾就这样静默发布）。"""
+    vault = Path(vault)
+    vs: list[dict] = []
+    seen: set[str] = set()
+    for p in pages:
+        if p["meta"].get("type") in _PLACEHOLDER_TYPES and _PLACEHOLDER.search(p["body"]):
+            vs.append({"path": p["rel_path"], "rule": "placeholder-unfilled",
+                       "detail": "页面仍含未填写占位「（待 /ingest 填写）」；不许发布半成品（阶段 E 必做：填实正文）"})
+            seen.add(p["rel_path"])
+    for f in sorted(vault.rglob("*.md")):
+        rel = f.relative_to(vault).as_posix()
+        if rel in seen or rel in _DERIVED or rel.split("/")[0] in _EXCLUDE_TOP:
+            continue
+        meta, body = mdpage.read_page(f)
+        if (meta.get("status") == "published" and meta.get("type") in _PLACEHOLDER_TYPES
+                and _PLACEHOLDER.search(body)):
+            vs.append({"path": rel, "rule": "placeholder-unfilled",
+                       "detail": "已发布页仍含未填写占位「（待 /ingest 填写）」（历史半成品）；请补实后再发布"})
+    return vs
+
+
+def concepts_uncovered_by_topic(vault) -> list[str]:
+    """A2：概念全覆盖检查。复用 graph_model.topic_membership（与图谱社区同一套归属逻辑）算出
+    未被任何 topic 收编的 concept；仅对 concept-heavy 域（概念数 ≥ TOPIC_THRESHOLD）强制——
+    与 topics-missing 阈值一致。返回未覆盖的 concept page_path（排序）。
+    覆盖面 = vault 内 published ∪ proposed 的 concept/topic（proposed 页已在盘上，rglob 可见）。"""
+    import graph_model
+    vault = Path(vault)
+    nodes: dict[str, dict] = {}
+    for f in sorted(vault.rglob("*.md")):
+        rel = f.relative_to(vault).as_posix()
+        if rel in _DERIVED or rel.split("/")[0] in _EXCLUDE_TOP:
+            continue
+        meta, body = mdpage.read_page(f)
+        if meta.get("status") not in ("published", "proposed") or meta.get("type") not in ("concept", "topic"):
+            continue
+        links = {t.strip() for t in _WIKILINK.findall(body)
+                 if not t.strip().startswith(("http://", "https://"))}
+        nodes[rel] = {"type": meta["type"], "domain": meta.get("domain", "") or "",
+                      "canonical_id": meta.get("canonical_id", "") or "",
+                      "related_concepts": meta.get("related_concepts") or [], "links": links}
+    _membership, unassigned = graph_model.topic_membership(nodes)
+    n_by_dom: dict[str, int] = {}
+    for n in nodes.values():
+        if n["type"] == "concept":
+            n_by_dom[n["domain"]] = n_by_dom.get(n["domain"], 0) + 1
+    out: list[str] = []
+    for dom, cps in unassigned.items():
+        if n_by_dom.get(dom, 0) >= thresholds.TOPIC_THRESHOLD:
+            out.extend(sorted(cps))
+    return sorted(out)
+
+
+def stray_files(vault) -> list[str]:
+    """C4（非阻断软警告）：列出 Obsidian 点击坏链误建的杂物——0 字节 .md，以及 *.png.md/*.jpg.md
+    （图片名却被建成 md 空页）。它们不影响发布，但会污染侧栏/画布，提示用户删除。"""
+    vault = Path(vault)
+    out: list[str] = []
+    # 杂物可能落在任何目录（尤其 assets/ 下的 *.png.md），故扫全库，不套 _EXCLUDE_TOP。
+    for f in sorted(vault.rglob("*.md")):
+        if f.name.endswith((".png.md", ".jpg.md", ".jpeg.md")) or f.stat().st_size == 0:
+            out.append(f.relative_to(vault).as_posix())
+    return out
 
 
 def lint_pages(vault, pages: list[dict]) -> list[dict]:
@@ -135,6 +205,13 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
         hit("(topics)", "topics-missing",
             f"本批产出 {n_flat} 个 concept 却无 topic 主题页（≥{thresholds.TOPIC_THRESHOLD} 概念须按主题聚成 topic 页做分类层）；"
             "阶段 E 必做——把概念按主题分组")
+    # A1+A3：占位符残留（半成品）→ 阻断（含已 published 同类页复检）
+    vs += placeholder_violations(vault, pages)
+    # A2：概念未被任何 topic 收编（画布会落入"未分类"）→ concept-heavy 域 fail-closed
+    for cp in concepts_uncovered_by_topic(vault):
+        hit(cp, "concepts-uncovered",
+            "概念未被任何 topic 收编（画布将落入「未分类」）；阶段 E 必做——"
+            "归入某 topic 的 related_concepts 或正文 full-path wikilink")
     # 重复 canonical_id（vault 级，阻断）
     _reg, errors, _warn = concept_store.build_registry(concept_store.scan_concept_pages(vault))
     for e in errors:

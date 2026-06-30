@@ -171,8 +171,8 @@ def resolve(mention: str, *, domain: str, registry: dict):
 
 def create_concept(vault, *, domain: str, name: str, aliases=(), source_ref=None) -> Path:
     """新建骨架概念页（status: proposed；§8 最小结构）。页已存在则拒绝——必须走 merge。"""
-    cid = canonical_id(domain, name, aliases)
-    slug = cid.rsplit(".", 1)[1]
+    cid = canonical_id(domain, name, aliases)    # 稳定 ID（spec §6 不变：优先 ASCII 别名，去重键稳定）
+    slug = slugify(name)                          # 文件名用中文 canonical_name（侧栏/画布/标签可读），与 cid 解耦
     if domain == "shared":
         rel = Path("concepts") / f"{slug}.md"
     else:

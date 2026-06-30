@@ -244,7 +244,7 @@ def test_lint_fail_blocks_rolls_back_and_queues(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 5: cmd_lint finish hook — canvas 生成 + 发布隔离
+# Task 5: cmd_lint finish hook — graph 生成（graph-data + HTML）+ 发布隔离
 # ---------------------------------------------------------------------------
 
 def _setup_one_proposed(tmp_path, sid="note"):
@@ -257,22 +257,39 @@ def _setup_one_proposed(tmp_path, sid="note"):
     return tmp_path / "wiki"
 
 
-def test_lint_finish_builds_canvas(tmp_path):
+def test_lint_finish_builds_graph_html(tmp_path):
     vault = _setup_one_proposed(tmp_path)
     assert _run(["lint", "--source", "note"], tmp_path).returncode == 0
-    assert (vault / "knowledge-map.generated.canvas").exists()
+    assert (vault / "knowledge-graph.generated.html").exists()      # HTML 导航入口
+    assert (vault / "graph-data.generated.json").exists()
+    assert not (vault / "knowledge-map.generated.canvas").exists()  # canvas 已移除
 
 
-def test_lint_canvas_failure_does_not_break_publish(tmp_path):
+def test_lint_finish_builds_graph_and_passes_graph_lint(tmp_path):
+    # publish-path 集成（Knowledge Graph v2.0）：真实状态机驱动 source 到 published 后，
+    # publish-isolated 钩子写出 graph-data + 力导向 HTML，且 graph-lint 在真实 vault 上 returncode 0
+    # ——验证 A2 门禁（graph_model.topic_membership）+ 钩子集成不打断发布。
+    import json
     vault = _setup_one_proposed(tmp_path)
-    # 用"目标路径预先是个目录"制造真实的 write 失败（跨子进程有效，monkeypatch 不行）
-    canvas_path = vault / "knowledge-map.generated.canvas"
-    canvas_path.mkdir(parents=True, exist_ok=True)
-    (canvas_path / "keep.txt").write_text("old", encoding="utf-8")  # 非空目录，确保 write_text 失败
+    assert _run(["lint", "--source", "note"], tmp_path).returncode == 0
+    gdata = vault / "graph-data.generated.json"
+    assert gdata.exists()
+    data = json.loads(gdata.read_text(encoding="utf-8"))
+    assert data["version"] == 2 and data["scope"] == "v2.0"
+    assert (vault / "knowledge-graph.generated.html").exists()
+    r = _run(["graph-lint"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr           # 真实 vault graph-lint 无 fail-hard
+
+
+def test_graph_build_failure_does_not_change_lint_exit_code(tmp_path):
+    # 图谱构建失败（graph-data 目标预先占成目录）只 warn、保留发布；lint 仍 returncode 0。
+    vault = _setup_one_proposed(tmp_path)
+    gdir = vault / "graph-data.generated.json"
+    gdir.mkdir(parents=True, exist_ok=True)                 # 目标是目录 → write 失败
+    (gdir / "keep.txt").write_text("x", encoding="utf-8")
     r = _run(["lint", "--source", "note"], tmp_path)
-    assert r.returncode == 0, r.stdout + r.stderr          # canvas 失败不回滚发布
-    assert (vault / "index.generated.md").exists()          # 发布已完成
+    assert r.returncode == 0, r.stdout + r.stderr           # 图谱失败不改 lint 退出码
     meta, _ = mdpage.read_page(vault / "domains/misc/lessons/note.md")
-    assert meta["status"] == "published"                    # lesson 已发布
-    assert canvas_path.is_dir()                             # 旧 canvas（此处是目录）被保留
-    assert "[WARN]" in r.stdout                             # 打印了 warning
+    assert meta["status"] == "published"                    # 发布已完成
+    assert gdir.is_dir()                                    # 旧产物（此处目录）保留
+    assert "[WARN]" in r.stdout

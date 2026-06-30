@@ -1,8 +1,10 @@
 # Concept resolution protocol (resolve_or_create_concept)
 
 The **single entry point** for every concept create/update. On a `canonical_id` hit it merges into the
-existing page (**never create** a duplicate); on a miss it creates a skeleton page at
-`concept.<domain>.<slug>` and registers it.
+existing page (**never create** a duplicate); on a miss it creates a skeleton page and registers it. The
+**`canonical_id`** is the ASCII-stable dedup key `concept.<domain>.<slug>`; the page **filename/path uses
+the (Chinese) `canonical_name`** — `domains/<domain>/concepts/<canonical_name>.md` — **decoupled** from the
+canonical_id (the id stays ASCII even when the filename is CJK; do not assume the path mirrors the id).
 
 ## Usage (shared by /ingest and /kb-save)
 

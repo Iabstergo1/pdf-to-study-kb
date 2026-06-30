@@ -19,6 +19,11 @@ def run(input_path, output_dir, *, backend: str = "pipeline", lang: str = "ch", 
     if backend != "pipeline":
         raise SystemExit(f"mineru_runner: only 'pipeline' backend allowed, got {backend!r}")
     os.environ.setdefault("MINERU_MODEL_SOURCE", "modelscope")  # 模型源默认 modelscope（环境可覆盖）
+    # 模型缓存默认落到仓库内 .mineru-models/（不污染 C 盘 ~/.cache）；环境已设则尊重外部覆盖。
+    # 控制 MinerU 自动下载位置的真值是 modelscope 的 MODELSCOPE_CACHE（mineru.json 的 models-dir 在
+    # 3.4 自动下载路径上不生效）；项目内存放便于双 agent / 多机复用，且 wiki/ 同级被 gitignore。
+    _models_dir = Path(__file__).resolve().parents[2] / ".mineru-models"
+    os.environ.setdefault("MODELSCOPE_CACHE", str(_models_dir))
     if _do_parse is None:
         from mineru.cli.common import do_parse as _do_parse   # 仅子进程内 import（进程隔离）
     pdf_bytes = Path(input_path).read_bytes()

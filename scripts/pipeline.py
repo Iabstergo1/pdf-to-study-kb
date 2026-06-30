@@ -165,20 +165,29 @@ def cmd_source_convert(args):
 
 
 def _sync_assets(source_id: str) -> int:
-    """把 staging/<src>/assets 下的难页 PNG 复制进 wiki/assets/<src>/（确定性、幂等）。
+    """把 staging 难页 PNG 复制进 wiki/assets/<src>/（确定性、幂等）。
     公式 lesson/concept 嵌入 `![[assets/<src>/pXXXX.png]]` 需图在 vault 内才不断链——
-    对任意有 needs_vision 页的来源通用（不止某本书）。返回本次复制/更新的文件数。"""
+    对任意有 needs_vision 页的来源通用（不止某本书）。返回本次复制/更新的文件数。
+    C2：源目录含 staging/<src>/assets（PyMuPDF/MinerU 难页图）**与 staging/<src>/arbitration
+    （仲裁 render 决策补渲染的整页图）**——后者曾被漏同步，导致引用 arbitration 渲染页的 lesson 断链。"""
     import shutil
     import hashlib
-    staging_assets = _staging_dir(source_id) / "assets"
-    if not staging_assets.exists():
-        return 0
+    staging = _staging_dir(source_id)
     dst_dir = _vault_dir() / "assets" / source_id
-    dst_dir.mkdir(parents=True, exist_ok=True)
     n = 0
-    imgs = []
-    for ext in ("*.png", "*.jpg", "*.jpeg"):     # PyMuPDF 难页 PNG + MinerU 图片(.jpg/.png)
-        imgs.extend(staging_assets.glob(ext))
+    imgs, seen = [], set()
+    for sub in ("assets", "arbitration"):        # assets 优先；同名只取一次（避免重复覆盖）
+        d = staging / sub
+        if not d.exists():
+            continue
+        for ext in ("*.png", "*.jpg", "*.jpeg"):  # PyMuPDF 难页 PNG + MinerU 图片(.jpg/.png) + 仲裁整页图
+            for img in d.glob(ext):
+                if img.name not in seen:
+                    seen.add(img.name)
+                    imgs.append(img)
+    if not imgs:
+        return 0
+    dst_dir.mkdir(parents=True, exist_ok=True)
     for img in sorted(imgs):
         dst = dst_dir / img.name
         if (not dst.exists()) or (hashlib.sha256(dst.read_bytes()).hexdigest()
@@ -639,14 +648,76 @@ def cmd_rebuild_registry(args):
     print(f"[OK] registry: {len(registry)} concepts ({shared} shared), sha256={sha[:12]}")
 
 
-def cmd_rebuild_canvas(args):
-    """从 published 概念图谱确定性重建 wiki/knowledge-map.generated.canvas（零 LLM，fail-hard）。"""
-    import canvas_map
+class GraphBuildError(Exception):
+    """graph fail-hard：lint errors（list[str] 在 args[0]）。"""
+
+
+def _rebuild_graph_artifacts(vault):
+    """Knowledge Graph v2.0 单一重建路径（零 LLM）：published 页 → 建模 → 分析 → graph-data → lint →
+    写 graph-data + 力导向交互 HTML（HTML 即图谱导航入口，点击节点跳对应 Obsidian 笔记）。canvas 已移除。
+    fail-hard：lint errors → raise GraphBuildError；调用方（手动）退出，发布钩子吞掉。"""
+    import json as _json
+    import graph_analysis
+    import graph_data
+    import graph_html
+    import graph_lint
+    import graph_model
+    vault = _vault_dir() if vault is None else vault
+    model = graph_model.build_graph_model(vault)
+    analyzed = graph_analysis.analyze_graph(model)
+    data = graph_data.to_graph_data(analyzed)
+    result = graph_lint.validate_graph_data(data, vault=vault)
+    if result["errors"]:
+        raise GraphBuildError(result["errors"])
+    (Path(vault) / graph_data.GRAPH_DATA_FILE).write_text(
+        _json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+    graph_html.write_html(vault, data)
+    return data, result
+
+
+def cmd_rebuild_graph(args):
+    """重建知识图谱（graph-data + 力导向交互 HTML）。手动 fail-hard（errors → 退出 2）。"""
     vault = _vault_dir()
     if not vault.exists():
         raise SystemExit("no wiki/ vault yet")
-    out = canvas_map.write_canvas(vault)
-    print(f"[OK] knowledge map -> {out}")
+    try:
+        data, result = _rebuild_graph_artifacts(vault)
+    except GraphBuildError as e:
+        for msg in e.args[0]:
+            print(f"[ERR] graph fail-hard: {msg}")
+        raise SystemExit(2)
+    s = data["stats"]
+    print(f"[OK] rebuild-graph -> {s['node_count']} nodes / {s['edge_count']} edges / "
+          f"{s['community_count']} communities; wrote graph-data + html")
+    for w in result["warnings"]:
+        print(f"[warn] {w}")
+
+
+def cmd_graph_lint(args):
+    """校验 wiki/graph-data.generated.json（+ 已生成的 HTML）；写报告；errors → 退出 2。"""
+    import json as _json
+    from datetime import date
+    import graph_data
+    import graph_html
+    import graph_lint
+    vault = _vault_dir()
+    gpath = vault / graph_data.GRAPH_DATA_FILE
+    if not gpath.exists():
+        raise SystemExit(f"graph-data 不存在（{gpath}）；先跑 rebuild-graph")
+    data = _json.loads(gpath.read_text(encoding="utf-8"))
+    result = graph_lint.validate_graph_data(data, vault=vault)
+    hpath = vault / graph_html.HTML_FILE
+    if hpath.exists():
+        result["errors"] += graph_lint.validate_html(hpath.read_text(encoding="utf-8"))
+    report = _workspace_root() / "pipeline-workspace/reports" / f"graph-lint-{date.today().isoformat()}.md"
+    graph_lint.write_report(result, report)
+    for e in result["errors"]:
+        print(f"[ERR] {e}")
+    for w in result["warnings"]:
+        print(f"[warn] {w}")
+    print(f"[graph-lint] errors={len(result['errors'])} warnings={len(result['warnings'])} -> {report}")
+    if result["errors"]:
+        raise SystemExit(2)
 
 
 def _record_workorder(db, source_id, src_row, staging):
@@ -885,8 +956,24 @@ def cmd_window_start(args):
 def cmd_window_done(args):
     import state_store
     import locks
+    import json
     db = _vault_state_db()
     _require_vault_lock(db, args.source)
+    # C3：--writes/--proposals 必须是合法 JSON 数组，否则 fail-fast。最常见的坑是 Windows 上
+    # 经 `conda run` 调用时双引号被吞，["a.md"] 变成 [a.md]（非法 JSON）——旧行为是静默存损坏值、
+    # 收尾 lint 读取时才崩（JSONDecodeError）。这里提前拦截并给出修复指引（改用环境 python 直调）。
+    for flag, raw in (("--writes", args.writes), ("--proposals", getattr(args, "proposals", None))):
+        if raw in (None, ""):
+            continue
+        try:
+            if not isinstance(json.loads(raw), list):
+                raise ValueError("不是 JSON 数组")
+        except (ValueError, TypeError) as e:
+            raise SystemExit(
+                f"{flag} 不是合法 JSON 数组：{raw!r}（{e}）。\n"
+                f"Windows 上多半是 `conda run` 吞了双引号——请改用环境 python 直调：\n"
+                f'  & "<miniconda>\\envs\\study-kb\\python.exe" scripts\\pipeline.py window-done '
+                f"--source {args.source} --window {args.window} {flag} '[\"a.md\",\"b.md\"]'")
     state_store.finish_window(db, args.source, args.window,
                               write_set_json=args.writes, proposal_set_json=args.proposals)
     locks.heartbeat(db, scope="vault", holder=args.source)
@@ -1004,6 +1091,8 @@ def cmd_lint(args):
     db = _vault_state_db()
     vault = _vault_dir()
     proposed_all = wiki_gate.collect_proposed(vault) if vault.exists() else []
+    for s in (wiki_gate.stray_files(vault) if vault.exists() else []):   # C4：杂物软警告（非阻断）
+        print(f"[warn] 杂物文件（疑似 Obsidian 点坏链误建，可删）：{s}")
     # 范围隔离：只 lint/promote 归属本 source 的 proposed 页（frontmatter 归属 ∪ window write_set）。
     # 归属其他已注册 source 的页放行跳过（等各自收尾）；不归属任何 source 的孤儿页阻断
     # （fail-closed：多半是 /ingest 漏了 window-done --writes 记账）。
@@ -1073,12 +1162,12 @@ def cmd_lint(args):
     concept_store.write_registry(vault, registry)
     concept_store.write_aliases(vault, registry)
     wiki_gate.write_index(vault)
-    # 派生阅读层（不阻断发布）：发布/registry/aliases/index 已成功，再建 canvas；失败只 warn、留旧图。
+    # 派生阅读层（publish-isolated，不阻断发布）：发布/registry/aliases/index 已成功，再建知识图谱
+    # （graph-data + 力导向 HTML）；任何失败只 warn、保留旧产物，不改 lint 退出码。
     try:
-        import canvas_map
-        canvas_map.write_canvas(vault)
+        _rebuild_graph_artifacts(vault)
     except Exception as e:
-        print(f"[WARN] knowledge-map canvas 重建失败：{e}；已保留旧 canvas，请手动跑 rebuild-canvas")
+        print(f"[WARN] 知识图谱重建失败：{e}；已保留旧 graph-data/html，发布不受影响，可手动跑 rebuild-graph")
     log = vault / "log.md"
     with open(log, "a", encoding="utf-8", newline="\n") as f:
         f.write(f"\n## [{date.today().isoformat()}] lint | {args.source} | promoted {n} pages\n")
@@ -1366,8 +1455,10 @@ def main():
     subparsers.add_parser("apply-obsidian-style",
                           help="落地学习库观感 CSS snippet + merge appearance.json（幂等，纯配置层零内容改动）")
     subparsers.add_parser("rebuild-registry", help="从概念页 frontmatter 重建 _registry.yaml + aliases.md")
-    subparsers.add_parser("rebuild-canvas",
-                          help="从 published 概念图谱重建 knowledge-map.generated.canvas（派生阅读层）")
+    subparsers.add_parser("rebuild-graph",
+                          help="重建知识图谱：graph-data + 力导向交互 HTML（零 LLM，手动 fail-hard；点击节点跳 Obsidian）")
+    subparsers.add_parser("graph-lint",
+                          help="校验 graph-data.generated.json(+HTML)：fail-hard 非零退出，warn-only 不阻断")
     wop = subparsers.add_parser("workorder", help="生成 source 级 ingest work order")
     wop.add_argument("--source", required=True)
     rop = subparsers.add_parser("reopen", help="重开已收尾来源做增量补充（重建 workorder + 状态机回 workorder_ready）")
@@ -1460,7 +1551,8 @@ def main():
         'init-vault': cmd_init_vault,
         'apply-obsidian-style': cmd_apply_obsidian_style,
         'rebuild-registry': cmd_rebuild_registry,
-        'rebuild-canvas': cmd_rebuild_canvas,
+        'rebuild-graph': cmd_rebuild_graph,
+        'graph-lint': cmd_graph_lint,
         'workorder': cmd_workorder,
         'reopen': cmd_reopen,
         'sync-assets': cmd_sync_assets,
