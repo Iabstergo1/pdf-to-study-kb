@@ -10,7 +10,8 @@ Compile multi-format sources (PDF/DOCX/PPTX/MD) **through conversation** into on
 concept-navigated Obsidian study knowledge base (llm-wiki). A **deterministic, zero-LLM Python CLI**
 guarantees reproducibility, observability, and safety; the **only LLM is a human-triggered conversational
 skill** that does the high-value writing and cross-page merging. The output is a knowledge web, not a
-translation: concepts/topics lead, lessons follow the source TOC.
+translation: concepts/topics lead; lessons are an optional, downgraded layer (theme-named, never a chapter
+recap) and the wiki is not shaped by the source TOC — the reader should never sense the original document.
 
 ## 2. Architecture (two layers + two agents)
 
@@ -23,19 +24,19 @@ translation: concepts/topics lead, lessons follow the source TOC.
 ```text
 preprocess (zero-LLM CLI):  add-source → profile → source-convert → source-audit →[ auto-arbitration: agent decides, CLI materializes ]→ windows → workorder
 same session (the LLM): read chapters.json (whole-book map) + source.md / hard-page images
-                        → write status:proposed pages (hard pages embed source images by type)
+                        → write status:proposed pages (hard-page source images are read as evidence, re-expressed natively — never embedded)
                         → concept resolution → synthesis layer
-finish (zero LLM):      lint → promote(proposed→published) or rollback + Review-Queue → rebuild index/registry/aliases + knowledge graph v2.0 (graph-data.generated.json → force-directed offline knowledge-graph HTML, click-node-opens-Obsidian via obsidian://; zero-LLM Louvain communities; rebuild-graph CLI + lint hook; publish-isolated — graph failure never blocks publish; canvas removed — topic_membership lives in graph_model and powers the A2 concept-coverage gate)
+finish (zero LLM):      lint → promote(proposed→published) or rollback + Review-Queue → rebuild index/registry (aliases.md retired — aliases in concept frontmatter) + knowledge graph v2.0 (graph-data.generated.json → force-directed offline knowledge-graph HTML, click-node-opens-Obsidian via obsidian://; zero-LLM Louvain communities; rebuild-graph CLI + lint hook; publish-isolated — graph failure never blocks publish; canvas removed — topic_membership lives in graph_model and powers the A2 concept-coverage gate)
 ```
 
 ## 3. Core constraints
 
 1. **Preprocessing & finishing are deterministic** (zero-LLM CLI). The only LLM in preprocessing is the agent's **auto-arbitration of dual-audit disagreements** inside the skill flow (structured decisions only; the CLI materializes them) — never an LLM inside the CLI, never unattended batch, never a full-book scan. The writing LLM is the human-triggered ingest skill.
 2. **No splitting:** the LLM never plans/approves semantic units; long sources are read via deterministic processing windows (TOC / heading / page / token sliding window).
-3. **Concept dedup:** every concept create/update goes through the single `resolve-concept`; a `canonical_id` hit merges, **never creates a duplicate**. `_registry.yaml` / `aliases.md` are derived — skills never hand-write them.
+3. **Concept dedup:** every concept create/update goes through the single `resolve-concept`; a `canonical_id` hit merges, **never creates a duplicate**. Concepts resolve to their **home domain** (methodology → `research-method`, not the source's domain; cross-domain writes are narrowly pre-authorized to `domains/<home>/concepts/**`). `_registry.yaml` is derived — skills never hand-write it; **`aliases.md` is retired**, aliases live only in the concept page's `aliases:` frontmatter.
 4. **Two-phase publish:** skills only write `status: proposed`; the finishing gate promotes to `published` and indexes it; failure rolls back (`pipeline-workspace/snapshots/`) + enqueues to `Review-Queue/`.
 5. **Overwrite protection:** writing an existing page requires "in work-order snapshot + `managed_by != human` + hash match"; otherwise refuse and emit a proposal. **Never silently edit a human-owned page.**
-6. **Fail-closed lint:** broken links, missing required sections, orphan pages (unaccounted ownership), duplicate `canonical_id`, formula pages missing their source image, unknown callout type (outside the whitelist) — any one blocks publish.
+6. **Fail-closed lint** (form is no longer policed — order/safety/provenance is): broken links, orphan pages (unaccounted ownership), duplicate `canonical_id`, per-type frontmatter incompleteness (non-source pages need `source_refs`), a published body embedding a source image (`source-image-embed`), a body H1 duplicating the filename (`title-duplicate-h1`), an over-short concept/topic/comparison (`content-too-short`), unfilled placeholders, unknown callout type — any one blocks publish. **Section titles are NOT policed (D-4); source images never appear in a published body (D-1).**
 
 ## 4. PDF preprocessing contract (PyMuPDF + MinerU dual-audit)
 
@@ -88,9 +89,11 @@ and merged only by a human `skill-adopt`. Protocols: `docs/skill-runtime/{routin
   absent); `md` = fast path; `docx`/`pptx` and scanned/low-text PDF = MinerU primary (`--backend auto`
   routes, `--backend mineru` forces; fail-closed if absent).
 - **Each book's ingest is a paid LLM operation**, not import-and-go; the project ships with an empty vault.
-- **Lint hard rules:** wikilinks must be full vault-relative paths (not Obsidian basenames); required
-  section titles verbatim; non-source pages (topic/comparison/synthesis/overview) must be accounted for in
-  some window's `--writes`.
+- **Lint hard rules (form is not policed; order/safety/provenance is):** wikilinks must be full
+  vault-relative paths (not Obsidian basenames); **no mandatory section titles** (D-4); per-type frontmatter
+  complete (non-source pages carry `source_refs`); **no source image in a published body** (D-1); no body H1
+  duplicating the filename; concept/topic/comparison not over-short; non-source pages
+  (topic/comparison/synthesis/overview) must be accounted for in some window's `--writes`.
 
 ## 8. Windows / PowerShell tooling
 

@@ -7,8 +7,6 @@ format: <pdf|docx|pptx|md>
 status: proposed
 managed_by: pipeline
 ---
-# <来源标题>
-
 ## 一句话总结
 
 <这份来源讲什么、对学习者的价值>

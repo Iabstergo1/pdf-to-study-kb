@@ -95,26 +95,56 @@ def test_lint_missing_footnote_def(tmp_path):
     assert any(v["rule"] == "evidence-footnote" for v in vs)
 
 
-def test_lint_l2_concept_missing_sections(tmp_path):
+def test_lint_concept_sections_not_required(tmp_path):
+    # D-4：正文小节标题不再强制——只有连贯散文、不套固定小节的概念页不再产生 L2/sections
     _page(tmp_path, "domains/d/concepts/x.md",
           {"type": "concept", "status": "proposed", "canonical_id": "concept.d.x",
-           "canonical_name": "X", "domain": "d"}, "# X\n\n## 直觉\n\n只有直觉一节\n")
+           "canonical_name": "X", "domain": "d", "source_refs": [{"source": "s"}]},
+          "均衡是一组相互一致的策略，这里用连贯的学术散文把直觉、形式与边界讲清楚，"
+          "不套任何固定小节标题，长度也足够充实充实充实充实。\n")
     vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
-    assert any(v["rule"] == "L2" for v in vs)
+    assert not any(v["rule"] in ("L2", "sections") for v in vs)
 
 
-def test_lint_formula_lesson_needs_screenshot(tmp_path):
+def test_lint_formula_lesson_no_image_required(tmp_path):
+    # D-1：formula-screenshot 已删——公式 lesson 不再要求内嵌源图（源图退出发布产物）
     _page(tmp_path, "domains/d/lessons/f.md",
-          {"type": "lesson", "status": "proposed"}, "公式推导正文足够长足够长足够长足够长足够长足够长"
+          {"type": "lesson", "status": "proposed"}, "反应函数推导正文足够长足够长足够长足够长足够长"
           "足够长足够长：\n\n$$u = px$$\n")
     vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
-    assert any(v["rule"] == "formula-screenshot" for v in vs)
-    # 有截图则通过该规则
+    assert not any(v["rule"] == "formula-screenshot" for v in vs)
+
+
+def test_lint_source_image_embed_blocked(tmp_path):
+    # D-1/G1：published 正文禁嵌源图；对本轮 proposed 批（status 无关）也必须拦
     _page(tmp_path, "domains/d/lessons/f.md",
-          {"type": "lesson", "status": "proposed"}, "公式推导正文足够长足够长足够长足够长足够长足够长"
+          {"type": "lesson", "status": "proposed"}, "反应函数推导正文足够长足够长足够长足够长足够长"
           "足够长足够长：\n\n$$u = px$$\n\n![[assets/wp/p0001.png]]\n")
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert any(v["rule"] == "source-image-embed" for v in vs)
+    # 覆盖同一文件为「不嵌源图、只用原生 KaTeX」→ 不触发
+    _page(tmp_path, "domains/d/lessons/f.md",
+          {"type": "lesson", "status": "proposed"}, "同样的推导但不贴源图正文足够长足够长足够长足够长"
+          "足够长足够长：\n\n$$u = px$$\n")
     vs2 = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
-    assert not any(v["rule"] == "formula-screenshot" for v in vs2)
+    assert not any(v["rule"] == "source-image-embed" for v in vs2)
+
+
+def test_lint_short_content_blocked(tmp_path):
+    # P2：concept/topic/comparison 正文过短 → content-too-short 阻断（防残次页；讲透优先）
+    _page(tmp_path, "domains/d/concepts/x.md",
+          {"type": "concept", "status": "proposed", "canonical_id": "concept.d.x",
+           "canonical_name": "X", "domain": "d", "source_refs": [{"source": "s"}]},
+          "太短的概念。\n")
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert any(v["rule"] == "content-too-short" for v in vs)
+    # 覆盖为充实正文 → 不触发
+    _page(tmp_path, "domains/d/concepts/x.md",
+          {"type": "concept", "status": "proposed", "canonical_id": "concept.d.x",
+           "canonical_name": "X", "domain": "d", "source_refs": [{"source": "s"}]},
+          "均衡是一组相互一致的策略与信念，" * 10 + "\n")
+    vs2 = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert not any(v["rule"] == "content-too-short" for v in vs2)
 
 
 def test_lint_broken_link_and_l6(tmp_path):
@@ -133,7 +163,8 @@ def test_lint_ignores_markup_inside_code_blocks(tmp_path):
     # 通用回归：编程页代码示例里的正则 [^...]、[E.. 字面量、[[ 不应被当成
     # 脚注引用/裸 E-ID/wikilink 而误拦 lint（剔除代码块后检查）。
     _page(tmp_path, "domains/d/lessons/code.md",
-          {"type": "lesson", "status": "proposed"},
+          {"type": "lesson", "status": "proposed", "managed_by": "pipeline", "domain": "d",
+           "page_path": "domains/d/lessons/code.md", "source_refs": [{"source": "cookbook"}]},
           "这一节讲文本清洗，足够长的干净散文正文用来绕过空课检查再多写一些字。[^e1]\n\n"
           "```python\nimport re\nh = re.sub('[^a-zA-Z_]', '_', name)   # [E-x] 不是证据\n"
           "link = '[[not a wikilink]]'\n```\n\n行内 `[^0-9]+` 同理。\n\n[^e1]: 证据：cookbook §6.1\n")
@@ -152,6 +183,48 @@ def test_build_index_only_published(tmp_path):
     assert "lessons/b.md" not in text  # proposed 不上 index
     wiki_gate.write_index(tmp_path)
     assert (tmp_path / "index.generated.md").exists()
+
+
+def test_belongs_to_source_cross_domain_concept():
+    # G3：跨域概念页（domain=research-method）经 source_refs 归属发起源 → 随本批 lint/promote，不落孤儿
+    meta = {"type": "concept", "domain": "research-method",
+            "source_refs": [{"source": "game-theory", "sections": ["8.2"]}]}
+    assert wiki_gate.belongs_to_source(
+        "domains/research-method/concepts/研究问题.md", meta, "game-theory", set()) is True
+    # 也可经 window write_set 归属
+    assert wiki_gate.belongs_to_source(
+        "domains/research-method/concepts/研究问题.md",
+        {"type": "concept", "domain": "research-method"},
+        "game-theory", {"domains/research-method/concepts/研究问题.md"}) is True
+
+
+def test_lint_frontmatter_incomplete_topic_without_source_refs(tmp_path):
+    # G2/D3：非 source 综合页缺 source_refs → frontmatter-incomplete（吸收派生页强制溯源）
+    _page(tmp_path, "topics/主题.md",
+          {"type": "topic", "status": "proposed", "page_path": "topics/主题.md",
+           "managed_by": "pipeline"}, "综合正文" * 40 + "\n")
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert any(v["rule"] == "frontmatter-incomplete" and "source_refs" in v["detail"] for v in vs)
+
+
+def test_lint_source_page_needs_no_source_refs(tmp_path):
+    # G2：source 页不要求 source_refs（它本身就是来源），但要 source_id/title/domain/format
+    _page(tmp_path, "sources/wp.md",
+          {"type": "source", "status": "proposed", "managed_by": "pipeline",
+           "source_id": "wp", "title": "白皮书", "domain": "d", "format": "pdf"},
+          "## 一句话总结\n\n" + "来源综述" * 40 + "\n")
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert not any(v["rule"] == "frontmatter-incomplete" for v in vs)
+
+
+def test_build_index_display_name_falls_back_to_basename(tmp_path):
+    # B3：无 title/canonical_name 的 topic/comparison/lesson，显示名用 basename，不显示完整路径
+    _page(tmp_path, "topics/核心模型谱系.md", {"type": "topic", "status": "published"}, "综合正文\n")
+    _page(tmp_path, "comparisons/甲 vs 乙.md", {"type": "comparison", "status": "published"}, "对比正文\n")
+    text = wiki_gate.build_index(tmp_path)
+    assert "[[topics/核心模型谱系.md|核心模型谱系]]" in text
+    assert "[[comparisons/甲 vs 乙.md|甲 vs 乙]]" in text
+    assert "|topics/核心模型谱系.md]]" not in text    # 不把完整路径当显示名
 
 
 def test_lint_formula_table_pipe(tmp_path):
@@ -252,6 +325,23 @@ def test_lint_catches_published_placeholder_page(tmp_path):
     _page(tmp_path, "domains/d/lessons/a.md", {"type": "lesson", "status": "proposed"}, GOOD_LESSON)
     vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
     assert any(v["rule"] == "placeholder-unfilled" and "old.md" in v["path"] for v in vs)
+
+
+def test_lint_title_duplicate_h1(tmp_path):
+    # B1：正文首行是与文件名同名的 # H1 → 阻断（Obsidian 内联标题 + 同名 H1 = 标题显示两次）
+    _page(tmp_path, "domains/d/concepts/均衡.md",
+          {"type": "concept", "status": "proposed", "canonical_id": "concept.d.eq",
+           "canonical_name": "均衡", "domain": "d"},
+          "# 均衡\n\n均衡是一组相互一致的策略，足够长的正文用来避免其它规则干扰对本条的判断。\n")
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert any(v["rule"] == "title-duplicate-h1" for v in vs)
+    # 正文直接从散文开始（无同名 H1）→ 不触发
+    _page(tmp_path, "domains/d/concepts/均衡.md",
+          {"type": "concept", "status": "proposed", "canonical_id": "concept.d.eq",
+           "canonical_name": "均衡", "domain": "d"},
+          "均衡是一组相互一致的策略，直接从散文开始，没有重复标题的正文内容。\n")
+    vs2 = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert not any(v["rule"] == "title-duplicate-h1" for v in vs2)
 
 
 def test_stray_files_lists_empty_and_png_md(tmp_path):

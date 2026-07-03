@@ -5,10 +5,12 @@ description: End-to-end add a new external source (PDF/DOCX/PPTX/Markdown) to th
 
 # ingest — weave a whole source into the wiki (the only LLM write step; top-level orchestration)
 
-You are the maintainer of the knowledge base. Weave the user's source into the wiki **concept/topic-first**
-(lessons follow the source TOC as a secondary layer), under the work-order transaction protocol the whole
-way. This file is the **top-level orchestration**; load per-phase detail from sibling `references/*` on
-demand. Project truth: `AGENTS.md`. Engineering format: `docs/skill-runtime/skill-standard.md`.
+You are the maintainer of the knowledge base. Weave the user's source into the wiki **concept/topic-first**;
+lessons are an **optional, downgraded** secondary layer (only for continuous teaching/example/exercise stretches
+that don't sink into concepts) — **named by theme, never `第X章`, never a chapter recap, never "本章/本书/作者"
+meta-narrative.** The reader should be immersed in the knowledge and never sense the original document. Work under
+the work-order transaction protocol the whole way. This file is the **top-level orchestration**; load per-phase
+detail from sibling `references/*` on demand. Project truth: `AGENTS.md`. Engineering format: `docs/skill-runtime/skill-standard.md`.
 
 > **Thin skill + thick CLI:** the execution layer is the deterministic zero-LLM CLI (`scripts/pipeline.py`);
 > this skill carries no business code, only orchestrates it. `<src>` = this source's source_id; run commands
@@ -24,21 +26,25 @@ demand. Project truth: `AGENTS.md`. Engineering format: `docs/skill-runtime/skil
 - The user gives: file path `<path>`, domain `<domain>`; format `<fmt>` is inferred from the extension
   (pdf/md/docx/pptx); `<src>` is derived from the filename (lowercase, hyphenated). **Confirm `<src>` and
   `<domain>` once with the user.**
-- Read: `wiki/_meta/purpose.md` (the user's learning goals / teaching preference, a global writing bias
-  across page-writing and synthesis; default if absent), `docs/skill-runtime/{schema,concept-resolution}.md`,
-  `templates/*`, and the phase references.
+- Read: `wiki/_meta/purpose.md` **first — it is the authority on writing style, structure, depth and
+  terminology** (the user's learning goals / teaching preference). The deterministic layer only guards
+  order/safety/provenance; **form is purpose-driven, not template-driven.** Then read
+  `docs/skill-runtime/{schema,concept-resolution}.md`, `templates/*` (suggested scaffolds, not mandatory
+  skeletons), and the phase references.
 
 ## 3. Outputs
 
 - Vault writes are always `status: proposed` + `managed_by: pipeline`: lessons / concepts / topics /
   comparisons / synthesis / `sources/<src>.md` / `overview.md`.
-- Derived files (`_registry.yaml` / `aliases.md` / `index.generated.md`) are **not written by this skill** —
-  the finishing CLI rebuilds them.
+- Derived files (`_registry.yaml` / `index.generated.md`) are **not written by this skill** — the finishing
+  CLI rebuilds them. **`aliases.md` is retired** (B2): English aliases live only in the concept page's
+  `aliases:` frontmatter (Obsidian reads them natively for search/autocomplete).
 
 ## 4. Dependencies
 
 - CLI: `scripts/pipeline.py` (commands per phase).
-- Protocols: `docs/skill-runtime/schema.md` (page types / required sections), `concept-resolution.md` (resolution).
+- Protocols: `docs/skill-runtime/schema.md` (page types / per-type frontmatter contract; **section titles are
+  no longer mandatory — structure is purpose-driven**), `concept-resolution.md` (resolution + home-domain routing).
 - Phase references: `references/preflight.md`, `references/arbitrate.md`, `references/write-pages.md`, `references/synthesis.md`, `references/finish-lint.md`.
 
 ## 5. Persisted artifacts
@@ -54,7 +60,7 @@ demand. Project truth: `AGENTS.md`. Engineering format: `docs/skill-runtime/skil
 ```text
 preprocess + auto-arbitration  init-vault → add-source → profile → source-convert → source-audit →[ arbitration-status → if pending: agent arbitrates queue → arbitration-apply ]→ windows → workorder
 start / per-window (LLM)  ingest-start → read chapters.json (build whole-book understanding)
-                          →[ in chapter order: window-start → show-window → write pages (hard pages embed source images by type) → window-done --writes ]×N
+                          →[ in chapter order: window-start → show-window → write pages (read hard-page source images as evidence; re-express natively — never embed them) → window-done --writes ]×N
 synthesis (LLM)           phase E: update overview + build topic/comparison/synthesis (into some window's --writes) — first-class, lint blocks if missing
 finish (zero LLM)         ingest-done → lint
 incremental reopen        reopen → ingest-start →[ per-window backfill ]→ ingest-done → lint
@@ -85,7 +91,7 @@ incremental reopen        reopen → ingest-start →[ per-window backfill ]→ 
 |---|---|---|
 | A preprocess | `references/preflight.md` | deterministic chain + dual-audit acceptance (needs_vision / degraded warnings / reconciliation / window coverage) |
 | A.5 auto-arbitration | `references/arbitrate.md` | when the dual-audit flags un-closed disagreements, the agent auto-decides render/ignore/needs_human (structured only); the CLI materializes → the windows carry the assets |
-| B+C+D per-window writing | `references/write-pages.md` | start guard + **read chapters.json for whole-book understanding** + per-window sub-units U1–U7 + embed source images by type + writing discipline + lint hard rules |
+| B+C+D per-window writing | `references/write-pages.md` | start guard + **read chapters.json for whole-book understanding** + per-window sub-units U1–U7 + read source images as evidence & re-express natively (never embed) + writing discipline + lint hard rules |
 | E synthesis | `references/synthesis.md` | incremental overview/topic/comparison/synthesis |
 | F finish | `references/finish-lint.md` | ingest-done + lint promote/rollback + derived rebuild |
 

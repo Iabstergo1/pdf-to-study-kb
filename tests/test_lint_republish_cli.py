@@ -161,10 +161,11 @@ def test_reopen_enables_incremental_publish(tmp_path):
     assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
     assert _run(["window-start", "--source", "note", "--window", "w-reopen-0", "--hash", "h"],
                 tmp_path).returncode == 0
-    # 新增综合页（无 source frontmatter，靠 --writes 归属，避免判孤儿）
+    # 新增综合页（靠 --writes 归属，避免判孤儿；G2：综合页必带 source_refs 溯源）
     mdpage.write_page(tmp_path / "wiki/comparisons/x.md",
                       {"type": "comparison", "status": "proposed", "managed_by": "pipeline",
-                       "title": "X 对比"}, COMPARISON_BODY)
+                       "title": "X 对比", "source_refs": [{"source": "note", "sections": ["1"]}]},
+                      COMPARISON_BODY)
     assert _run(["window-done", "--source", "note", "--window", "w-reopen-0",
                  "--writes", '["comparisons/x.md"]'], tmp_path).returncode == 0
     assert _run(["ingest-done", "--source", "note"], tmp_path).returncode == 0

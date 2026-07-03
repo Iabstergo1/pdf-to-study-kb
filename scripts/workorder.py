@@ -11,6 +11,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import concept_store
 import mdpage
 
+# G3：受管跨域 home-domain 白名单。任何来源都可把「本就属于这些域」的概念页 resolve/merge 到其 home
+# 域（概念落 home domain，不落当前来源域）。窄放行——只放行 `domains/{home}/concepts/**`，不开 domains/**、
+# 不放行其 lessons/topics。新增 home（statistics/optimization/programming…）须经审计后加入此表。
+CROSS_DOMAIN_HOME_DOMAINS = ["research-method"]
+
 
 def _sha256_file(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
@@ -46,7 +51,8 @@ def build_workorder(vault, *, source_id: str, domain: str, staging_dir) -> dict:
     concept_snap = []
     for cid in sorted(registry):
         e = registry[cid]
-        if e["domain"] not in (domain, "shared"):
+        # 本域 + shared + 跨域 home 白名单：均纳入快照（跨域 home 概念也吃 hash 覆盖保护，G3）
+        if e["domain"] not in (domain, "shared", *CROSS_DOMAIN_HOME_DOMAINS):
             continue
         page = vault / e["page_path"]
         concept_snap.append({"canonical_id": cid, "path": e["page_path"],
@@ -63,11 +69,16 @@ def build_workorder(vault, *, source_id: str, domain: str, staging_dir) -> dict:
             rel = p.relative_to(vault).as_posix()
             other_snap.append({"path": rel, "sha256": _sha256_file(p), "managed_by": _managed_by(p)})
 
+    # G3：跨域概念写入窄放行——每个 ≠ 当前域的 home 追加精确到 concepts/** 一条（不放行其 lessons/topics）
+    cross_scope = [f"domains/{h}/concepts/**" for h in CROSS_DOMAIN_HOME_DOMAINS if h != domain]
+
     return {
         "source_id": source_id,
         "domain": domain,
         "write_scope": [f"domains/{domain}/**", "concepts/**", "topics/**", "comparisons/**",
-                        "synthesis/**", f"sources/{source_id}.md", "overview.md", "log.md"],
+                        "synthesis/**", f"sources/{source_id}.md", "overview.md", "log.md"]
+        + cross_scope,
+        "cross_domain_concept_scope": cross_scope,   # 显式审计字段：本轮允许写入的跨域 home 概念目录
         "registry": {"path": "concepts/_registry.yaml", "hash": reg_hash,
                      "scope": [f"domain:{domain}", "shared"]},
         "concept_pages_snapshot": concept_snap,

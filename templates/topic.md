@@ -6,8 +6,6 @@ related_concepts: []
 status: proposed
 managed_by: pipeline
 ---
-# <主题名>
-
 ## 核心综合
 
 <跨章节/跨来源把这个主题讲透：共识是什么、分歧在哪、怎么选>

@@ -15,13 +15,20 @@ python scripts/pipeline.py resolve-concept --mention "<mention in the body>" --d
 
 - `[merged] <canonical_id> -> <page path>`: edit that page to fill/extend the body (run check-write +
   snapshot-page first).
-- `[created] <canonical_id> -> <page path>`: the skeleton page exists (`status: proposed`); fill the
-  required sections + a self-test.
+- `[created] <canonical_id> -> <page path>`: the skeleton page exists (`status: proposed`); fill the body
+  (**purpose-driven structure — no mandatory section titles, D-4**), reaching a usable depth.
 - Each call **rescans the concept pages live** to rebuild the in-memory registry, so concepts created
   earlier in the session are immediately matchable by later resolves.
 - Homonyms across domains (econ `utility` vs cs `utility`) are kept apart by the `concept.<domain>.<slug>`
   namespace and never merge.
+- **Home-domain routing (D-3): `--domain` is the concept's *home* domain — where it actually belongs — not
+  the source book's domain.** A game-theory source discussing 研究问题 / 学术论文结构 / 组合创新 (research
+  methodology) resolves those into `research-method`; statistics → `statistics`, optimization → `optimization`,
+  etc. The work order pre-authorizes cross-domain concept writes for the managed home domains
+  (`workorder.CROSS_DOMAIN_HOME_DOMAINS`, currently `research-method`) at `domains/<home>/concepts/**` **only**
+  (never `domains/**`, never their lessons/topics); an unlisted home domain must be added to that audited
+  allowlist before `check-write` will permit it.
 - Cross-domain promotion (domain → shared) requires human sign-off via the Review-Queue; the command
   never promotes on its own.
-- Aliases are written only to the concept page's `aliases:` frontmatter; `aliases.md` is a derived view
-  and must not be hand-written.
+- Aliases are written only to the concept page's `aliases:` frontmatter; **`aliases.md` is retired (B2)** —
+  Obsidian reads frontmatter `aliases:` natively for search/autocomplete.

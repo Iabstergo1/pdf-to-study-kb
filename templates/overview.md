@@ -6,8 +6,6 @@ title: 知识库总览
 status: published
 managed_by: pipeline
 ---
-# 知识库总览（living synthesis）
-
 <这是 vault 入口：由 /ingest 随每次 ingest 增量维护的活综合页，禁止退化成章节清单（L5）。>
 
 ## 核心概念地图

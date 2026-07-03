@@ -103,20 +103,13 @@ def write_registry(vault, registry: dict) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def write_aliases(vault, registry: dict) -> None:
-    """派生 aliases.md：别名 → 概念页（人读视图；/ingest 不写此文件）。"""
-    rows = set()
-    for cid in sorted(registry):
-        e = registry[cid]
-        for term in [e["canonical_name"], *e["aliases"]]:
-            rows.add(f"- {term} → [[{e['page_path']}|{e['canonical_name']}]] (`{cid}`)")
-    lines = ["# 别名索引（派生文件，由 rebuild-registry 重建，勿手改）", ""] + sorted(rows)
-    (Path(vault) / "aliases.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+def remove_stale_aliases(vault) -> None:
+    """B2：aliases.md 已废弃（别名只保留在概念页 frontmatter，Obsidian 原生用于搜索/补全）。
+    清理旧 vault 可能残留的派生 aliases.md，不再生成。"""
+    (Path(vault) / "aliases.md").unlink(missing_ok=True)
 
 
-CONCEPT_BODY = """# {name}
-
-## 一句话
+CONCEPT_BODY = """## 一句话
 
 （待 /ingest 填写）
 

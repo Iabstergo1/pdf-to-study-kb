@@ -5,8 +5,6 @@ related_concepts: []
 status: proposed
 managed_by: pipeline
 ---
-# <A vs B（vs C）>
-
 ## 结论
 
 <一句话：什么时候选谁>

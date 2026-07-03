@@ -38,17 +38,12 @@ def missing_footnote_defs(body: str) -> set[str]:
     return footnote_refs(body) - footnote_defs(body)
 
 
-# 各页面类型的必需小节（spec §8；P6 门禁选择阻断子集：L2=concept、L3=topic、L5=overview）
+# D-4：正文小节标题不再强制。确定性层只守安全/溯源/完整性（见 wiki_gate 硬规则白名单），
+# 结构交写作 LLM 依 purpose + 来源类型自然组织。此表保留为已知页型登记（值恒为空），
+# required_sections_for 因此返回空、门禁不再据此阻断；模板里的小节是建议性脚手架而非强制。
 REQUIRED_SECTIONS: dict[str, list[str]] = {
-    "source": ["## 一句话总结", "## 核心观点", "## 关键概念",
-               "## 与其他来源的关联", "## 精彩摘录", "## 相关页面"],
-    "lesson": [],  # 干净散文，无强制小节；约束是无裸 E-ID + 脚注配对
-    "concept": ["## 一句话", "## 直觉", "## 形式化", "## 各章如何处理",
-                "## 与其他概念的关系", "## 自测"],
-    "topic": ["## 核心综合", "## 各来源贡献", "## 未解决问题"],
-    "comparison": ["## 结论", "## 对比维度", "## 适用场景", "## 相关概念"],
-    "synthesis": ["## 核心洞见", "## 关键决策", "## 涉及概念", "## 待跟进"],
-    "overview": ["## 核心概念地图", "## 推荐学习路线", "## 模型家族对比"],
+    "source": [], "lesson": [], "concept": [], "topic": [],
+    "comparison": [], "synthesis": [], "overview": [],
 }
 
 
@@ -56,9 +51,47 @@ def required_sections_for(page_type: str) -> list[str]:
     return list(REQUIRED_SECTIONS[page_type])  # 未知类型 KeyError 即报错
 
 
+# G2：各页型必备 frontmatter（按页型分表）。核心收紧＝**非 source 综合页必带 source_refs**（吸收 D3
+# 派生页强制溯源）；source 页不要 source_refs——它本身就是来源，用 source_id/title/domain/format 标识。
+# lesson 归属靠 source 字段 / window write_set（见 belongs_to_source），不在此强制 source_refs（风险页
+# 溯源由 risk-traceability 单独把关）。缺键或值为空（[]/""/None）均记缺。
+_FM_COMMON = {"type", "status", "managed_by"}
+REQUIRED_FRONTMATTER: dict[str, set[str]] = {
+    "source": _FM_COMMON | {"source_id", "title", "domain", "format"},
+    "concept": _FM_COMMON | {"canonical_id", "canonical_name", "domain"},
+    "lesson": _FM_COMMON,  # 归属靠 source 字段 / window write_set，不强制 domain（可由路径推断）
+    "topic": _FM_COMMON | {"source_refs"},
+    "comparison": _FM_COMMON | {"source_refs"},
+    "synthesis": _FM_COMMON | {"source_refs"},
+    "overview": _FM_COMMON | {"source_refs"},
+}
+
+
+def missing_frontmatter(meta: dict, page_type: str) -> list[str]:
+    """返回该页型缺失或为空的必备 frontmatter 字段（G2）；未知页型只查通用四项。纯函数、无 I/O。"""
+    req = REQUIRED_FRONTMATTER.get(page_type, _FM_COMMON)
+    return [k for k in sorted(req) if not meta.get(k)]
+
+
 def missing_sections(body: str, required: list[str]) -> list[str]:
     present = {ln.strip() for ln in body.splitlines() if ln.lstrip().startswith("#")}
     return [s for s in required if s not in present]
+
+
+def leading_h1_duplicates_filename(body: str, filename: str) -> bool:
+    """正文首个内容行是与文件名同名的一级标题 `# X` 时返回 True（B1）。
+    Obsidian 默认「显示内联标题」会把文件名渲染成大标题，正文若再放同名 `# X`，
+    标题就出现两次。只针对首行同名 H1——其它 H1 或散文开头不算。纯函数、无 I/O。"""
+    stem = filename[:-3] if filename.endswith(".md") else filename
+    stem = stem.replace("\\", "/").rsplit("/", 1)[-1]
+    for line in body.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("# ") and not s.startswith("## "):
+            return s[2:].strip() == stem
+        return False  # 首个非空行不是一级标题 → 无同名 H1 重复
+    return False
 
 
 # 表格单元格里的行内/块公式含未转义的 `|`：GFM 会把它当列分隔符，撕碎公式、KaTeX 无法渲染

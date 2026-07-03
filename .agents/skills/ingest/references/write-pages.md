@@ -32,7 +32,7 @@ U1–U7. **Each sub-unit has an output + acceptance + persisted artifact** — n
 | **U1 read window** | window_id | window source text + resume check | `window-start` recorded; `digest.md` read | `ingest_progress` | window missing |
 | **U2 extract candidates** | window text | candidate concepts / key claims | each cites a source §section | (digest draft) | — |
 | **U3 resolve** | candidates | `[merged]`/`[created]` concept page + canonical_id | merge on hit, never create a duplicate | concept frontmatter | registry corrupt |
-| **U4 draft** | resolution + window text | `status: proposed` pages (required sections present) | frontmatter valid, no missing section | vault (proposed) | check-write DENY |
+| **U4 draft** | resolution + window text | `status: proposed` pages (purpose-driven structure) | frontmatter complete for the page type; no source-image embed | vault (proposed) | check-write DENY |
 | **U5 self-check** | drafted pages | page_rules self-check | **0 violations** before U6 | — | self-check fails → fix, do not account |
 | **U6 account** | written pages | `window-done --writes '[...]'` | **every** non-source page in --writes | `ingest_progress` | miss → orphan page |
 | **U7 digest** | window highlights | roll `digest.md` (keep last 8 windows in detail + older folded to chapter summaries) + refresh top `## RESUME` block | new concepts / open threads; RESUME points to next window; digest stays bounded | `staging/<src>/digest.md` | — |
@@ -41,12 +41,20 @@ Sub-unit command detail:
 - U1: `python scripts/pipeline.py window-start --source <src> --window <id> --hash <window sha or char-range string>`;
   `python scripts/pipeline.py show-window --source <src> --window <id>` reads the window. If the top of the
   output shows `<!-- route-b-assets`, each line like
-  `- page=26 tier=must reason=formula staging=.../assets/p0026.png vault=![[assets/<src>/p0026.png]]` is
-  **visual evidence you must check** — `tier=must` read the image, `tier=nice` at least skim it; when you
-  write the matching formula/table/figure, embed the `vault=` `![[assets/<src>/pXXXX.png]]` (formula → KaTeX
-  `$$…$$`, figure → embed the source image, table → markdown + source image, per phase D). Read
-  `staging/<src>/digest.md` first (skip on the first window). Use `--plain` only when debugging the raw slice.
-- U3: `python scripts/pipeline.py resolve-concept --mention "<mention>" --domain <domain> [--alias "<english name>"] --ref-source <src> --ref-sections "<5.2>"`, then edit the page it returns.
+  `- page=26 tier=must reason=formula staging=.../assets/p0026.png` is **visual evidence you must READ** —
+  `tier=must` read the image, `tier=nice` at least skim it; then **re-express it natively in the page and never
+  embed it** (formula → native KaTeX `$$…$$` with the result stated, table → Markdown/prose, figure → mermaid/prose,
+  per phase D; `source-image-embed` hard-blocks any `![[assets/…]]`). Read `staging/<src>/digest.md` first
+  (skip on the first window). Use `--plain` only when debugging the raw slice.
+- U3: **first decide the concept's home domain — where the concept actually belongs, not the source book's
+  domain (D-3).** A game-theory book that discusses 研究问题 / 文献综述 / 学术论文结构 / A-F框架 (research
+  methodology) resolves those into `research-method`, not `game-theory`; statistics/econometrics → `statistics`,
+  optimization → `optimization`, etc. Then `python scripts/pipeline.py resolve-concept --mention "<mention>"
+  --domain <home-domain> [--alias "<english name>"] --ref-source <src> --ref-sections "<5.2>"`, and edit the page
+  it returns. The work order pre-authorizes cross-domain concept writes for the managed home domains (`research-method`
+  today) at `domains/<home>/concepts/**` only — if `check-write` DENYs an unlisted home domain, that domain must be
+  added to the audited allowlist first, don't force it elsewhere. High-value sub-concepts (纳什均衡 / 子博弈精炼纳什
+  均衡 / 贝叶斯纳什均衡 / 完美贝叶斯均衡 / 逆向归纳) deserve **their own pages**, not just plaintext mentions.
 - U5: self-check primitives in `scripts/page_rules.py` (see "lint hard rules" below).
 - U6: `python scripts/pipeline.py window-done --source <src> --window <id> --writes '["<page>"]'` (on failure use `window-fail --error "<reason>"`).
 - U7: refresh the `## RESUME` block at the **top** of `digest.md` each window (the resume anchor; on
@@ -68,27 +76,45 @@ Sub-unit command detail:
   (out of scope / not in snapshot / hash changed / `managed_by: human`) → do not write; put the proposed
   change in `wiki/Review-Queue/<page>-proposal.md`.
 - **Snapshot before overwriting an existing page:** `python scripts/pipeline.py snapshot-page --source <src> --path <rel-path>`.
-- **Every new/edited page is `status: proposed` + `managed_by: pipeline`;** templates in `templates/`, required sections present.
+- **Every new/edited page is `status: proposed` + `managed_by: pipeline`;** templates in `templates/` are suggested scaffolds — structure is purpose-driven, per-type frontmatter must be complete.
 - **Concepts only via resolve-concept** (merge on hit, never create a duplicate); aliases only in the concept page's `aliases:` frontmatter.
-- **Never hand-write derived files:** `concepts/_registry.yaml`, `aliases.md`, `index.generated.md` are rebuilt by the finishing CLI.
-- **Non-text content is source-image-authoritative (route B, by type):** any content from a `needs_vision`
-  hard page (`pages.jsonl` `needs_vision_reason` = formula / formula-borderline / vector-figure / table /
-  caption) must embed the page's source image `![[assets/<src>/pXXXX.png]]`, handled **by type**:
-  - **Formula page** (formula / formula-borderline): write full KaTeX **and** embed the source image — plain
-    text flattens super/subscripts and fractions (a lesson with `$$` and no image is hard-blocked by lint;
-    a concept puts the source image in its "Formalization" section).
-  - **Figure page** (vector-figure / captioned figure): **do not redraw from text** — embed the original;
-    the prose only explains what it says and how to read it (LLM redraws of vector/flow figures are unreliable).
-  - **Table page** (table): convert to a markdown table where possible (searchable/linkable) **and** embed
-    the source image to verify; complex or borderless tables are source-image-authoritative.
-  - Principle: **the LLM is good at understanding, organizing, explaining; faithful reproduction of non-text
-    objects belongs to the original pixels.**
+- **Never hand-write derived files:** `concepts/_registry.yaml`, `index.generated.md` are rebuilt by the finishing CLI (`aliases.md` is retired — aliases live in concept frontmatter).
+- **Non-text content: source images are LLM INPUT evidence, never published output (D-1).** For any
+  `needs_vision` hard page (`pages.jsonl` `needs_vision_reason` = formula / formula-borderline / vector-figure /
+  table / caption), **read the source image via `show-window` to understand it, then re-express it natively —
+  never embed `![[assets/…]]` in a published page** (lint `source-image-embed` hard-blocks it, on the proposed
+  batch too, so it can't slip through before promote):
+  - **Formula page** (formula / formula-borderline): write full native KaTeX **and state the result, variable
+    meanings, conditions and economic reading** — a model page must reach a usable answer (e.g. Cournot
+    q\*=(a-c)/3b; Bertrand p=c under homogeneous goods / no capacity limit / tie-splitting), not stop at "take
+    the FOC and solve the system".
+  - **Table page** (table): convert to a Markdown table where it structures reliably (searchable / linkable);
+    where it can't, describe the key comparison in prose — **do not embed the scan to pad the page**.
+  - **Figure / flow page** (vector-figure / captioned figure): rebuild as mermaid or prose when you genuinely
+    understand it; if you cannot reproduce it reliably, **do not fake it** — route it to the Review-Queue or
+    mark it for a human figure.
+  - Principle: **the LLM understands / organizes / explains; the source image is evidence it reads, not pixels
+    it ships.** If a page can't be made clear without the scan, the writing isn't finished — that is never a
+    license to embed.
 - **Link restraint (avoid graph noise):** wikilink only real strong relations (depends-on / generalizes /
   contrasts / specializes); do not build a central "link-everything" hub. Summary pages (`sources/<src>.md`,
   `overview.md`) wikilink only a few core concepts.
-- **Depth (do not degrade to a summary):** every concept has at least one worked example or key derivation
-  step (not just a definition); a lesson gives actionable detail, not a chapter recap. Vague summary pages are unfinished.
-- **写作风格（高信息密度的学术散文，不是模板填空）：** 正文以连贯段落为主、少用机械的要点罗列；句式长短交错、节奏有起伏，用词精确多样，避免公式化、重复化、可预测的措辞；段落之间有清晰的逻辑递进，每段服务一个目的又彼此衔接，读起来像一篇打磨过的短文而非提纲。**必需小节标题保持 verbatim（lint 强制），但小节内不套固定骨架**——依内容自然展开；表格只用在确需结构化对照处（comparison 的对比维度、topic 的各来源贡献），其余以散文铺陈。不同概念/页面之间也要避免千篇一律的同构句式。
+- **Depth — 讲透优先，篇幅不设上限（多多益善）：** every concept carries at least one worked example or key
+  derivation step, not just a definition; **hub concepts (e.g. 均衡 / 信息结构) get visibly more depth than
+  supporting ones — weight by learning importance, do not write every page to the same length.** A model page
+  reaches a usable result (assumptions → best-response → equilibrium solution → boundary conditions →
+  interpretation). Vague summary pages are unfinished.
+- **Learning loop & source-page integrity:** a self-test must ship with answers / hints / back-links (a
+  collapsible `> [!question]` + the answer, or a link to the section that resolves it) — never questions with
+  no resolution. On `sources/<src>.md`, "精彩摘录" means **real quotations with a page/§ ref**; if you can only
+  paraphrase, rename the section (e.g. 核心论点) rather than passing off a summary as a quote. `overview.md`
+  learning routes state **what the reader can do after each leg** (e.g. "judge whether a problem is Cournot or
+  Bertrand", "write a minimal model setup"), not just the reading order.
+- **写作风格（高信息密度的学术散文，不是模板填空）：** 正文以连贯段落为主、少用机械的要点罗列；句式长短交错、
+  节奏有起伏，用词精确多样，避免公式化、重复化、可预测的措辞；段落之间有清晰的逻辑递进，读起来像一篇打磨过的
+  短文而非提纲。**正文结构由 `purpose.md` + 来源类型 + 读者需求自然决定——不再有强制的逐字小节标题（D-4）；
+  `templates/*` 的小节只是建议性脚手架，可增删。** 表格只用在确需结构化对照处（comparison 的对比维度、topic
+  的各来源贡献），其余以散文铺陈。不同概念/页面之间也要避免千篇一律的同构句式。
 - **页面文件名用中文：** topic/comparison/synthesis 新建页的文件名取中文（与页面 `title` 一致），如 `topics/<中文主题名>.md`、`comparisons/<甲> vs <乙>.md`；概念页文件名由 `resolve-concept` 自动取中文 `canonical_name`，无需你指定。wikilink 因此是中文全路径：`[[domains/<domain>/concepts/<中文概念名>|<中文概念名>]]`。`canonical_id` 仍是稳定 ASCII（内部去重键，不影响侧栏/画布显示）。
 - **图谱关系标注（Knowledge Graph v2.0，可选增强而非必填）：** 强 wikilink 关系处可在同段/同列表项末尾追加轻量注释 `<!-- graph: confidence=<extracted|inferred|ambiguous> relation=<depends_on|contrasts|related> evidence="<一句话、有来源依据的理由>" -->`，供确定性图谱构建赋权/分簇。**优先写 `confidence`，`relation` 可省略**；v2.0 关系白名单只有 `depends_on`/`contrasts`/`related`，未知值自动降级为 `related`/`ambiguous`（图谱 lint 记 warning）。注释只解释这条边，页面 `source_refs` 仍是证据权威；**不要给弱导航链接加注释**——无注释 wikilink 由图谱按结构信号（共引/同源/类型亲和）+ topic membership 自动赋权，不会因没标注而丢失。图谱构建全程零 LLM、只读页面已有轻量结构信息；图谱导航入口是 `knowledge-graph.generated.html`（力导向交互图，点击节点经 `obsidian://` 跳到对应 Obsidian 笔记；不再生成 Obsidian canvas）。
 - Append to `log.md`: `## [YYYY-MM-DD] ingest | <src> | <created/updated pages>` (append-only).
@@ -96,24 +122,25 @@ Sub-unit command detail:
 ## Lint hard rules cheat-sheet (violating any one blocks publish; recite before each page)
 
 1. **Wikilinks use full vault-relative paths** (not Obsidian basenames): `[[domains/<domain>/concepts/<中文概念名>|<中文概念名>]]`（中文文件名全路径），and the target page must exist.
-2. **Every `[^e1]` reference has a `[^e1]:` definition line**; no bare `[E-...]` IDs in the body.
-3. **Required section titles match verbatim** (concept 6 / topic 3 / comparison 4 / synthesis 4 / source 6 / overview 3).
-4. **A lesson containing `$$` must embed a real source-page PNG** `![[assets/<src>/pXXXX.png]]`; a lesson is not too short after placeholders are removed.
-5. **Concept dedup:** only via resolve-concept, merge on hit, never hand-build a duplicate (duplicate `canonical_id` blocks).
-6. **Ownership (most-missed):** a page with no `source:` frontmatter (`topics/**`/`comparisons/**`/`synthesis/**`/`overview.md`) **must be in some window's `window-done --writes`**, or it is fail-closed as an orphan.
-7. **No bare `|` in table-cell formulas:** use `\lvert S \rvert` for `|S|` (or escape `\|`, or move the formula out of the table) — a bare `|` is read as a column separator and breaks KaTeX (`formula-table-pipe` hard-block).
-8. **Synthesis (phase E) mandatory:** after producing concepts you must update overview + build topic/comparison/synthesis as needed (into `--writes`), else lint `L7-synthesis-missing` blocks.
-9. **Concept coverage (`concepts-uncovered`):** in a concept-heavy domain (≥6 concepts) **every concept must be收编 by some topic** (topic body full-path wikilink or `related_concepts[]`); any uncovered concept blocks publish (already-published pages are re-checked too).
-10. **No unfilled placeholders (`placeholder-unfilled`):** a concept/topic/comparison/overview body must not still contain「（待 /ingest 填写）」—— half-finished pages block publish (already-published pages re-checked). （`lint` 另对 0 字节 / `*.png.md` 杂物页发 `stray` 软警告，不阻断。）
+2. **Provenance lives in frontmatter `source_refs`, not in the body:** no inline footnote mechanism (`[^e1]`) and no bare `[E-...]` IDs — write immersive prose; the reader shouldn't sense the original document (D-5).
+3. **No mandatory section titles (D-4).** Structure is purpose-driven. Instead the machine checks **per-type frontmatter completeness (`frontmatter-incomplete`)**: `source` needs `source_id/title/domain/format` (**not** `source_refs`); `topic`/`comparison`/`synthesis`/`overview` **must carry `source_refs`**; `concept` needs `canonical_id/canonical_name/domain`.
+4. **Published body embeds NO source image (`source-image-embed`, blocks the proposed batch too):** re-express formulas as native KaTeX (with the result), tables as Markdown/prose, figures as mermaid/prose — the source image is read-only evidence. A `concept`/`topic`/`comparison` that is too short blocks as `content-too-short`; a lesson too short blocks as `L6-empty-lesson`.
+5. **No body H1 that duplicates the filename (`title-duplicate-h1`):** Obsidian already shows the filename as the inline title — start the body with prose, not `# <same title>`.
+6. **Concept dedup:** only via resolve-concept, merge on hit, never hand-build a duplicate (duplicate `canonical_id` blocks). Concepts resolve to their **home domain** (methodology → `research-method`, not the source's domain); aliases live only in the concept's `aliases:` frontmatter (`aliases.md` is retired).
+7. **Ownership (most-missed):** a page with no `source:` frontmatter (`topics/**`/`comparisons/**`/`synthesis/**`/`overview.md`) **must be in some window's `window-done --writes`**, or it is fail-closed as an orphan.
+8. **No bare `|` in table-cell formulas:** use `\lvert S \rvert` for `|S|` (or escape `\|`, or move the formula out of the table) — a bare `|` is read as a column separator and breaks KaTeX (`formula-table-pipe` hard-block).
+9. **Synthesis (phase E) mandatory:** after producing concepts you must update overview + build topic/comparison/synthesis as needed (into `--writes`), else lint `L7-synthesis-missing` blocks.
+10. **Concept coverage (`concepts-uncovered`):** in a concept-heavy domain (≥6 concepts) **every concept must be收编 by some topic** (topic body full-path wikilink or `related_concepts[]`); any uncovered concept blocks publish (already-published pages are re-checked too).
+11. **No unfilled placeholders (`placeholder-unfilled`):** a concept/topic/comparison/overview body must not still contain「（待 /ingest 填写）」—— half-finished pages block publish (already-published pages re-checked). （`lint` 另对 0 字节 / `*.png.md` 杂物页发 `stray` 软警告，不阻断。）
 
-## Callouts & figure width (Obsidian rendering)
+## Callouts (Obsidian rendering)
 
 - **Callouts** (whitelist — unknown types hard-fail lint): pitfalls → `> [!warning]`, self-test →
   `> [!question]`, worked examples → `> [!example]`, key takeaways → `> [!tip]`. Whitelist:
   `note tip info important warning question example abstract summary quote success todo`. Not required
   to use callouts — just never invent a type outside the whitelist.
-- **Figure width**: when embedding a hard-page image, size it with `![[assets/<src>/pNNNN.png|640]]`
-  (formula pages narrower, full-page figures wider) so it does not overflow the reading column.
+- **No source-image embeds (D-1):** published pages never contain `![[assets/<src>/pNNNN.png]]`. Source images
+  are evidence you read via `show-window`; render knowledge natively (KaTeX / Markdown table / mermaid / prose).
 
 ## Precise links & inline markup (Obsidian Flavored Markdown)
 
@@ -133,6 +160,7 @@ link regex stops at `|`/`#`, so they are lint-safe).
 - **Editorial comments** `%%…%%` are hidden in reading view: only for non-substantive notes to a future
   editor. **Never hide substantive content or an unresolved problem inside `%%…%%`** — open issues go to the
   Review-Queue, not into invisible text the lint cannot see.
-- **Mermaid** (` ```mermaid `) is allowed only for an **LLM-authored conceptual diagram** you genuinely
-  understand (e.g. a small concept-dependency graph); add `class NodeName internal-link;` to make a node a
-  vault link. It is **not** a way to reproduce a source figure — source figures stay image-authoritative (phase D).
+- **Mermaid** (` ```mermaid `) is for an **LLM-authored conceptual diagram** you genuinely understand (e.g. a
+  small concept-dependency graph); add `class NodeName internal-link;` to make a node a vault link. Under D-1 it
+  is also the preferred way to **rebuild** a source figure/flow you understand — but if you can't reproduce it
+  reliably, route to the Review-Queue rather than fake it (never embed the source scan).

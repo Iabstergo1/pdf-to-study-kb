@@ -92,13 +92,16 @@ def test_alias_collision_same_domain_is_warning(tmp_path):
     assert any("alias collision" in w for w in warnings)
 
 
-def test_write_aliases_derived_view(tmp_path):
+def test_aliases_md_no_longer_generated(tmp_path):
+    # B2：aliases.md 已废弃——英文别名只保留在概念页 frontmatter，不再生成派生别名索引
     _mk_concept(tmp_path, domain="game-theory", name="信号博弈", aliases=["Signaling Game"])
     reg, _, _ = concept_store.build_registry(concept_store.scan_concept_pages(tmp_path))
     concept_store.write_registry(tmp_path, reg)
-    concept_store.write_aliases(tmp_path, reg)
-    text = (tmp_path / "aliases.md").read_text(encoding="utf-8")
-    assert "Signaling Game" in text and "signaling-game" in text and "派生文件" in text
+    assert not (tmp_path / "aliases.md").exists()
+    assert not hasattr(concept_store, "write_aliases")
+    # 别名仍在概念页 frontmatter（Obsidian 原生用于搜索/自动补全）
+    meta, _ = mdpage.read_page(tmp_path / "domains/game-theory/concepts/signaling-game.md")
+    assert "Signaling Game" in meta["aliases"]
 
 
 def _registry_of(vault):

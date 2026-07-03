@@ -38,9 +38,18 @@ def test_overview_template_exists_with_l5_sections():
     assert page_rules.missing_sections(body, page_rules.required_sections_for("overview")) == []
 
 
+def test_templates_have_no_leading_h1():
+    # B1：模板正文不应以一级标题开头（Obsidian 用文件名做内联标题，正文再放同名 H1 会重复渲染）
+    for t in TYPES + ["overview"]:
+        _, body = mdpage.read_page(TEMPLATES / f"{t}.md")
+        first = next((ln.strip() for ln in body.splitlines() if ln.strip()), "")
+        assert not (first.startswith("# ") and not first.startswith("## ")), \
+            f"{t}.md 正文以一级标题开头，应删除（Obsidian 内联标题已显示文件名）"
+
+
 def test_lesson_template_clean_prose_contract():
     _, body = mdpage.read_page(TEMPLATES / "lesson.md")
     assert page_rules.find_bare_evidence_ids(body) == []      # 无裸 E-ID
-    assert page_rules.missing_footnote_defs(body) == set()    # 示例脚注引用均有定义
-    assert "$$" in body                                        # KaTeX 示例
-    assert "![[" in body                                       # 源页截图内嵌示例
+    assert "$$" in body                                        # 原生 KaTeX 示例
+    assert "![[assets/" not in body                            # D-1：模板不再示范内嵌源图
+    assert "[^" not in body                                    # D-5：模板不再用脚注机制

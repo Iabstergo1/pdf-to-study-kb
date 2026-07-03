@@ -5,8 +5,6 @@ related_concepts: []
 status: proposed
 managed_by: pipeline
 ---
-# <综合标题>
-
 ## 核心洞见
 
 <跨来源沉淀出的、单一来源给不了的结论>

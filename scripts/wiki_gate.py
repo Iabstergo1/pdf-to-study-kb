@@ -21,7 +21,8 @@ _WIKILINK = re.compile(r"\[\[([^\]|#]+)")
 CALLOUT_WHITELIST = frozenset({"note", "tip", "info", "important", "warning", "question",
                                "example", "abstract", "summary", "quote", "success", "todo"})
 _CALLOUT = re.compile(r"^>\s*\[!([A-Za-z][\w-]*)\]", re.MULTILINE)
-_RULE_BY_TYPE = {"concept": "L2", "topic": "L3", "overview": "L5"}
+# D-1/G1：发布正文禁嵌源图（`![[assets/...]]`）。源图只作 LLM 阅读证据，不进入发布产物。
+_SOURCE_IMG = re.compile(r"!\[\[\s*assets/")
 _PLACEHOLDER = re.compile(r"（待 /ingest 填写[^）]*）")
 # A1/A3：这些类型的页正文里残留占位 = 半成品，阻断（lesson 用 L6 长度代理，不在此列）。
 _PLACEHOLDER_TYPES = ("concept", "topic", "comparison", "overview")
@@ -168,13 +169,19 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
         # 证据脚注：引用必须有定义（引用从散文取，定义仍从全文取——定义行不在代码块）
         for fn in sorted(page_rules.footnote_refs(prose) - page_rules.footnote_defs(body)):
             hit(rel, "evidence-footnote", f"footnote [^{fn}] has no definition")
-        # 必需小节（concept=L2 / topic=L3 / overview=L5 / 其余统称 sections）
-        if ptype in page_rules.REQUIRED_SECTIONS:
-            for sec in page_rules.missing_sections(body, page_rules.required_sections_for(ptype)):
-                hit(rel, _RULE_BY_TYPE.get(ptype, "sections"), f"missing section {sec}")
-        # 公式邻接：公式重的 lesson 必须引用源页截图（spec §10）
-        if ptype == "lesson" and "$$" in body and "![[" not in body:
-            hit(rel, "formula-screenshot", "formula lesson lacks source-page screenshot embed")
+        # D-4：正文小节标题不再强制（REQUIRED_SECTIONS 已清空，结构交写作 LLM + purpose 组织）
+        # D-1/G1：发布正文禁嵌源图（对本轮 proposed 批也拦，status 无关）——源图只作 LLM 阅读证据
+        if _SOURCE_IMG.search(prose):
+            hit(rel, "source-image-embed",
+                "发布正文禁嵌源图 `![[assets/…]]`；源图只作阅读证据，公式→原生 KaTeX、表格→Markdown、图→mermaid/散文重建")
+        # G2：frontmatter 完整性（按页型；非 source 内容页必带 source_refs，吸收 D3 派生页溯源）
+        for k in page_rules.missing_frontmatter(meta, ptype):
+            hit(rel, "frontmatter-incomplete",
+                f"缺 frontmatter 字段 `{k}`（{ptype} 页必备；source_refs 缺失=溯源断裂）")
+        # B1：正文首行与文件名同名的一级标题 → Obsidian 内联标题重复渲染，阻断
+        if page_rules.leading_h1_duplicates_filename(body, rel):
+            hit(rel, "title-duplicate-h1",
+                "正文首行是与文件名同名的 `# 标题`；Obsidian 已用文件名做内联标题，删掉正文这行 H1")
         # 表格内公式含未转义 `|`：会被当列分隔符撕碎公式 / KaTeX 渲染失败（任意页类型）
         for snip in page_rules.katex_pipe_in_table(body):
             hit(rel, "formula-table-pipe",
@@ -182,6 +189,11 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
         # L6 代理：lesson 去占位后过短 = 疑似空课/封面页产物（精确 L6 需源页映射，见 plan 取舍）
         if ptype == "lesson" and len(_PLACEHOLDER.sub("", body).strip()) < thresholds.LESSON_MIN_BODY:
             hit(rel, "L6-empty-lesson", "lesson body too short (proxy for cover/blank/toc)")
+        # P2：concept/topic/comparison 正文过短 → 残次页（放开小节后由篇幅底线兜底；讲透优先、不设上限）
+        if ptype in ("concept", "topic", "comparison") and \
+                len(_PLACEHOLDER.sub("", body).strip()) < thresholds.CONTENT_MIN_BODY:
+            hit(rel, "content-too-short",
+                f"{ptype} 正文过短（去占位后 <{thresholds.CONTENT_MIN_BODY} 字），疑似残次页；把概念讲透，篇幅不设上限")
         # 断链（从散文取——代码里的 [[ 不是 wikilink）
         for target in _WIKILINK.findall(prose):
             if target.startswith(("http://", "https://")):
@@ -265,8 +277,9 @@ def build_index(vault) -> str:
     vault = Path(vault)
     groups: dict[str, list[str]] = {}
     for rel, meta in _published_pages(vault):
-        groups.setdefault(meta.get("type", "other"), []).append(
-            f"- [[{rel}|{meta.get('title') or meta.get('canonical_name') or rel}]]")
+        # B3：显示名优先 title/canonical_name，回退 basename（不显示完整路径；链接目标仍是全路径 rel）
+        display = meta.get("title") or meta.get("canonical_name") or Path(rel).stem
+        groups.setdefault(meta.get("type", "other"), []).append(f"- [[{rel}|{display}]]")
     lines = ["# 内容目录（派生文件：由收尾 CLI 重建，只收录 published，勿手改）", ""]
     for ptype in ["overview", "concept", "topic", "comparison", "synthesis", "lesson", "source", "other"]:
         if ptype in groups:

@@ -29,7 +29,7 @@ edits any wiki content page.** The execution layer is `scripts/pipeline.py`; thi
 ## 4. Dependencies
 
 - CLI: may run/reference `python scripts/pipeline.py lint --source <source_id>` for the deterministic result, but does not re-implement L1/L2/L3/L5/L6/broken-link/duplicate rules.
-- Protocols: `docs/skill-runtime/schema.md` (page roles / required sections), `save-back-policy.md` (Q2 save-value judgement).
+- Protocols: `docs/skill-runtime/schema.md` (page roles / per-type frontmatter contract), `save-back-policy.md` (Q2 save-value judgement).
 - Follow-up handling goes to `kb-review`: this skill only files proposals.
 
 ## 5. Persisted artifacts

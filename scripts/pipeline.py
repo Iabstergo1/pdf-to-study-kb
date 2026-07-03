@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PDF to Study KB 流水线 CLI（新架构：确定性预处理 + 收尾门禁 + 状态跟踪，零 LLM）
 
-预处理：add-source → profile → source-convert → windows → workorder
+预处理：add-source → profile → source-convert → source-audit →[ arbitration-* ]→ windows → workorder
 /ingest 会话支撑：ingest-start/done、window-start/done/fail、show-window、
                 resolve-concept、check-write、snapshot-page
 增量重开：reopen（已收尾来源重建 workorder + 状态机回 workorder_ready 做增量补充）
@@ -628,7 +628,7 @@ def cmd_apply_obsidian_style(args):
 
 
 def cmd_rebuild_registry(args):
-    """从概念页 frontmatter 确定性重建 concepts/_registry.yaml + aliases.md（派生，勿手改）。"""
+    """从概念页 frontmatter 确定性重建 concepts/_registry.yaml（派生，勿手改）。aliases.md 已废弃（B2）。"""
     import concept_store
     vault = _vault_dir()
     if not vault.exists():
@@ -643,7 +643,7 @@ def cmd_rebuild_registry(args):
             print(f"[error] {e}", file=sys.stderr)
         raise SystemExit("registry not written (fix duplicate/missing canonical_id first)")
     sha = concept_store.write_registry(vault, registry)
-    concept_store.write_aliases(vault, registry)
+    concept_store.remove_stale_aliases(vault)
     shared = sum(1 for e in registry.values() if e["scope"] == "shared")
     print(f"[OK] registry: {len(registry)} concepts ({shared} shared), sha256={sha[:12]}")
 
@@ -1160,7 +1160,7 @@ def cmd_lint(args):
         state_store.fail_stage(db, args.source, "lint", error="; ".join(errors))
         raise SystemExit("registry corrupt: " + "; ".join(errors))
     concept_store.write_registry(vault, registry)
-    concept_store.write_aliases(vault, registry)
+    concept_store.remove_stale_aliases(vault)
     wiki_gate.write_index(vault)
     # 派生阅读层（publish-isolated，不阻断发布）：发布/registry/aliases/index 已成功，再建知识图谱
     # （graph-data + 力导向 HTML）；任何失败只 warn、保留旧产物，不改 lint 退出码。

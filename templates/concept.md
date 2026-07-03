@@ -10,8 +10,6 @@ page_path: domains/<domain>/concepts/<slug>.md
 status: proposed
 managed_by: pipeline
 ---
-# {name}
-
 ## 一句话
 
 （待 /ingest 填写）

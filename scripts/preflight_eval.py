@@ -1,7 +1,7 @@
 """L4 调用与评测层：确定性预处理产物验收（零-LLM，纯函数 + check_*）。
 
 读 staging/<source>/ 的 blocks.jsonl / windows.jsonl / parse_report.json / reconciliation.json /
-evidence.json（+ 可选 pages.jsonl / arbitration/decisions.json / assets/），对预处理产物做 11 项确定性
+evidence.json（+ 可选 pages.jsonl / arbitration/decisions.json / assets/），对预处理产物做 12 项确定性
 结构检查，产出可 CI 化的 JSON 报告。验收的不是"双审跑没跑"，而是"交给 ingest LLM 的证据是否完整闭环"。
 
 只在既有确定性产物上做结构断言：不调用任何模型、不做任何召回式查询，纯逐项检查。每个 check_* 是独立纯函数
@@ -333,7 +333,7 @@ def _read_jsonl(path: Path) -> list:
 
 
 def evaluate(staging_dir) -> dict:
-    """对一个 staging/<source>/ 目录跑 6 项检查，返回 CI 化 JSON 报告（纯函数 + I/O 读取）。
+    """对一个 staging/<source>/ 目录跑 12 项检查，返回 CI 化 JSON 报告（纯函数 + I/O 读取）。
 
     形状：{source_id, source_type, selected_backend, generated_by:"preflight-eval",
            checks:[...], summary:{ok,warn,fail}}。

@@ -52,7 +52,7 @@
 | 痛点 | 本项目的做法 |
 |------|------|
 | 多本书各存一份笔记，概念重复、互不连通 | 单一 vault、按领域分区；同一概念**走唯一入口合并**，绝不重复建页 |
-| 笔记是线性翻译，越读越像目录 | **概念/主题为主**组织，lessons 跟随源 TOC 只作线性辅助层 |
+| 笔记是线性翻译，越读越像目录 | **概念/主题为主**组织，lessons 仅为降级的可选辅助层（主题命名、非章节复述） |
 | 要记一堆命令、手动跑流水线 | **对话式**：一句“把这本书加进知识库”，skill 自己编排全流程 |
 | 公式/图表在 PDF 里转写易碎 | 文本走 PyMuPDF，**难页渲染整页 PNG** 交 Claude 多模态读图，写成 KaTeX |
 | 自动写库直接覆盖手改内容 | **两阶段发布** + 覆盖保护：先写 `proposed`，过门禁才 `published`，失败回滚进 Review-Queue |
@@ -157,7 +157,7 @@ flowchart TD
 **四条核心约束：**
 
 1. **不拆分** — 不让 LLM 做语义切分；长源用确定性 *processing windows*（TOC / 页码 / token 滑窗）读取，窗口只是“读取单位”，不决定 wiki 页面结构。
-2. **概念去重** — 所有概念创建/更新走单一 `resolve-concept` 入口，命中合并、绝不重复建页；`_registry.yaml` / `aliases.md` 是**派生文件**。
+2. **概念去重** — 所有概念创建/更新走单一 `resolve-concept` 入口，命中合并、绝不重复建页；`_registry.yaml` 是**派生文件**（`aliases.md` 已退休，别名只在概念页 frontmatter）。
 3. **两阶段发布** — 先写 `status: proposed`；收尾 `lint` 过门禁才 promote 成 `published` 并入 index，失败回滚 + 进 `Review-Queue/`。
 4. **覆盖保护** — 写已存在页须满足“在快照中 + `managed_by != human` + hash 一致”三条件，否则拒写、出 proposal。
 
@@ -174,7 +174,7 @@ flowchart TD
 | **L1 解析与双审** | `source_profile` / `source_convert` / `source_backends` / `source_audit` | **来源类型路由**：按 markdown / native PDF / scanned PDF / low-text PDF / mixed PDF / DOCX / PPTX 选后端（PyMuPDF / MinerU / markdown）。PDF 走 PyMuPDF 快速抽取 + **MinerU 作必需 structural reviewer 双审**（`source-audit` 记录分歧 / 接受 / 降级）；扫描·低文本 PDF、DOCX / PPTX 由 MinerU primary 解析；MinerU 不可用 **fail-closed**（绝不伪装成功） | `parse_report.json`：`source_type` · `backend_reason` · `selected_backend` · `dual_audit_required` ＋ `reconciliation.json`：`dual_audited` · `review_status` · `disagreements` · `degraded` |
 | **L2 结构还原与证据归一** | `blocks.jsonl` · `chapters.json` · `evidence.json` · `assets/` | 保留页码、标题层级、章节、段落、表/图/公式；**`source.md` 是主顺读文本，但不是绝对真相、预处理绝不重写它**——哪些页文本不可信（公式抽碎 / 表被线性化 / 图缺资产），由 `evidence.json` + `risk_flags` + `assets` **旁路补足**（证据路由），而不是改写正文 | block：`page` · `block_id` · `type` · `heading_path` · `chapter_id` · `source_ref` · `risk_flags` · `element_id`（表→`t{n}` / 图→`f{n}`） ＋ `evidence.json`：`risk_flags_by_page` · `candidates` · `soft_risk_pages` |
 | **L3 读取窗口与导航** | `chaptering` / `windowing` · `chapters.json` · `windows.jsonl` | **读取导航层**：`chapters.json` 给全书结构导航，`windows.jsonl` 给 ingest LLM 局部读取边界（block-aware、顺序稳定、可追溯、**长表不切**）。窗口只是**读取单位，不决定最终 wiki 页面结构** | window：`source_id` · `chapter_title` · `page_start`–`page_end` · `block_ids` · `contains` · `assets` · `risk_flags` · `source_refs` |
-| **L4 agent 仲裁与确定性验收** | `source-audit` · `arbitration-*` · `preflight-eval` · `source-preflight` · `ingest` | **写前路由 + 证据闭环**：`source-audit` 把"哪些 hard-risk 分歧需仲裁"整理成 arbitration queue；**agent 只读最小证据包、输出 `render` / `ignore` / `needs_human` 结构化裁决**，CLI 物化（补整页图 / 置 `needs_vision` / 标风险）；`preflight-eval` 跑 **11 项**确定性验收——strict 把关的是"**交给 ingest LLM 的证据是否完整闭环**"，不是"双审跑没跑" | `arbitration/{queue,decisions}.json` ＋ `preflight_eval.json`：11 项（页码 / 窗口单调 / asset·source_ref 可追溯 / `dual_audit` / `evidence_bundle` / `risk_coverage` / 扫描·OCR / 孤儿块 / 字段契约）；`--strict` 遇 high/fail **非零退出** |
+| **L4 agent 仲裁与确定性验收** | `source-audit` · `arbitration-*` · `preflight-eval` · `source-preflight` · `ingest` | **写前路由 + 证据闭环**：`source-audit` 把"哪些 hard-risk 分歧需仲裁"整理成 arbitration queue；**agent 只读最小证据包、输出 `render` / `ignore` / `needs_human` 结构化裁决**，CLI 物化（补整页图 / 置 `needs_vision` / 标风险）；`preflight-eval` 跑 **12 项**确定性验收——strict 把关的是"**交给 ingest LLM 的证据是否完整闭环**"，不是"双审跑没跑" | `arbitration/{queue,decisions}.json` ＋ `preflight_eval.json`：12 项（字段契约 / 页码覆盖 / 窗口单调 / 窗口契约 / asset 可追溯 / `dual_audit` / `evidence_bundle` / `risk_coverage` / 扫描·OCR / 孤儿块 / source_ref 完整 / 检测分布）；`--strict` 遇 high/fail **非零退出** |
 
 > **可追溯引用贯穿四层**：每个 block 带 `source_ref`（`p{页码}#{块号}`）＋ `chapter_id` ＋ `element_id` ＋ `risk_flags`，每个 window 列出其 `source_refs`，写库时 `lint` 强制 lesson 可追溯回来源——产出能落到“第几页、第几张表”，而非无源的自信。零成本先验：`python scripts/pipeline.py preflight-eval --source <src> --strict`（见下方 CLI）。
 
@@ -252,9 +252,10 @@ pdf-to-study-kb/
 | `init-vault` | 建 `wiki/` 脚手架 + 种子文件（幂等，不覆盖） | — |
 | `unlock` | 受控回收 stale vault 锁；活锁拒绝 | `--ttl 1800` |
 | `fail` | 把崩溃残留的 `running` 阶段标记 `failed` | `--source --stage --error` |
-| `rebuild-registry` | 从概念页 frontmatter 重建 `_registry.yaml` + `aliases.md` | — |
+| `rebuild-registry` | 从概念页 frontmatter 重建 `_registry.yaml`（`aliases.md` 已退休，别名只在概念页 frontmatter；残留会被主动清理） | — |
 | `rebuild-graph` | 从 published 图谱重建 `graph-data.generated.json` + `knowledge-graph.generated.html`（力导向图，派生阅读层，fail-hard） | — |
 | `graph-lint` | 校验 graph-data(+HTML)：fail-hard 非零退出、warn-only 不阻断 | — |
+| `apply-obsidian-style` | 落地学习库观感 CSS snippet + merge `appearance.json`（幂等，纯配置层零内容改动） | — |
 
 ### 预处理（零 LLM，顺序固定，幂等跳过）
 
@@ -271,7 +272,7 @@ pdf-to-study-kb/
 | `arbitration-resolve` | 把某 `needs_human` 页改判为 `render`/`ignore`（人工 / agent 闭环，`--reason` 必填、审计） | → `decisions.json` | `--source --page --decision --reason` |
 | `windows` | 生成确定性 processing windows（block-aware，长表不切）；PDF 须先双审且分歧闭环，否则 fail-closed | source.md → `windows.jsonl` | `--source [--dev-bypass]` |
 | `workorder` | 生成 ingest 事务契约 | → `staging/<src>/workorder.yaml` | `--source` |
-| `preflight-eval` | **L4 确定性验收门**：**11 项**结构检查（页码覆盖 / 窗口单调 / asset·source_ref 可追溯 / `dual_audit` / `evidence_bundle` / `risk_coverage` / 扫描·OCR / 孤儿块 / 字段契约）→ JSON；验收的是“证据是否闭环进 LLM 输入” | staging → `preflight_eval.json` | `--source [--strict] [--json <path>]` |
+| `preflight-eval` | **L4 确定性验收门**：**12 项**结构检查（字段契约 / 页码覆盖 / 窗口单调 / 窗口契约 / asset 可追溯 / `dual_audit` / `evidence_bundle` / `risk_coverage` / 扫描·OCR / 孤儿块 / source_ref 完整 / 检测分布）→ JSON；验收的是“证据是否闭环进 LLM 输入” | staging → `preflight_eval.json` | `--source [--strict] [--json <path>]` |
 
 ### `ingest` 会话支撑（通常由 skill 内部调用）
 
@@ -288,11 +289,13 @@ pdf-to-study-kb/
 
 ### 收尾、提升与查询
 
-> **为什么有这组**：发布是**一道门**而非直接写盘（核心约束③两阶段发布）。`lint` 是收尾门禁——proposed 全部过检才 promote 成 published 并重建 index，任一不过（断链 / 缺必需小节 / 孤儿页 / 重复 canonical_id / 公式页缺源图 / 未知 callout 类型）即回滚就地修改、把违规项写进 `Review-Queue/`。**发布成功后**再确定性重建知识图谱（`graph-data.generated.json` + 离线 HTML 力导向图，见〈在 Obsidian 中阅读〉）——这一步**发布隔离**：图谱重建失败只告警、保留旧产物、绝不回滚已发布内容（派生阅读层不当内容发布门禁）。`promotion-candidates`/`promote-concept` 处理"领域私有概念何时升为跨域 shared"（人工确认后机械执行）；`check-session` 守 query-session 的只读目录契约。
+> **为什么有这组**：发布是**一道门**而非直接写盘（核心约束③两阶段发布）。`lint` 是收尾门禁——proposed 全部过检才 promote 成 published 并重建 index，任一不过（断链 / 孤儿页 / 重复 canonical_id / **正文嵌了源图**（`source-image-embed`）/ frontmatter 缺项 / 占位符残留 / 综合层或 topic 缺失 / 概念未被 topic 收编 / 未知 callout 类型 等；**正文小节标题已不再是门禁**——D-4）即回滚就地修改、把违规项写进 `Review-Queue/`。**发布成功后**再确定性重建知识图谱（`graph-data.generated.json` + 离线 HTML 力导向图，见〈在 Obsidian 中阅读〉）——这一步**发布隔离**：图谱重建失败只告警、保留旧产物、绝不回滚已发布内容（派生阅读层不当内容发布门禁）。`promotion-candidates`/`promote-concept` 处理"领域私有概念何时升为跨域 shared"（人工确认后机械执行）；`check-session` 守 query-session 的只读目录契约。
 
 | 命令 | 作用 | 关键参数 |
 |------|------|------|
-| `lint` | 收尾门禁：proposed 过则 promote + 重建 index/registry/aliases + 知识图谱(graph-data+HTML)、败则回滚 + Review-Queue | `--source` |
+| `lint` | 收尾门禁：proposed 过则 promote + 重建 index/registry + 知识图谱(graph-data+HTML)、败则回滚 + Review-Queue | `--source` |
+| `reopen` | 重开已收尾来源做增量补充（重建 workorder + 状态机回 `workorder_ready`） | `--source` |
+| `sync-assets` | 把本源 staging 难页 PNG 同步进 `wiki/assets/<src>/`（预处理 / reopen 会自动调用） | `--source` |
 | `promotion-candidates` | 检测跨域提升候选（人工确认） | `--propose` |
 | `promote-concept` | 机械提升一个概念为 shared | `--id concept.<domain>.<slug>` |
 | `check-session` | query-session 目录契约检查（Q1） | `--id <run_id> [--saved]` |
@@ -309,6 +312,12 @@ pdf-to-study-kb/
 | `skill-adopt` | **人触发**：重跑 gate 兜底后把候选合并进双树（commit） | `--candidate [--base]` |
 
 > 状态库默认锚定仓库根：`pipeline-workspace/state/study-kb.sqlite`。设环境变量 `STUDY_KB_ROOT` 可整体重定向（测试隔离 / 多库场景）。
+>
+> **运维 / 阈值环境变量**（默认值见 `scripts/thresholds.py`，改动会折进阶段缓存指纹、自动失效缓存）：
+> `STUDY_KB_ROOT`（状态库/staging/vault 锚点）、`STUDY_KB_PYTHON`（续跑脚本优先解释器）、`PYTHONUTF8=1`（CJK 源/路径必设）、
+> `MINERU_DISABLE=1`（强制禁用 MinerU）、`MINERU_MODEL_SOURCE`（MinerU 模型源，默认 `modelscope`）；
+> 检测/门禁阈值约 30 个 `STUDY_KB_*`（如 `STUDY_KB_VECTOR_FIGURE_DRAW` 矢量图判定、`STUDY_KB_FORMULA_STRONG` 强公式信号、
+> `STUDY_KB_TOPIC_THRESHOLD` 建 topic 的概念数阈值），全部可 env 覆盖，逐项见 `scripts/thresholds.py`。
 
 </details>
 
@@ -323,7 +332,7 @@ wiki/
 ├── .obsidian/           # Obsidian 图谱配置（init-vault 落：按 type 着色 + 阅读默认；原生关系图即导航）
 ├── _meta/purpose.md     # ← 你手写：学习目标与偏好（ingest 读取）
 ├── domains/<domain>/
-│   ├── lessons/         # 讲义：跟随源 TOC 的线性辅助层
+│   ├── lessons/         # 讲义：降级的可选辅助层（主题命名、非章节复述）
 │   └── concepts/        # 领域私有概念（默认归属）
 ├── concepts/            # 仅 shared（跨域提升后），含 _registry.yaml（派生）
 ├── topics/              # 按主题聚概念的分类导航层（概念多的源必建，否则 lint 拦）
@@ -334,7 +343,6 @@ wiki/
 ├── Review-Queue/        # 未过门禁 / 需人工决策的 proposal
 ├── overview.md          # living synthesis，vault 入口（ingest 维护）
 ├── index.generated.md   # 内容目录（派生，只收录 published；首次 ingest 后出现）
-├── aliases.md           # 别名视图（派生；首次 ingest 后出现）
 ├── graph-data.generated.json        # 知识图谱数据契约（派生，零 LLM）
 ├── knowledge-graph.generated.html   # 离线力导向知识图谱（派生，点击节点跳 Obsidian）
 └── log.md               # append-only（ingest / lint 追加）
@@ -347,7 +355,7 @@ wiki/
 | `_meta/purpose.md` | **你手写**（init-vault 落空模板） | 你的学习目标 / 重点 / 偏好；ingest 读取以调整产出。**唯一需要你维护的输入文件**。 |
 | `overview.md` | init-vault 种子 → ingest 增量重写 | vault 入口的“活综合页”（概念地图 + 学习路线），每次 ingest 增量更新；`managed_by: pipeline`，勿手改。 |
 | `log.md` | ingest + 收尾 lint 追加（append-only） | 操作日志，记录每次入库 / 发布，便于回溯。 |
-| `domains/<domain>/lessons/` | ingest（LLM），按源 TOC | 讲义：跟随源目录的线性辅助层，便于对照原书顺读。 |
+| `domains/<domain>/lessons/` | ingest（LLM） | 讲义：**降级的可选层**，主题命名、非章节复述（不跟随源 TOC 做线性复述）；概念/主题才是主干。 |
 | `domains/<domain>/concepts/` | ingest（LLM），经 `resolve-concept` | 领域私有概念页（默认归属）；同名概念命中即合并，绝不重复建页。 |
 | `concepts/`（含 `_registry.yaml`） | 跨域提升后写入；registry 由收尾 CLI 派生 | 仅存被提升为 **shared** 的跨域概念；`_registry.yaml` 是概念派生索引。 |
 | `topics/` | ingest（LLM） | 跨章节 / 跨来源的主题综合页，把散落的相关内容收拢到一处。 |
@@ -356,9 +364,9 @@ wiki/
 | `sources/` | ingest（LLM） | 每个来源一页摘要，作为“来过哪些书”的统一台账。 |
 | `assets/<src>/` | **`source-convert` 渲染并同步**（零 LLM） | 把被判定为**难页（`needs_vision` 高召回：公式 / 矢量图 / 表 / 图表标题）**的源页整页渲成 PNG，供 ingest 读图保真（route B）。**因此这里出现的图，正是纯文本抽取会失真或根本看不见的那些页**（拍平的公式、矢量绘制的图、无框线表）——由确定性视觉信号（`get_drawings`/`find_tables`/标题正则）自动选出，`pages.jsonl` 记 `needs_vision_reason`，无需人工指定。 |
 | `Review-Queue/` | 收尾 lint 失败时写入 | 未过门禁 / 需人工决策的 proposal；你用 `/kb-review` 逐条处置。 |
-| `index.generated.md` · `aliases.md` | 收尾 CLI 从 frontmatter **派生重建**（首次 ingest 后出现） | 内容目录 / 别名视图，只收录 `published`。**派生文件，手改会被下次收尾覆盖**。 |
+| `index.generated.md` | 收尾 CLI 从 frontmatter **派生重建**（首次 ingest 后出现） | 内容目录，只收录 `published`。**派生文件，手改会被下次收尾覆盖**。 |
 
-> **概念/主题为主，lessons 跟随源 TOC 为辅。** 三个派生文件（`index.generated.md` / `aliases.md` / `_registry.yaml`）一律由收尾 CLI 从 frontmatter 重建，写库 skill 绝不手写。
+> **概念/主题为主，lessons 为降级的可选辅助层**（主题命名、非章节复述）。两个派生文件（`index.generated.md` / `_registry.yaml`）一律由收尾 CLI 从 frontmatter 重建，写库 skill 绝不手写；`aliases.md` 已退休（别名只在概念页 frontmatter，残留会被 `rebuild-registry` 清理）。
 
 ---
 
@@ -384,7 +392,7 @@ wiki/
 
 这套系统保证**结构与流程**的可靠，但**语义正确性仍需你把关**。开工前请知悉：
 
-- **`published` ≠ 已核对**：它只代表通过了结构门禁（链接 / 必需小节 / 归属 / 去重 / 公式页有源图），不代表内容已被核实。知识库是学习脚手架，不是权威出处。
+- **`published` ≠ 已核对**：它只代表通过了结构门禁（链接 / 归属 / 去重 / frontmatter 完整 / 源图禁嵌正文 / 占位符残留 等），不代表内容已被核实。公式由 LLM 原生重建 KaTeX（源图只作阅读证据、绝不嵌入正文），复杂公式请对照 staging 难页源图核实。知识库是学习脚手架，不是权威出处。
 - **公式可能出错**：公式风险页由 LLM 读整页 PNG 转写 KaTeX，复杂上 / 下标、分数、矩阵存在转写错误风险；关键公式请对照页内内嵌的源图（lint 强制内嵌）。
 - **概念归并按名做**：`resolve-concept` 按提及名 / 别名合并，跨域同名异义或细微语义差别可能需你在 `Review-Queue` / `kb-review` 里人工纠正。
 - **综合层是 LLM 的归纳**：overview / topic / comparison / synthesis 可能有偏差或过度概括，作为线索而非定论。
@@ -399,17 +407,21 @@ wiki/
 | 门禁 | 检查什么 | 不过怎么办 |
 |------|------|------|
 | 断链 | wikilink 必须是全 vault 相对路径，且目标文件存在 | 回滚 → Review-Queue → 修链接后重跑 `lint` |
-| 必需小节 | 各页类型的必备小节标题是否**逐字**存在 | 补齐小节标题后重跑 |
+| frontmatter 完整（`frontmatter-incomplete`） | 各页型必备 frontmatter 是否齐全（非 source 内容页须带 `source_refs`） | 补齐 frontmatter 后重跑 |
 | 孤儿页 | 非 source 页是否进了某 window 的 `--writes` 记账（有归属） | 补归属记账后重跑 |
 | 重复 canonical_id | 同一概念是否被重复建页 | 走 `resolve-concept` 合并、删重复页 |
-| 公式页缺源图 | `needs_vision` 页对应 lesson 是否内嵌源 PNG | 内嵌源图后重跑 |
+| 源图嵌入正文（`source-image-embed`） | 发布正文是否嵌了源图 `![[assets/…]]`（D-1：**禁止**——源图只作 LLM 阅读证据） | 删掉正文源图：公式→原生 KaTeX、表格→Markdown、图→mermaid/散文重建 |
 | 表格内裸竖线（`formula-table-pipe`） | 表格单元格里 `$...$` 含未转义 `\|`，会撕碎表格、KaTeX 渲染失败 | 用 `\lvert\rvert` 代替、转义 `\|`、或把公式移出表格 |
 | 综合层缺失（`L7-synthesis-missing`） | 产出 concept 却无任何综合层页（overview/topic/comparison/synthesis），阶段 E 漏做 | 补 overview 等综合页后重跑 |
 | 分类层缺失（`topics-missing`） | 产出 **≥6 个 concept 却无 topic 主题页** | 把概念按主题聚成 topic 页后重跑 |
 | 概念未覆盖（`concepts-uncovered`） | concept-heavy 域（≥6 concept）里有**概念没被任何 topic 收编**（含已发布页复检） | 把漏掉的概念归进某个 topic 后重跑 |
 | 占位符残留（`placeholder-unfilled`） | concept/topic/comparison/overview 正文仍含「（待 /ingest 填写）」占位（含已发布页历史复检） | 填实正文后重跑 |
 
-> 此外 `lint` 会对疑似杂物文件（Obsidian 点坏链误建的 0 字节页 / `*.png.md`）发**软警告**（`stray`，不阻断，仅提示可删）。
+> 上表为主要门禁项（**非穷举**）。此外还有：`title-duplicate-h1`（正文首行 H1 与文件名重复）、
+> `content-too-short`（concept/topic/comparison 去占位后过短）、`L6-empty-lesson`（lesson 疑似空课/封面）、
+> `callout-unknown`（未知 callout 类型）、`evidence-footnote`（脚注引用无定义）等。**正文小节标题已不再是门禁**
+> （D-4：结构交写作 LLM + `purpose.md` 组织，模板小节仅为建议脚手架）。`lint` 还会对疑似杂物文件
+> （Obsidian 点坏链误建的 0 字节页 / `*.png.md`）发**软警告**（`stray`，不阻断，仅提示可删）。
 
 门禁过关后，**只在这几类需要不可逆判断时停下来问你**（其余全自动）：
 

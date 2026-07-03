@@ -57,7 +57,7 @@ def test_rebuild_registry_writes_derived_files(tmp_path):
     r = _run(["rebuild-registry"], tmp_path)
     assert r.returncode == 0, r.stderr
     assert (vault / "concepts" / "_registry.yaml").exists()
-    assert (vault / "aliases.md").exists()
+    assert not (vault / "aliases.md").exists()   # B2：aliases.md 已废弃
     assert "2 concepts" in r.stdout and "1 shared" in r.stdout
 
 

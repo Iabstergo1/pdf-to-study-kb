@@ -51,6 +51,44 @@ def test_build_workorder_contract(tmp_path):
     assert wo["source"]["processing_windows"].endswith("windows.jsonl")
 
 
+def test_workorder_allows_research_method_concepts_narrowly(tmp_path):
+    # G3：source=game-theory 的 workorder 窄放行 research-method 概念页（home domain 归属），不粗放
+    vault = _vault_with_concepts(tmp_path)
+    staging = tmp_path / "staging" / "wp"
+    staging.mkdir(parents=True)
+    wo = workorder.build_workorder(vault, source_id="wp", domain="game-theory", staging_dir=staging)
+    assert "domains/research-method/concepts/**" in wo["write_scope"]
+    assert wo["cross_domain_concept_scope"] == ["domains/research-method/concepts/**"]
+    assert "domains/**" not in wo["write_scope"]                   # 不开全域通配
+    assert "domains/research-method/**" not in wo["write_scope"]   # 不放行其 lessons/topics
+
+
+def test_workorder_cross_domain_glob_is_concepts_only(tmp_path):
+    ig = _load("ingest_guards")
+    vault = _vault_with_concepts(tmp_path)
+    staging = tmp_path / "staging" / "wp"
+    staging.mkdir(parents=True)
+    ws = workorder.build_workorder(vault, source_id="wp", domain="game-theory",
+                                   staging_dir=staging)["write_scope"]
+    assert ig.in_write_scope("domains/research-method/concepts/研究问题.md", ws)   # 概念页放行
+    assert not ig.in_write_scope("domains/research-method/lessons/x.md", ws)        # lessons 不放行
+    assert not ig.in_write_scope("domains/research-method/topics/x.md", ws)         # topics 不放行
+    assert not ig.in_write_scope("domains/statistics/concepts/x.md", ws)            # 未列白名单的域不放行
+
+
+def test_workorder_snapshots_home_domain_concepts(tmp_path):
+    # G3：跨域 home 概念纳入 concept_pages_snapshot → 跨域 merge 也受 hash 覆盖保护
+    vault = tmp_path / "wiki"
+    concept_store.create_concept(vault, domain="game-theory", name="信号博弈")
+    concept_store.create_concept(vault, domain="research-method", name="研究问题",
+                                 aliases=["Research Question"])
+    staging = tmp_path / "staging" / "wp"
+    staging.mkdir(parents=True)
+    wo = workorder.build_workorder(vault, source_id="wp", domain="game-theory", staging_dir=staging)
+    cids = {e["canonical_id"] for e in wo["concept_pages_snapshot"]}
+    assert "concept.research-method.research-question" in cids
+
+
 def test_write_workorder_yaml_roundtrip(tmp_path):
     vault = _vault_with_concepts(tmp_path)
     staging = tmp_path / "staging" / "wp"

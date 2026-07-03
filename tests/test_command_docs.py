@@ -44,8 +44,9 @@ def test_ingest_skill_protocol_complete():
                  "resolve-concept", "check-write", "snapshot-page", "ingest-done",
                  "digest.md", "rolling digest", "status: proposed", "write_scope"]:
         assert must in text, f"ingest missing protocol element: {must}"
-    # Derived files must not be hand-written.
-    assert "_registry.yaml" in text and "aliases.md" in text and "index.generated.md" in text
+    # Derived files must not be hand-written; aliases.md is retired (B2).
+    assert "_registry.yaml" in text and "index.generated.md" in text
+    assert "aliases.md" in text and "retired" in text
 
 
 def test_ingest_skill_orchestrates_full_pipeline():
@@ -69,16 +70,18 @@ def test_ingest_skill_dual_audit_wiring():
 
 def test_ingest_skill_synthesis_duties():
     text = _skill_all("ingest")
+    # D-2: lessons are downgraded and the wiki is de-TOC-ified (no "follow the source TOC").
     for must in ["synthesis duties", "overview.md", "concept map", "chapter list",
-                 "topics/", "comparisons/", "follow the source TOC"]:
+                 "topics/", "comparisons/", "downgraded"]:
         assert must in text, f"ingest missing synthesis-duty element: {must}"
 
 
-def test_ingest_skill_whole_book_chapter_map_and_typed_embed():
-    # Whole-book understanding (chapters.json map / navigation spine) + embed source images by type.
+def test_ingest_skill_whole_book_chapter_map_and_native_reexpression():
+    # Whole-book understanding (chapters.json map / navigation spine) + D-1 native re-expression
+    # of source images (source-image-embed hard-blocks embedding; images are read-only evidence).
     text = _skill_all("ingest")
-    for must in ["chapters.json", "whole-book", "by type", "vector-figure", "navigation spine"]:
-        assert must in text, f"ingest missing whole-book / typed-embed element: {must}"
+    for must in ["chapters.json", "whole-book", "source-image-embed", "vector-figure", "navigation spine"]:
+        assert must in text, f"ingest missing whole-book / native-reexpression element: {must}"
 
 
 def test_ingest_skill_window_asset_header():

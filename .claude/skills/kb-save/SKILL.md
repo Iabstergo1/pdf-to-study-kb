@@ -31,7 +31,7 @@ skill only orchestrates, surfaces acceptance, and marks failure stops.
 
 - CLI: `resolve-concept`, `check-write`, `snapshot-page`, `check-session --saved`; the finishing publish is decided by `lint`.
 - Protocols: `save-back-policy.md` (admission gate), `schema.md` (page structure), `concept-resolution.md` (concept resolution).
-- Write discipline matches `ingest`: concepts merge on hit, never duplicate; never hand-write derived files. **新建 topic/comparison/synthesis 用中文文件名（与 `title` 一致，如 `comparisons/<甲> vs <乙>.md`）；正文走高信息密度的学术散文、句式有起伏、不套模板（必需小节标题仍 verbatim）——见 `ingest` 的 `write-pages.md`「写作风格」与「页面文件名用中文」。**
+- Write discipline matches `ingest`: concepts merge on hit, never duplicate; never hand-write derived files (`aliases.md` retired — aliases in frontmatter). **新建 topic/comparison/synthesis 用中文文件名（与 `title` 一致，如 `comparisons/<甲> vs <乙>.md`）并带 `source_refs` 溯源；正文走高信息密度的学术散文、句式有起伏、结构由 purpose 与内容自然决定（不再有强制小节标题，D-4）；发布正文不嵌源图（D-1）——见 `ingest` 的 `write-pages.md`「写作风格」与「页面文件名用中文」。**
 
 ## 5. Persisted artifacts
 

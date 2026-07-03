@@ -44,10 +44,10 @@ def test_strip_code_blocks_removes_fenced_and_inline():
     assert refs == {"e1"} and (refs - page_rules.footnote_defs(body)) == set()
 
 
-def test_required_sections_for_concept_matches_spec8():
-    secs = page_rules.required_sections_for("concept")
-    assert "## 直觉" in secs and "## 形式化" in secs and "## 各章如何处理" in secs
-    assert "## 与其他概念的关系" in secs
+def test_required_sections_cleared_d4():
+    # D-4：必需小节已全清空——各页型不再强制任何逐字小节标题
+    for t in ("concept", "topic", "comparison", "overview", "source"):
+        assert page_rules.required_sections_for(t) == []
 
 
 def test_missing_sections_reports_absent_only():
@@ -69,9 +69,44 @@ def test_unknown_page_type_raises():
         pass
 
 
-def test_overview_required_sections_l5():
-    secs = page_rules.required_sections_for("overview")
-    assert "## 核心概念地图" in secs and "## 推荐学习路线" in secs and "## 模型家族对比" in secs
+def test_missing_sections_pure_helper_still_works():
+    # missing_sections 纯函数保留（供写作层/测试参考），只是不再被门禁调用强制
+    assert page_rules.missing_sections("## A\n\nx\n", ["## A", "## B"]) == ["## B"]
+
+
+def test_missing_frontmatter_per_type():
+    # G2：source 要 source_id/title/domain/format，不要 source_refs
+    assert page_rules.missing_frontmatter(
+        {"type": "source", "status": "s", "managed_by": "m",
+         "source_id": "x", "title": "t", "domain": "d", "format": "pdf"}, "source") == []
+    assert "format" in page_rules.missing_frontmatter(
+        {"type": "source", "status": "s", "managed_by": "m",
+         "source_id": "x", "title": "t", "domain": "d"}, "source")
+    assert "source_refs" not in page_rules.missing_frontmatter(
+        {"type": "source", "status": "s", "managed_by": "m",
+         "source_id": "x", "title": "t", "domain": "d", "format": "pdf"}, "source")
+    # 非 source 综合页：要 source_refs（缺或空都算缺）
+    assert "source_refs" in page_rules.missing_frontmatter(
+        {"type": "topic", "status": "s", "managed_by": "m", "page_path": "p"}, "topic")
+    assert "source_refs" in page_rules.missing_frontmatter(
+        {"type": "topic", "status": "s", "managed_by": "m", "page_path": "p", "source_refs": []}, "topic")
+    # 完整 topic → []
+    assert page_rules.missing_frontmatter(
+        {"type": "topic", "status": "s", "managed_by": "m", "page_path": "p",
+         "source_refs": [{"source": "x"}]}, "topic") == []
+
+
+def test_leading_h1_duplicates_filename():
+    # 正文首行是与文件名同名的 # H1 → True（Obsidian 内联标题会与之重复渲染）
+    assert page_rules.leading_h1_duplicates_filename("# 均衡\n\n正文\n", "均衡.md") is True
+    # 传入的是全路径也应取 basename 比对
+    assert page_rules.leading_h1_duplicates_filename("# 均衡\n\n正文\n", "domains/x/concepts/均衡.md") is True
+    # 正文直接从散文开始（无同名 H1）→ False
+    assert page_rules.leading_h1_duplicates_filename("均衡是一组策略。\n", "均衡.md") is False
+    # 首个标题是 ## 小节而非 # 同名 → False
+    assert page_rules.leading_h1_duplicates_filename("## 直觉\n\n说明\n", "均衡.md") is False
+    # H1 文本与文件名不同 → False（只禁同名重复，不禁一切 H1）
+    assert page_rules.leading_h1_duplicates_filename("# 别的标题\n\n正文\n", "均衡.md") is False
 
 
 def test_katex_pipe_in_table_flags_unescaped_pipe():
