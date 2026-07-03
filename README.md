@@ -204,7 +204,7 @@ pdf-to-study-kb/
 ├── .claude/skills/<name>/SKILL.md   # 9 个对话式 skill（Claude 读）
 ├── .agents/skills/<name>/SKILL.md   # 同 9 个（Codex 读，与上者字节对等）
 ├── docs/skill-runtime/       # skill 运行时协议（routing / schema / 概念归一 / save-back / 标准）
-├── templates/                # 各页类型模板（concept / lesson / topic / comparison / synthesis / source / overview）
+├── templates/                # 运行时模板（concept：resolve-concept 新建骨架 / overview：init-vault seed）；其余页型正文交 purpose + 写作 LLM
 ├── tests/                    # 确定性测试（即规格）
 ├── books/<name>/input/       # 你放原始来源处（gitignore，内容不入库）
 ├── wiki/                     # 生成的 Obsidian vault（gitignore，每机运行时状态）

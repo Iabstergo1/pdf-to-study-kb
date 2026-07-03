@@ -1,7 +1,10 @@
 # Page types & frontmatter rules (pointer doc; load per command)
 
-- **Six page templates (write-page format contract):** `templates/source.md` / `lesson.md` /
-  `concept.md` / `topic.md` / `comparison.md` / `synthesis.md`. All frontmatter carries Dataview fields.
+- **Runtime templates + purpose-driven page bodies:** only two templates are read at runtime —
+  `templates/concept.md` (the `resolve-concept` new-page scaffold) and `templates/overview.md`
+  (the `init-vault` seed). Page types `source` / `lesson` / `topic` / `comparison` / `synthesis`
+  have **no fixed template**; their bodies are purpose-driven (`wiki/_meta/purpose.md` + source type +
+  reader need). Frontmatter rules below still apply to every type (Dataview fields).
 - **Two-phase publish:** any page a command writes is `status: proposed`; only the finishing gate
   promotes it to `published` and folds it into `index.generated.md`. `managed_by: pipeline` is the
   precondition for overwrite protection (a human-owned page is never overwritten).

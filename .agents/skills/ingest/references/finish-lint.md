@@ -10,7 +10,7 @@
 1. After every window is done, **do phase E first (synthesis, first-class):** update `overview.md` (every
    source) + build `topic`/`comparison`/`synthesis` as needed, into the matching window's `--writes` (detail
    in `references/synthesis.md`). **Skipping it makes lint `L7-synthesis-missing` and rolls back.**
-2. Write/update `sources/<src>.md` (the source summary page, template `templates/source.md`).
+2. Write/update `sources/<src>.md` (the source summary page; body is purpose-driven, no fixed template).
 3. `python scripts/pipeline.py ingest-done --source <src>` — state advances to `ingested/proposed`, releases the vault lock.
 4. **Finishing gate:** `python scripts/pipeline.py lint --source <src>`.
    - **Pass** → proposed promotes to `published`, folds into `index.generated.md`, rebuilds `_registry.yaml` (`aliases.md` is retired — aliases stay in concept frontmatter). Report which pages were published.
