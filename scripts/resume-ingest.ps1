@@ -39,6 +39,7 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot        # 仓库根 = scripts/ 的上一级
 Set-Location $Root
 if (-not $Python) { $Python = "python" }
+$env:PYTHONUTF8 = "1"
 
 $log = Join-Path $Root "tmp/resume.log"
 New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
@@ -59,7 +60,7 @@ if (Test-Path $lock) {
 New-Item -ItemType File -Path $lock -Force | Out-Null
 
 # 3) 唤起所选 agent 的 headless 续跑。被限额时本次非零退出、空转，下一次（复位后）成功。
-$prompt = "继续未完成的 ingest：读 pipeline-workspace/staging 下对应来源 digest.md 顶部的 `"## ⏩ RESUME`" 块、并跑 python scripts/pipeline.py next，从下一个未完成 window 接着逐窗跑。本次最多处理 $MaxWindows 个 window（处理完这几窗后干净退出，剩余留给下次触发）。若本次触发内已把最后一个 window 跑完，则必须先做阶段 E 综合层（更新 overview + 按需建 topic/comparison/synthesis，并进某窗 --writes），再 ingest-done → lint——漏做 lint 会 L7-synthesis-missing 阻断。先设环境变量 PYTHONUTF8=1。遇问题直接修，不要等人确认。"
+$prompt = "继续未完成的 ingest：先设环境变量 PYTHONUTF8=1；用解释器 `"$Python`" 跑 scripts/pipeline.py next/status；读 pipeline-workspace/staging 下对应来源 digest.md 顶部的 `"## RESUME`" 块，从下一个未完成 window 接着逐窗跑。本次最多处理 $MaxWindows 个 window（处理完这几窗后干净退出，剩余留给下次触发）。不要重跑预处理，不要 reopen；若同源 ingest 锁 stale，先跑 ingest-start --source <source> 让项目机制恢复/重取锁。若本次触发内已把最后一个 window 跑完，则必须先做阶段 E 综合层（更新 overview + 按需建 topic/comparison/synthesis，并进某窗 --writes），再 ingest-done → lint——漏做 lint 会 L7-synthesis-missing 阻断。遇问题直接修，不要等人确认。"
 switch ($Agent) {
     "claude" { $exe = "claude"; $invokeArgs = @("-p", $prompt, "--dangerously-skip-permissions") }
     "codex"  { $exe = "codex"

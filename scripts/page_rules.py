@@ -122,6 +122,26 @@ def katex_pipe_in_table(body: str) -> list[str]:
     return bad
 
 
+# 表格行内的 wikilink 全形（含别名）。裸别名竖线 [[path|alias]] 会被 GFM 当列分隔符
+# 撕碎表格与链接——Obsidian 标准写法是转义 [[path\|alias]]（断链检查已认可转义写法）。
+_WIKILINK_FULL = re.compile(r"\[\[([^\]\n]+)\]\]")
+_BARE_PIPE = re.compile(r"[^\\]\|")
+
+
+def bare_pipe_wikilink_in_table(body: str) -> list[str]:
+    """检测表格行单元格内含未转义 `|` 的 wikilink。修法：转义为 [[path\\|alias]]，
+    或把链接移出表格放进散文（单元格保留纯文本）。返回命中行（截断 120 字）。纯函数、无 I/O。"""
+    bad: list[str] = []
+    for line in body.splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        for m in _WIKILINK_FULL.finditer(line):
+            if _BARE_PIPE.search(m.group(1)):
+                bad.append(line.strip()[:120])
+                break
+    return bad
+
+
 # 自测题 callout（`> [!question]`，可带折叠 `-` 与标题文本）。学习闭环要求有题必有解
 # （嵌套折叠答案 `> > [!success]-` / 块内 wikilink 指向解答），见 ingest write-pages 写作纪律。
 _QUESTION_HEAD = re.compile(r"^>\s*\[!question\]-?\s*(.*)$", re.IGNORECASE)

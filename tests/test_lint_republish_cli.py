@@ -378,3 +378,60 @@ def test_lint_warns_on_unanswered_question(tmp_path):
     assert "[warn]" in r.stdout and "这道题没有给出任何解答？" in r.stdout
     meta, _ = mdpage.read_page(tmp_path / "wiki/domains/misc/lessons/a.md")
     assert meta["status"] == "published"
+
+
+def test_lint_blocks_concept_batch_without_source_page_and_seed_overview(tmp_path):
+    # 回归（math-econ 真书入库实测缺口）：整本书发布完成而 sources/<src>.md 从未写过、
+    # overview 仍是 init-vault 种子——两者现均 fail-closed；补齐后放行。
+    _ingest_ready(tmp_path)
+    vault = tmp_path / "wiki"
+    concept_body = ("这一概念解释策略互动中决策主体如何选择最优行动，并给出足够长的干净散文正文："
+                    "先说直觉，再给形式化定义，最后给一个可核对的最小例子，长度超过残次页底线。"
+                    "为确保稳超一百二十字符的内容底线，这里再补充一句：该概念的适用边界在于"
+                    "参与者理性且规则公开，超出该边界时应改用其他建模框架来刻画互动结构。\n")
+    mdpage.write_page(vault / "domains/misc/concepts/概念甲.md",
+                      {"type": "concept", "status": "proposed", "managed_by": "pipeline",
+                       "canonical_id": "concept.misc.jia", "canonical_name": "概念甲",
+                       "domain": "misc", "source": "note"}, concept_body)
+    mdpage.write_page(vault / "topics/主题一.md",
+                      {"type": "topic", "status": "proposed", "managed_by": "pipeline",
+                       "title": "主题一", "source": "note",
+                       "source_refs": [{"source": "note", "sections": ["1"]}]},
+                      "主题正文，链入 [[domains/misc/concepts/概念甲|概念甲]]，长度足够通过残次页检查，"
+                      "并把该概念收编进本主题的叙述脉络之中。为确保稳超一百二十字符的内容底线，"
+                      "这里再补充一句：本主题按学习顺序组织成员概念，读者可从直觉入手逐步进入形式化。\n")
+    assert _run(["ingest-done", "--source", "note"], tmp_path).returncode == 0
+    r = _run(["lint", "--source", "note"], tmp_path)
+    assert r.returncode != 0
+    queue = list((vault / "Review-Queue").glob("note-lint-*.md"))
+    qtext = queue[0].read_text(encoding="utf-8")
+    assert "source-page-missing" in qtext and "overview-seed" in qtext
+    # 补齐：写来源台账页 + 重写 overview（归属靠 source_refs）
+    mdpage.write_page(vault / "sources/note.md",
+                      {"type": "source", "status": "proposed", "managed_by": "pipeline",
+                       "source_id": "note", "title": "Note 小册", "domain": "misc",
+                       "format": "md"},
+                      "一句话概括这份来源讲了什么、入库时提炼出了哪些可复用概念，以及弱化了什么。\n")
+    meta, _ = mdpage.read_page(vault / "overview.md")
+    meta["source_refs"] = [{"source": "note", "sections": ["1"]}]
+    mdpage.write_page(vault / "overview.md", meta,
+                      "## 主题导航\n\n从 [[topics/主题一|主题一]] 进入概念网络，按需深入。\n")
+    r2 = _run(["lint", "--source", "note"], tmp_path)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    assert mdpage.read_page(vault / "sources/note.md")[0]["status"] == "published"
+
+
+def test_lint_failure_lists_rolled_back_files_in_queue(tmp_path):
+    # 回滚可见性：lint 失败时被还原的就地编辑必须写进 Review-Queue 报告（重跑前重新应用的清单）
+    _ingest_ready(tmp_path)
+    vault = tmp_path / "wiki"
+    target = vault / "overview.md"
+    assert _run(["snapshot-page", "--source", "note", "--path", "overview.md"], tmp_path).returncode == 0
+    mdpage.write_page(target, {"type": "overview", "status": "proposed"}, "被改坏的版本 [E-bad]\n")
+    assert _run(["ingest-done", "--source", "note"], tmp_path).returncode == 0
+    r = _run(["lint", "--source", "note"], tmp_path)
+    assert r.returncode != 0
+    assert "就地编辑已被回滚还原：overview.md" in r.stdout
+    queue = list((vault / "Review-Queue").glob("note-lint-*.md"))
+    qtext = queue[0].read_text(encoding="utf-8")
+    assert "已回滚的就地编辑" in qtext and "overview.md" in qtext

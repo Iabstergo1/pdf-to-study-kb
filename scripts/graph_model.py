@@ -49,7 +49,8 @@ def _label(rel: str, meta: dict) -> str:
 
 
 def _wikilinks(text: str) -> set[str]:
-    return {t.strip() for t in _WIKILINK.findall(text)
+    # 剥掉表格内转义写法 [[path\|alias]] 的目标尾部反斜杠（Obsidian 标准转义，勿判丢边）
+    return {t.strip().rstrip("\\") for t in _WIKILINK.findall(text)
             if not t.strip().startswith(("http://", "https://"))}
 
 

@@ -1155,6 +1155,13 @@ def cmd_lint(args):
                    "detail": "proposed 页不归属任何 source（缺 window-done --writes 记账"
                              "或 frontmatter 归属），fail-closed 阻断发布"}
                   for p in orphans] + wiki_gate.lint_pages(vault, proposed)
+    # 来源台账完整性：本批产出 concept（真实内容源）却没有 sources/<src>.md 台账页 → 阻断。
+    # 曾发生：整本书发布完成而 source 页从未写过，"来过哪些书"台账缺口无任何门禁提示。
+    if any(p["meta"].get("type") == "concept" for p in proposed) and \
+            not (vault / "sources" / f"{args.source}.md").exists():
+        violations.append({"path": f"sources/{args.source}.md", "rule": "source-page-missing",
+                           "detail": "本批产出 concept 但 sources/<src>.md 来源台账页不存在；"
+                                     "收尾前须写来源摘要页（phase F 第 2 步）"})
     # Spec 2 渐进 risk lint：仅当本源 backend=mineru 且有风险窗时，要求 lesson 可追溯（旧源不受影响）。
     violations += _mineru_risk_violations(args.source, proposed, written_by[args.source])
     if violations:
@@ -1162,17 +1169,28 @@ def cmd_lint(args):
             print(f"[lint] {v['rule']} {v['path']}: {v['detail']}")
             state_store.add_review_proposal(db, args.source, target_path=v["path"],
                                             kind=v["rule"], reason=v["detail"])
-        # 回滚本 source 的全部就地 merge 快照
+        # 回滚本 source 的全部就地 merge 快照；被还原的文件清单必须显式输出——
+        # "重写被回滚吃掉、修复重跑时无人重新应用"曾在两本书上连续静默发生（overview 始终是种子）。
         snap_dir = _workspace_root() / "pipeline-workspace/snapshots" / args.source
+        restored: list[str] = []
         for manifest in sorted(snap_dir.rglob("manifest.json")):
             snapshots.rollback(manifest)
             print(f"[rollback] {manifest}")
+            restored += [e["rel_path"] for e in
+                         json.loads(manifest.read_text(encoding="utf-8"))["entries"]]
+        for p in sorted(set(restored)):
+            print(f"[warn] 就地编辑已被回滚还原：{p} ——修复违规后、重跑 lint 前必须重新应用该页的本轮修改")
+        rollback_note = ""
+        if restored:
+            rollback_note = ("\n## 已回滚的就地编辑（重跑 lint 前必须重新应用，否则本轮修改静默丢失）\n\n"
+                             + "\n".join(f"- `{p}`" for p in sorted(set(restored))) + "\n")
         queue = vault / "Review-Queue" / f"{args.source}-lint-{date.today().isoformat()}.md"
         queue.parent.mkdir(parents=True, exist_ok=True)
         queue.write_text(
             "# Lint 未过（不 promote；就地 merge 已回滚）\n\n" +
             "\n".join(f"- **{v['rule']}** `{v['path']}`：{v['detail']}" for v in violations) +
-            "\n\n处理后回流：修复 → 重新 /ingest（状态机已允许 lint failed → ingest_waiting）。\n",
+            "\n" + rollback_note +
+            "\n处理后回流：修复 → 重新 /ingest（状态机已允许 lint failed → ingest_waiting）。\n",
             encoding="utf-8", newline="\n")
         state_store.fail_stage(db, args.source, "lint",
                                error=f"{len(violations)} lint violations")

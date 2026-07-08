@@ -424,3 +424,79 @@ def test_build_propositions_index_published_only(tmp_path):
     props = wiki_gate.collect_propositions(tmp_path)
     props.append(dict(props[0]))
     assert wiki_gate.duplicate_proposition_names(props) == ["game-theory/命题（先发优势）"]
+
+
+CONCEPT_BODY = ("这一概念解释策略互动中决策主体如何选择最优行动，并给出一个足够长的干净散文正文："
+                "先说直觉，再给形式化定义，最后给一个可核对的最小例子，长度超过残次页底线。\n")
+SEED_OVERVIEW = ("<这是 vault 入口：由 /ingest 随每次 ingest 增量维护的活综合页。>\n\n"
+                 "## 核心概念地图\n\n<按领域组织的概念网络：wikilink 链到概念页>\n")
+
+
+def test_lint_overview_seed_blocked_for_concept_batch(tmp_path):
+    # 回归（两本书连踩：重写被 lint 失败回滚吃掉后无人复查，published overview 始终是种子）：
+    # 本批产出 concept 而 overview.md 仍含种子尖括号占位 → 阻断
+    _page(tmp_path, "overview.md",
+          {"type": "overview", "status": "published", "managed_by": "pipeline"}, SEED_OVERVIEW)
+    _page(tmp_path, "domains/d/concepts/概念甲.md",
+          {"type": "concept", "status": "proposed", "managed_by": "pipeline",
+           "canonical_id": "concept.d.jia", "canonical_name": "概念甲", "domain": "d"}, CONCEPT_BODY)
+    _page(tmp_path, "topics/主题一.md",
+          {"type": "topic", "status": "proposed", "managed_by": "pipeline", "title": "主题一",
+           "source_refs": [{"source": "s"}]},
+          "主题正文，链入 [[domains/d/concepts/概念甲|概念甲]]，长度足够通过残次页检查，"
+          "并把该概念收编进本主题的叙述脉络之中。\n")
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert [v for v in vs if v["rule"] == "overview-seed"], vs
+    # 填充 overview（无占位符）→ 放行
+    _page(tmp_path, "overview.md",
+          {"type": "overview", "status": "published", "managed_by": "pipeline",
+           "source_refs": [{"source": "s"}]},
+          "## 主题导航\n\n从 [[topics/主题一|主题一]] 进入概念网络，按需深入各域。\n")
+    vs2 = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert [v for v in vs2 if v["rule"] == "overview-seed"] == []
+
+
+def test_lint_overview_seed_not_triggered_without_concepts(tmp_path):
+    # lesson-only 小源（无 concept）不强制填 overview；无 overview 文件也不触发
+    _page(tmp_path, "overview.md",
+          {"type": "overview", "status": "published", "managed_by": "pipeline"}, SEED_OVERVIEW)
+    _page(tmp_path, "domains/d/lessons/a.md",
+          {"type": "lesson", "status": "proposed", "managed_by": "pipeline",
+           "title": "A", "source": "s"},
+          "一段足够长的 lesson 正文，讲清楚直觉与依赖关系，避免触发空课代理长度检查。"
+          "再补一句让它稳超八十字符的底线要求，保证本测试只考察 overview 规则本身。\n")
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert [v for v in vs if v["rule"] == "overview-seed"] == []
+
+
+def test_lint_accepts_obsidian_escaped_pipe_wikilink_in_table(tmp_path):
+    # 表格单元格内 Obsidian 标准写法 [[path\|alias]]：不得判 broken-link（曾把尾部 \ 捕进目标）；
+    # 裸 | 写法虽过 lint 但会撕碎 Obsidian 表格渲染——正确姿势是转义，门禁必须认可转义。
+    _page(tmp_path, "domains/d/concepts/概念甲.md",
+          {"type": "concept", "status": "published", "managed_by": "pipeline",
+           "canonical_id": "concept.d.jia", "canonical_name": "概念甲", "domain": "d"},
+          CONCEPT_BODY)
+    _page(tmp_path, "comparisons/对比页.md",
+          {"type": "comparison", "status": "proposed", "managed_by": "pipeline",
+           "title": "对比页", "source_refs": [{"source": "s"}]},
+          "| 维度 | 甲 |\n|---|---|\n| 定义 | [[domains/d/concepts/概念甲\\|概念甲]] |\n\n"
+          "表格外的散文补充说明两者取舍，篇幅足以通过残次页底线检查；这里再补一句让对比页"
+          "的正文长度稳超一百二十个字符，确保本测试只考察转义竖线的链接解析行为本身。\n")
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert [v for v in vs if v["rule"] == "broken-link"] == [], vs
+
+
+def test_lint_blocks_bare_pipe_wikilink_in_table(tmp_path):
+    # 裸竖线别名 wikilink 落在表格行 → table-wikilink-pipe 阻断（曾骗过 lint 却撕碎 Obsidian 渲染）
+    _page(tmp_path, "domains/d/concepts/概念甲.md",
+          {"type": "concept", "status": "published", "managed_by": "pipeline",
+           "canonical_id": "concept.d.jia", "canonical_name": "概念甲", "domain": "d"},
+          CONCEPT_BODY)
+    _page(tmp_path, "comparisons/裸竖线对比页.md",
+          {"type": "comparison", "status": "proposed", "managed_by": "pipeline",
+           "title": "裸竖线对比页", "source_refs": [{"source": "s"}]},
+          "| 维度 | 甲 |\n|---|---|\n| 定义 | [[domains/d/concepts/概念甲|概念甲]] |\n\n"
+          "表格外的散文补充说明两者取舍，篇幅足以通过残次页底线检查；这里再补一句让对比页"
+          "的正文长度稳超一百二十个字符，确保本测试只考察表格内裸竖线的检测行为本身。\n")
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert [v for v in vs if v["rule"] == "table-wikilink-pipe"], vs

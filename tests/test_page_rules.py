@@ -177,3 +177,15 @@ def test_extract_propositions():
     ]
     # 无命题 → []；加粗普通文本不误捕
     assert page_rules.extract_propositions("**重点**：这是普通强调。\n") == []
+
+
+def test_bare_pipe_wikilink_in_table():
+    # 表格行内裸别名竖线 wikilink → 命中（渲染会撕碎表格列）；转义 \\| → 不报；散文行不报
+    assert page_rules.bare_pipe_wikilink_in_table(
+        "| 维度 | [[domains/d/concepts/甲|甲]] |\n")
+    assert page_rules.bare_pipe_wikilink_in_table(
+        "| 维度 | [[domains/d/concepts/甲\\|甲]] |\n") == []
+    assert page_rules.bare_pipe_wikilink_in_table(
+        "散文里 [[domains/d/concepts/甲|甲]] 的竖线是链接语法，不在表格行。\n") == []
+    # 无别名的全路径链接（无竖线）在表格里也合法
+    assert page_rules.bare_pipe_wikilink_in_table("| a | [[domains/d/concepts/甲]] |\n") == []

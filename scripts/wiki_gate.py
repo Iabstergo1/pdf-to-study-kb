@@ -26,6 +26,10 @@ _CALLOUT = re.compile(r"^(?:>\s*)+\[!([A-Za-z][\w-]*)\]", re.MULTILINE)
 # D-1/G1：发布正文禁嵌源图（`![[assets/...]]`）。源图只作 LLM 阅读证据，不进入发布产物。
 _SOURCE_IMG = re.compile(r"!\[\[\s*assets/")
 _PLACEHOLDER = re.compile(r"（待 /ingest 填写[^）]*）")
+# init-vault 种子模板的尖括号占位行（如「<按领域组织的概念网络：…>」整行占位）。
+# 曾两次发生：ingest 声称已重写 overview，实际重写被 lint 失败回滚吃掉、重跑无人复查，
+# published 的 overview 始终是未填充种子——门禁对此完全沉默。
+_SEED_PLACEHOLDER = re.compile(r"^\s*<[^<>\n]+>\s*$", re.MULTILINE)
 # A1/A3：这些类型的页正文里残留占位 = 半成品，阻断（lesson 用 L6 长度代理，不在此列）。
 _PLACEHOLDER_TYPES = ("concept", "topic", "comparison", "overview")
 
@@ -123,7 +127,7 @@ def concepts_uncovered_by_topic(vault) -> list[str]:
         meta, body = mdpage.read_page(f)
         if meta.get("status") not in ("published", "proposed") or meta.get("type") not in ("concept", "topic"):
             continue
-        links = {t.strip() for t in _WIKILINK.findall(body)
+        links = {t.strip().rstrip("\\") for t in _WIKILINK.findall(body)
                  if not t.strip().startswith(("http://", "https://"))}
         nodes[rel] = {"type": meta["type"], "domain": meta.get("domain", "") or "",
                       "canonical_id": meta.get("canonical_id", "") or "",
@@ -188,6 +192,11 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
         for snip in page_rules.katex_pipe_in_table(body):
             hit(rel, "formula-table-pipe",
                 f"公式内未转义的 | 落在表格单元格（用 \\lvert\\rvert 或 \\| 或把公式移出表格）：{snip}")
+        # 表格行内裸竖线 wikilink：过得了链接解析、但 Obsidian 渲染会把 | 当列分隔符撕碎表格
+        # （曾整改反了方向：把正确的 \| 转义"改回"裸写法骗过 lint 却弄坏渲染）
+        for snip in page_rules.bare_pipe_wikilink_in_table(body):
+            hit(rel, "table-wikilink-pipe",
+                f"表格行内 wikilink 的别名竖线未转义（转义为 [[path\\|alias]]，或把链接移出表格放散文）：{snip}")
         # L6 代理：lesson 去占位后过短 = 疑似空课/封面页产物（精确 L6 需源页映射，见 plan 取舍）
         if ptype == "lesson" and len(_PLACEHOLDER.sub("", body).strip()) < thresholds.LESSON_MIN_BODY:
             hit(rel, "L6-empty-lesson", "lesson body too short (proxy for cover/blank/toc)")
@@ -196,8 +205,10 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
                 len(_PLACEHOLDER.sub("", body).strip()) < thresholds.CONTENT_MIN_BODY:
             hit(rel, "content-too-short",
                 f"{ptype} 正文过短（去占位后 <{thresholds.CONTENT_MIN_BODY} 字），疑似残次页；把概念讲透，篇幅不设上限")
-        # 断链（从散文取——代码里的 [[ 不是 wikilink）
+        # 断链（从散文取——代码里的 [[ 不是 wikilink）。表格单元格内 Obsidian 标准写法是
+        # 转义别名竖线 [[path\|alias]]（裸 | 会被当列分隔符撕碎表格）——剥掉目标尾部的转义反斜杠。
         for target in _WIKILINK.findall(prose):
+            target = target.rstrip("\\")
             if target.startswith(("http://", "https://")):
                 continue
             if not _link_exists(vault, target):
@@ -221,6 +232,16 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
             "阶段 E 必做——把概念按主题分组")
     # A1+A3：占位符残留（半成品）→ 阻断（含已 published 同类页复检）
     vs += placeholder_violations(vault, pages)
+    # overview 种子复检：本批产出 concept（真实内容源）时，vault 入口页不得仍是未填充的
+    # init-vault 种子（尖括号占位/待填写占位）。防"重写被回滚吃掉后无人复查"再次静默发布。
+    if any(p["meta"].get("type") == "concept" for p in pages):
+        ov = vault / "overview.md"
+        if ov.exists():
+            _m, ov_body = mdpage.read_page(ov)
+            if _PLACEHOLDER.search(ov_body) or _SEED_PLACEHOLDER.search(ov_body):
+                hit("overview.md", "overview-seed",
+                    "本批产出 concept 但 overview.md 仍是未填充的种子骨架（含占位符）；"
+                    "阶段 E 必做——重写 overview（注意：lint 失败回滚会连 overview 的就地编辑一起还原，修复重跑前须重新应用）")
     # A2：概念未被任何 topic 收编（画布会落入"未分类"）→ concept-heavy 域 fail-closed
     for cp in concepts_uncovered_by_topic(vault):
         hit(cp, "concepts-uncovered",
