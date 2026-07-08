@@ -294,3 +294,87 @@ def test_graph_build_failure_does_not_change_lint_exit_code(tmp_path):
     assert meta["status"] == "published"                    # 发布已完成
     assert gdir.is_dir()                                    # 旧产物（此处目录）保留
     assert "[WARN]" in r.stdout
+
+
+def test_lint_success_clears_stale_review_queue(tmp_path):
+    # 回归（2026-07-04 手动删过一次）：首败写 Review-Queue，修复重跑通过后，
+    # 本源过时的 -lint-*.md 失败报告应被自动清理（不清别源的）。
+    _ingest_ready(tmp_path)
+    vault = tmp_path / "wiki"
+    mdpage.write_page(vault / "domains/misc/lessons/a.md",
+                      {"type": "lesson", "status": "proposed", "managed_by": "pipeline",
+                       "title": "A 课", "source": "note"}, "结论 [E-p1] 而且太短\n")
+    assert _run(["ingest-done", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["lint", "--source", "note"], tmp_path).returncode != 0
+    assert list((vault / "Review-Queue").glob("note-lint-*.md"))
+    other = vault / "Review-Queue" / "other-lint-2026-01-01.md"
+    other.write_text("别源的报告，不许动\n", encoding="utf-8")
+    meta, _ = mdpage.read_page(vault / "domains/misc/lessons/a.md")
+    mdpage.write_page(vault / "domains/misc/lessons/a.md", meta, GOOD_LESSON)
+    r = _run(["lint", "--source", "note"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert list((vault / "Review-Queue").glob("note-lint-*.md")) == []
+    assert other.exists()
+
+
+QUESTION_LESSON = GOOD_LESSON + (
+    "\n> [!question] 自测\n"
+    "> 这一节的核心权衡是什么？\n"
+    "> > [!success]- 参考答案\n"
+    "> > 在直觉与依赖关系之间取舍。\n")
+
+
+def test_lint_finish_builds_quiz_index(tmp_path):
+    # 收尾派生阅读层：lint 通过后重建 quiz-index.generated.md（published 页题干 + 回链，无答案）
+    _ingest_ready(tmp_path)
+    mdpage.write_page(tmp_path / "wiki/domains/misc/lessons/a.md",
+                      {"type": "lesson", "status": "proposed", "managed_by": "pipeline",
+                       "title": "A 课", "source": "note"}, QUESTION_LESSON)
+    assert _run(["ingest-done", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["lint", "--source", "note"], tmp_path).returncode == 0
+    qi = (tmp_path / "wiki/quiz-index.generated.md").read_text(encoding="utf-8")
+    assert "这一节的核心权衡是什么？" in qi
+    assert "domains/misc/lessons/a.md" in qi
+    assert "在直觉与依赖关系之间取舍" not in qi  # 索引不泄露答案
+
+
+def test_quiz_build_failure_does_not_change_lint_exit_code(tmp_path):
+    # publish-isolated：quiz 索引目标被占成目录 → 只 warn，发布与 lint 退出码不受影响
+    vault = _setup_one_proposed(tmp_path)
+    qdir = vault / "quiz-index.generated.md"
+    qdir.mkdir(parents=True, exist_ok=True)
+    (qdir / "keep.txt").write_text("x", encoding="utf-8")
+    r = _run(["lint", "--source", "note"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    meta, _ = mdpage.read_page(vault / "domains/misc/lessons/note.md")
+    assert meta["status"] == "published"
+
+
+def test_rebuild_quiz_cli(tmp_path):
+    # 手动重建入口（与 rebuild-graph 同型）：rebuild-quiz 独立可跑
+    assert _run(["init-vault"], tmp_path).returncode == 0
+    mdpage.write_page(tmp_path / "wiki/domains/misc/concepts/概念甲.md",
+                      {"type": "concept", "status": "published", "managed_by": "pipeline",
+                       "canonical_id": "concept.misc.jia", "canonical_name": "概念甲",
+                       "domain": "misc"},
+                      "正文。\n\n> [!question] 自测\n> 甲的定义要件是什么？\n"
+                      "> > [!success]- 参考答案\n> > 要件略。\n")
+    r = _run(["rebuild-quiz"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    qi = (tmp_path / "wiki/quiz-index.generated.md").read_text(encoding="utf-8")
+    assert "甲的定义要件是什么？" in qi
+
+
+def test_lint_warns_on_unanswered_question(tmp_path):
+    # 有题无解 → 软警告不阻断：lint 仍通过，stdout 出现 [warn] 提示
+    _ingest_ready(tmp_path)
+    bare_q = GOOD_LESSON + "\n> [!question] 自测\n> 这道题没有给出任何解答？\n"
+    mdpage.write_page(tmp_path / "wiki/domains/misc/lessons/a.md",
+                      {"type": "lesson", "status": "proposed", "managed_by": "pipeline",
+                       "title": "A 课", "source": "note"}, bare_q)
+    assert _run(["ingest-done", "--source", "note"], tmp_path).returncode == 0
+    r = _run(["lint", "--source", "note"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "[warn]" in r.stdout and "这道题没有给出任何解答？" in r.stdout
+    meta, _ = mdpage.read_page(tmp_path / "wiki/domains/misc/lessons/a.md")
+    assert meta["status"] == "published"

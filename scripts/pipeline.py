@@ -693,6 +693,29 @@ def cmd_rebuild_graph(args):
         print(f"[warn] {w}")
 
 
+def cmd_rebuild_quiz(args):
+    """重建自测题库索引 quiz-index.generated.md（零 LLM：published 页 [!question] 题干 + 回链原页）。"""
+    import wiki_gate
+    vault = _vault_dir()
+    if not vault.exists():
+        raise SystemExit("no wiki/ vault yet")
+    wiki_gate.write_quiz_index(vault)
+    print(f"[OK] rebuild-quiz -> {vault / 'quiz-index.generated.md'}")
+
+
+def cmd_rebuild_propositions(args):
+    """重建命题总表 propositions.generated.md（零 LLM：published 页具名命题 + 回链原页）。"""
+    import wiki_gate
+    vault = _vault_dir()
+    if not vault.exists():
+        raise SystemExit("no wiki/ vault yet")
+    props = wiki_gate.collect_propositions(vault)
+    wiki_gate.write_propositions_index(vault)
+    for d in wiki_gate.duplicate_proposition_names(props):
+        print(f"[warn] 命题重名（名字即锚点，域内应唯一）：{d}")
+    print(f"[OK] rebuild-propositions -> {len(props)} 条 -> {vault / 'propositions.generated.md'}")
+
+
 def cmd_graph_lint(args):
     """校验 wiki/graph-data.generated.json（+ 已生成的 HTML）；写报告；errors → 退出 2。"""
     import json as _json
@@ -1115,6 +1138,11 @@ def cmd_lint(args):
             print(f"[skip] proposed 页归属其他 source，留待其所属 source 收尾: {p['rel_path']}")
         else:
             orphans.append(p)
+    # 有题必有解（软警告非阻断）：自测题块内既无折叠答案也无指向解答的链接 → 提醒补齐
+    import page_rules
+    for p in proposed:
+        for stem in page_rules.unanswered_question_stems(p["body"]):
+            print(f"[warn] 自测题缺解答（有题必有解：嵌套折叠答案或链接到解答处）：{p['rel_path']} :: {stem}")
     ihash = hashlib.sha256(("\n".join(
         f"{p['rel_path']}:{hashlib.sha256(p['body'].encode('utf-8')).hexdigest()}"
         for p in proposed) + "\n!orphans:" + ",".join(p["rel_path"] for p in orphans)
@@ -1168,6 +1196,21 @@ def cmd_lint(args):
         _rebuild_graph_artifacts(vault)
     except Exception as e:
         print(f"[WARN] 知识图谱重建失败：{e}；已保留旧 graph-data/html，发布不受影响，可手动跑 rebuild-graph")
+    try:
+        wiki_gate.write_quiz_index(vault)
+    except Exception as e:
+        print(f"[WARN] 自测题库索引重建失败：{e}；发布不受影响，可手动跑 rebuild-quiz")
+    try:
+        _props = wiki_gate.collect_propositions(vault)
+        wiki_gate.write_propositions_index(vault)
+        for d in wiki_gate.duplicate_proposition_names(_props):
+            print(f"[warn] 命题重名（名字即锚点，域内应唯一）：{d}")
+    except Exception as e:
+        print(f"[WARN] 命题总表重建失败：{e}；发布不受影响，可手动跑 rebuild-propositions")
+    # 本源历史 lint 失败报告已过时（本轮已通过），清理避免误导；不动其他 source 的报告
+    for stale in sorted((vault / "Review-Queue").glob(f"{args.source}-lint-*.md")):
+        stale.unlink()
+        print(f"[clean] 清理已过时的 lint 失败报告：{stale.relative_to(vault).as_posix()}")
     log = vault / "log.md"
     with open(log, "a", encoding="utf-8", newline="\n") as f:
         f.write(f"\n## [{date.today().isoformat()}] lint | {args.source} | promoted {n} pages\n")
@@ -1459,6 +1502,10 @@ def main():
                           help="重建知识图谱：graph-data + 力导向交互 HTML（零 LLM，手动 fail-hard；点击节点跳 Obsidian）")
     subparsers.add_parser("graph-lint",
                           help="校验 graph-data.generated.json(+HTML)：fail-hard 非零退出，warn-only 不阻断")
+    subparsers.add_parser("rebuild-quiz",
+                          help="重建自测题库索引 quiz-index.generated.md（零 LLM；published 页 [!question] 题干+回链）")
+    subparsers.add_parser("rebuild-propositions",
+                          help="重建命题总表 propositions.generated.md（零 LLM；published 页具名命题+回链）")
     wop = subparsers.add_parser("workorder", help="生成 source 级 ingest work order")
     wop.add_argument("--source", required=True)
     rop = subparsers.add_parser("reopen", help="重开已收尾来源做增量补充（重建 workorder + 状态机回 workorder_ready）")
@@ -1552,6 +1599,8 @@ def main():
         'apply-obsidian-style': cmd_apply_obsidian_style,
         'rebuild-registry': cmd_rebuild_registry,
         'rebuild-graph': cmd_rebuild_graph,
+        'rebuild-quiz': cmd_rebuild_quiz,
+        'rebuild-propositions': cmd_rebuild_propositions,
         'graph-lint': cmd_graph_lint,
         'workorder': cmd_workorder,
         'reopen': cmd_reopen,

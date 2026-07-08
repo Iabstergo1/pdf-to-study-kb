@@ -13,7 +13,7 @@
 2. Write/update `sources/<src>.md` (the source summary page; body is purpose-driven, no fixed template).
 3. `python scripts/pipeline.py ingest-done --source <src>` — state advances to `ingested/proposed`, releases the vault lock.
 4. **Finishing gate:** `python scripts/pipeline.py lint --source <src>`.
-   - **Pass** → proposed promotes to `published`, folds into `index.generated.md`, rebuilds `_registry.yaml` (`aliases.md` is retired — aliases stay in concept frontmatter). Report which pages were published.
+   - **Pass** → proposed promotes to `published`, folds into `index.generated.md`, rebuilds `_registry.yaml` (`aliases.md` is retired — aliases stay in concept frontmatter) + the derived reading layer (knowledge graph + `quiz-index.generated.md` + `propositions.generated.md`, publish-isolated: their failure never blocks publish), and cleans this source's stale `<src>-lint-*.md` failure reports. Report which pages were published.
    - **Fail** → in-place merges are rolled back, the violation list goes to `wiki/Review-Queue/<src>-lint-*.md`; **stop** and give the user the violations + fix suggestions (edit pages and re-run `lint`, or use kb-review).
 
 ## Skipping phase E → lint blocks (no longer a soft warning)

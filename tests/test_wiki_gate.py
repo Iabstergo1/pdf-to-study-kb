@@ -368,3 +368,59 @@ def test_promote_flips_status(tmp_path):
     meta, _ = mdpage.read_page(tmp_path / "domains/d/lessons/a.md")
     assert meta["status"] == "published"
     assert wiki_gate.collect_proposed(tmp_path) == []
+
+
+def test_build_quiz_index_collects_published_questions(tmp_path):
+    # quiz 索引：只收 published 页的 [!question] 题干 + 回链；proposed 页与派生/排除目录不收；不含答案正文。
+    q_body = ("概念正文。\n\n> [!question] 自测\n> 为什么价格压到边际成本？\n"
+              "> > [!success]- 参考答案\n> > 因为无差异商品的伯特兰竞争。\n")
+    _page(tmp_path, "domains/game-theory/concepts/伯特兰模型.md",
+          {"type": "concept", "status": "published", "managed_by": "pipeline",
+           "canonical_id": "concept.game-theory.bertrand", "canonical_name": "伯特兰模型",
+           "domain": "game-theory"}, q_body)
+    _page(tmp_path, "topics/模型库.md",
+          {"type": "topic", "status": "published", "managed_by": "pipeline", "title": "模型库",
+           "source_refs": [{"source": "s"}]},
+          "主题正文。\n\n> [!question] 综合演练\n> 三个模型的策略变量各是什么？\n"
+          "> > [!tip]- 提示\n> > 数量/价格/位置。\n")
+    _page(tmp_path, "domains/game-theory/concepts/草稿.md",
+          {"type": "concept", "status": "proposed", "managed_by": "pipeline",
+           "canonical_id": "concept.game-theory.draft", "canonical_name": "草稿",
+           "domain": "game-theory"},
+          "> [!question] 自测\n> proposed 页的题不该出现。\n")
+    text = wiki_gate.build_quiz_index(tmp_path)
+    assert "为什么价格压到边际成本？" in text
+    assert "[[domains/game-theory/concepts/伯特兰模型.md|伯特兰模型]]" in text
+    assert "三个模型的策略变量各是什么？" in text
+    assert "proposed 页的题不该出现" not in text
+    assert "因为无差异商品的伯特兰竞争" not in text  # 不泄露答案
+    # 落盘 + 幂等：write_quiz_index 写 quiz-index.generated.md；该文件在 _DERIVED 中，
+    # 重建时不会把索引自己再收进去
+    wiki_gate.write_quiz_index(tmp_path)
+    assert (tmp_path / "quiz-index.generated.md").exists()
+    text2 = wiki_gate.build_quiz_index(tmp_path)
+    assert text2.count("为什么价格压到边际成本？") == 1
+
+
+def test_build_propositions_index_published_only(tmp_path):
+    # 命题总表：只收 published 页；按域分组；域内重名可检出（软警告用）
+    _page(tmp_path, "domains/game-theory/concepts/斯塔克尔伯格模型.md",
+          {"type": "concept", "status": "published", "managed_by": "pipeline",
+           "canonical_id": "concept.game-theory.stackelberg", "canonical_name": "斯塔克尔伯格模型",
+           "domain": "game-theory"},
+          "正文。**命题（先发优势）**：领导者产量为古诺的 1.5 倍。\n")
+    _page(tmp_path, "domains/game-theory/concepts/草稿页.md",
+          {"type": "concept", "status": "proposed", "managed_by": "pipeline",
+           "canonical_id": "concept.game-theory.draft2", "canonical_name": "草稿页",
+           "domain": "game-theory"},
+          "**命题（不该出现）**：proposed 页的命题不收。\n")
+    text = wiki_gate.build_propositions_index(tmp_path)
+    assert "**先发优势** — 领导者产量为古诺的 1.5 倍。" in text
+    assert "[[domains/game-theory/concepts/斯塔克尔伯格模型.md|斯塔克尔伯格模型]]" in text
+    assert "不该出现" not in text
+    wiki_gate.write_propositions_index(tmp_path)
+    assert (tmp_path / "propositions.generated.md").exists()
+    # 域内重名 → 检出
+    props = wiki_gate.collect_propositions(tmp_path)
+    props.append(dict(props[0]))
+    assert wiki_gate.duplicate_proposition_names(props) == ["game-theory/命题（先发优势）"]

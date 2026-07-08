@@ -96,6 +96,8 @@ def leading_h1_duplicates_filename(body: str, filename: str) -> bool:
 
 # 表格单元格里的行内/块公式含未转义的 `|`：GFM 会把它当列分隔符，撕碎公式、KaTeX 无法渲染
 _MATH_SPAN = re.compile(r"\$\$.+?\$\$|\$[^$\n]+?\$")
+# wikilink 整体（含显示名竖线 [[path|display]]）——它的 | 是链接语法而非表格列分隔符
+_WIKILINK_SPAN = re.compile(r"\[\[[^\]\n]*\]\]")
 
 
 def katex_pipe_in_table(body: str) -> list[str]:
@@ -108,8 +110,9 @@ def katex_pipe_in_table(body: str) -> list[str]:
         spans = _MATH_SPAN.findall(line)
         if not spans:
             continue
-        # 该行剔除公式与行内代码后若仍含 `|`，即为表格行（存在结构性列分隔符）
-        masked = _INLINE_CODE.sub(" ", _MATH_SPAN.sub(" ", line))
+        # 该行剔除公式、行内代码、wikilink 后若仍含 `|`，即为表格行（存在结构性列分隔符）
+        # ——wikilink 显示名的 | 是链接语法，曾把「wikilink+公式」的散文行误判成表格行
+        masked = _WIKILINK_SPAN.sub(" ", _INLINE_CODE.sub(" ", _MATH_SPAN.sub(" ", line)))
         if "|" not in masked:
             continue
         for span in spans:
@@ -117,3 +120,76 @@ def katex_pipe_in_table(body: str) -> list[str]:
                 bad.append(line.strip()[:120])
                 break
     return bad
+
+
+# 自测题 callout（`> [!question]`，可带折叠 `-` 与标题文本）。学习闭环要求有题必有解
+# （嵌套折叠答案 `> > [!success]-` / 块内 wikilink 指向解答），见 ingest write-pages 写作纪律。
+_QUESTION_HEAD = re.compile(r"^>\s*\[!question\]-?\s*(.*)$", re.IGNORECASE)
+
+
+def _question_blocks(body: str) -> list[tuple[str, list[str], str]]:
+    """切出每个 [!question] callout：(标题文本, 块内行, 块后首个非空行)。
+    块 = 标题行之后连续以 > 开头的行（Obsidian callout 以空行结束）。纯函数、无 I/O。"""
+    out: list[tuple[str, list[str], str]] = []
+    lines = body.splitlines()
+    i = 0
+    while i < len(lines):
+        m = _QUESTION_HEAD.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        block: list[str] = []
+        i += 1
+        while i < len(lines) and lines[i].lstrip().startswith(">"):
+            block.append(lines[i])
+            i += 1
+        following = ""
+        for ln in lines[i:]:
+            if ln.strip():
+                following = ln.strip()
+                break
+        out.append((m.group(1).strip(), block, following))
+    return out
+
+
+def _question_stem(title: str, block: list[str]) -> str:
+    """题干 = 块内首个非嵌套、非空的引用行；没有正文行时回退标题文本。"""
+    for ln in block:
+        s = ln.strip()
+        if s.startswith((">>", "> >")):
+            break  # 进入嵌套答案区，题干已结束
+        text = s.lstrip(">").strip()
+        if text:
+            return text
+    return title
+
+
+def extract_question_stems(body: str) -> list[str]:
+    """返回正文中每个 [!question] callout 的题干（quiz 索引原语）。纯函数、无 I/O。"""
+    return [_question_stem(t, b) for t, b, _f in _question_blocks(body)]
+
+
+# 具名命题：库内承重结论的稳定锚点（`**命题（先发优势）**：一句话结论`）。名字即锚点、域内唯一，
+# v1 不做数字编号（编号需持久注册表，重建即重排会断引用）；收尾收割成 propositions.generated.md。
+_PROPOSITION = re.compile(r"\*\*命题（([^）\n]{1,24})）\*\*[：:]\s*(.+)")
+
+
+def extract_propositions(body: str) -> list[tuple[str, str]]:
+    """返回正文中的具名命题 [(名, 结论句)]（命题总表原语）。纯函数、无 I/O。"""
+    return [(m.group(1).strip(), m.group(2).strip()) for m in _PROPOSITION.finditer(body)]
+
+
+def unanswered_question_stems(body: str) -> list[str]:
+    """有题无解的 [!question] 题干（软警告原语）：块内既无嵌套/相邻 callout 答案、
+    也无 wikilink 指向解答（"never questions with no resolution"）。纯函数、无 I/O。"""
+    out: list[str] = []
+    for title, block, following in _question_blocks(body):
+        text = "\n".join(block)
+        if "[[" in text:
+            continue  # 链接到解答所在页/小节
+        if any("[!" in ln for ln in block):
+            continue  # 块内嵌套（> > [!success]-）或紧贴的同级答案 callout
+        if following.startswith(">") and "[!" in following:
+            continue  # 隔一个空行的同级答案 callout
+        out.append(_question_stem(title, block))
+    return out

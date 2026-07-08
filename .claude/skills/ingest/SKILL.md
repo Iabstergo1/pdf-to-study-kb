@@ -45,7 +45,7 @@ detail from sibling `references/*` on demand. Project truth: `CLAUDE.md`. Engine
 - CLI: `scripts/pipeline.py` (commands per phase).
 - Protocols: `docs/skill-runtime/schema.md` (page types / per-type frontmatter contract; **section titles are
   no longer mandatory — structure is purpose-driven**), `concept-resolution.md` (resolution + home-domain routing).
-- Phase references: `references/preflight.md`, `references/arbitrate.md`, `references/write-pages.md`, `references/synthesis.md`, `references/finish-lint.md`.
+- Phase references: `references/preflight.md`, `references/arbitrate.md`, `references/content-routing.md`, `references/write-pages.md`, `references/synthesis.md`, `references/finish-lint.md`.
 
 ## 5. Persisted artifacts
 
@@ -59,8 +59,8 @@ detail from sibling `references/*` on demand. Project truth: `CLAUDE.md`. Engine
 
 ```text
 preprocess + auto-arbitration  init-vault → add-source → profile → source-convert → source-audit →[ arbitration-status → if pending: agent arbitrates queue → arbitration-apply ]→ windows → workorder
-start / per-window (LLM)  ingest-start → read chapters.json (build whole-book understanding)
-                          →[ in chapter order: window-start → show-window → write pages (read hard-page source images as evidence; re-express natively — never embed them) → window-done --writes ]×N
+start / per-window (LLM)  ingest-start → read chapters.json (build whole-book understanding) → write per-chapter content-routing table into digest (advisory; references/content-routing.md)
+                          →[ in chapter order: window-start → show-window → write pages per routing orientation (read hard-page source images as evidence; re-express natively — never embed them; deviations logged) → window-done --writes ]×N
 synthesis (LLM)           phase E: update overview + build topic/comparison/synthesis (into some window's --writes) — first-class, lint blocks if missing
 finish (zero LLM)         ingest-done → lint
 incremental reopen        reopen → ingest-start →[ per-window backfill ]→ ingest-done → lint
@@ -91,6 +91,7 @@ incremental reopen        reopen → ingest-start →[ per-window backfill ]→ 
 |---|---|---|
 | A preprocess | `references/preflight.md` | deterministic chain + dual-audit acceptance (needs_vision / degraded warnings / reconciliation / window coverage) |
 | A.5 auto-arbitration | `references/arbitrate.md` | when the dual-audit flags un-closed disagreements, the agent auto-decides render/ignore/needs_human (structured only); the CLI materializes → the windows carry the assets |
+| B0 content routing | `references/content-routing.md` | after reading chapters.json, route each chapter to a content type (理论/方法/案例/参考/观点) → per-chapter `## 路由表` in digest; **advisory** — deviations written as `[routing-deviation]` markers (revision evidence for skill-evolve); purpose.md supreme |
 | B+C+D per-window writing | `references/write-pages.md` | start guard + **read chapters.json for whole-book understanding** + per-window sub-units U1–U7 + read source images as evidence & re-express natively (never embed) + writing discipline + lint hard rules |
 | E synthesis | `references/synthesis.md` | incremental overview/topic/comparison/synthesis |
 | F finish | `references/finish-lint.md` | ingest-done + lint promote/rollback + derived rebuild |

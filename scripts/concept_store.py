@@ -19,11 +19,15 @@ _SLUG_OK = re.compile(r"[a-z0-9][a-z0-9-]*")
 
 
 def slugify(name: str) -> str:
-    """确定性 slug：ASCII 名转 kebab；纯 CJK 名保留原字（去空白）。"""
-    ascii_slug = _ASCII_SLUG.sub("-", name.strip().lower()).strip("-")
-    if ascii_slug:
-        return ascii_slug
-    return re.sub(r"\s+", "", name.strip())
+    """确定性 slug：纯 ASCII 名转 kebab；含任何非 ASCII 字符（CJK 等）的名保留原字（去空白）。
+    中文夹 ASCII 片段（如「生成式AI」「清单20问」）必须整名保留——不得取出局部 ASCII 残片当 slug
+    （曾把「生成式AI的科研辅助定位」塌缩成 ai.md）。"""
+    s = name.strip()
+    if s.isascii():
+        ascii_slug = _ASCII_SLUG.sub("-", s.lower()).strip("-")
+        if ascii_slug:
+            return ascii_slug
+    return re.sub(r"\s+", "", s)
 
 
 def canonical_id(domain: str, name: str, aliases=()) -> str:

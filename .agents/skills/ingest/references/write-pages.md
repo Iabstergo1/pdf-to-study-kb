@@ -20,6 +20,11 @@ the CLI and sha256-frozen, not by the LLM**; md sources degrade to a single whol
   finish a chapter's windows before the next. Map window→chapter via the `<!-- page N -->` markers in `source.md`.
 - **Resume anchor:** after an interruption, re-read `chapters.json` + the digest `## RESUME` block to locate
   the next unfinished window. The chapter map is deterministically replayable; the LLM never re-draws it.
+- **Content routing（开工一次，逐窗查表）：** after building whole-book understanding, follow
+  `references/content-routing.md` — write a per-chapter `## 路由表`（章 → 类型 → 写法取向）into
+  `digest.md` before the first window; consult it per window. Routing is **advisory**: when a chapter's
+  label doesn't fit the actual content, write what the content needs and log a `[routing-deviation]`
+  marker（固定格式见该手册）. `purpose.md` outranks every routing recommendation.
 - The overview "concept map" and topic split **follow the chapter map** (see phase E).
 
 ## Phase C: per-window sub-units (rolling digest = external memory for long sources)
@@ -106,7 +111,33 @@ Sub-unit command detail:
   interpretation). Vague summary pages are unfinished.
 - **Learning loop & source-page integrity:** a self-test must ship with answers / hints / back-links (a
   collapsible `> [!question]` + the answer, or a link to the section that resolves it) — never questions with
-  no resolution. On `sources/<src>.md`, "精彩摘录" means **real quotations with a page/§ ref**; if you can only
+  no resolution (`lint` prints a non-blocking `[warn]` for unanswered questions; published questions are
+  harvested into the derived `quiz-index.generated.md` review entry — question stems + back-links only).
+- **装置预算（先于一切装置的硬约束）：** 正文默认**零装置**——散文必须先独立成立；除页尾自测与推导
+  折叠（减重手段，不计预算）外，其余装置（案例解剖/定位段/具名命题/误区 warning/图）**一页至多启用
+  一种**。负例：「参与者」这类基础概念页，零装置就是正确答案。**协议里提到某装置 ≠ 每页都要用**——
+  按内容判断，宁缺毋滥。
+- **阅读兴趣设计（偏好而非门禁——按内容自然使用，绝不为凑格式硬塞题型）：** ① 对**反直觉结论**优先
+  "先猜再看"：先抛 `> [!question]` 让读者预测（"两家企业打价格战，要几家才能把价格压到成本？"），再在
+  折叠答案或紧随的正文里揭示——预测式学习的记忆效果远强于直接阅读。② 高价值概念可用"找错题"：
+  `> [!example]` 给一段故意埋**一处**错误的推导，`> [!success]-` 折叠揭示错在哪。③ `> [!warning]` 只
+  服务**真实**的常见误区（高混淆概念对，如 完全信息 vs 完美信息），不做装饰性 callout——每页都有
+  warning 会让读者疲劳；预判式质疑（"且慢——"式自问自答）作为误区 warning 的**变体**在认知冲突点使用，
+  不单独成装置。④ 概念页结尾的"下一步"链接，只在存在**强因果/对比/递进**关系时写成悬念钩子
+  （"古诺假设同时行动——如果一家能抢先呢？→ 斯塔克尔伯格模型"），普通相关链接保持平实；切忌每页
+  "下集预告"式营销腔。⑤ 高价值 topic 页**可选**在结尾配一道跨概念综合题（含折叠解答路径），仅在确有
+  把握写出高质量综合题时使用——空泛大题不如不出。
+- **推导折叠（唯一让页面变轻的装置，鼓励使用）：** 结论与直觉留在正文，多步推导/证明折叠进
+  `> [!abstract]- 完整推导`；**折叠块上方必须有可见的结论句**——读者不点开也能带走结果。复习时
+  30 秒扫完结论层即走，严格性一寸不丢。
+- **案例解剖（限 topic 页与少数枢纽概念）：** 一小段现实叙述，然后 `==高亮==` 关键要素并逐一 wikilink
+  回概念页（"==两家平台同时公布补贴率== → [[…|静态博弈]]"）——训练"在真实场景里认出模型"，判例解剖 /
+  代码走查的同款母题。
+- **定位段（仅深层级/易迷路概念）：** 页首一行斜体交代坐标（承接谁 / 解决什么 / 通向哪），如均衡族
+  第三层以下的概念（完美贝叶斯均衡）；基础概念不需要，**禁止全库套用同一句式**（八股化即失败）。
+- **具名命题：** 库内**承重结论**升格为 `**命题（先发优势）**：一句话结论。`——短名 2–8 字、域内唯一、
+  每本书 5–15 条量级（不是每页都有）；跨页引用写名字（"由命题（先发优势）…"），**v1 不做数字编号**
+  （名字即锚点）。收尾 CLI 零 LLM 收割全库命题成 `propositions.generated.md`（结论句+回链）。 On `sources/<src>.md`, "精彩摘录" means **real quotations with a page/§ ref**; if you can only
   paraphrase, rename the section (e.g. 核心论点) rather than passing off a summary as a quote. `overview.md`
   learning routes state **what the reader can do after each leg** (e.g. "judge whether a problem is Cournot or
   Bertrand", "write a minimal model setup"), not just the reading order.

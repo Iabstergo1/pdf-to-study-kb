@@ -119,3 +119,61 @@ def test_katex_pipe_in_table_flags_unescaped_pipe():
     assert page_rules.katex_pipe_in_table("| a | $\\lvert S\\rvert$ |\n") == []
     # 表格内把 | 转义为 \| → 不报
     assert page_rules.katex_pipe_in_table("| a | $x \\| y$ |\n") == []
+
+
+def test_katex_pipe_ignores_wikilink_display_pipe():
+    # 回归（2026-07-04 误拦 信号博弈.md）：wikilink 显示名的 | + 公式内裸 | 同行的散文行，
+    # 不是表格行——masking 须把 [[...|...]] 一并剔除。
+    line = ("由 [[domains/game-theory/concepts/贝叶斯博弈|贝叶斯博弈]] 的更新规则给出 "
+            "$\\mu(t|m)=p(m|t)$。\n")
+    assert page_rules.katex_pipe_in_table(line) == []
+    # 真表格行里同样公式仍要命中（wikilink 剔除后结构性 | 仍在）
+    assert page_rules.katex_pipe_in_table(
+        "| [[domains/x/concepts/贝叶斯博弈|贝叶斯博弈]] | $p(m|t)$ |\n")
+
+
+def test_unanswered_question_stems():
+    answered = ("> [!question] 自测\n"
+                "> 为什么（抵赖, 抵赖）不是纳什均衡？\n"
+                "> > [!success]- 参考答案\n"
+                "> > 因为存在单方面偏离动机。\n")
+    assert page_rules.unanswered_question_stems(answered) == []
+    # 块内有指向解答的 wikilink 也算已闭环
+    linked = ("> [!question] 自测\n"
+              "> 先猜猜结论？解答见 [[domains/x/concepts/均衡|均衡]]。\n")
+    assert page_rules.unanswered_question_stems(linked) == []
+    # 有题无解 → 返回题干
+    bare = ("> [!question] 自测\n"
+            "> 为什么价格会压到边际成本？\n\n后续散文。\n")
+    assert page_rules.unanswered_question_stems(bare) == ["为什么价格会压到边际成本？"]
+    # 无 question callout → []
+    assert page_rules.unanswered_question_stems("普通正文 $x$。\n") == []
+
+
+def test_extract_question_stems():
+    body = ("开头散文。\n\n"
+            "> [!question] 自测\n"
+            "> 为什么（抵赖, 抵赖）不是纳什均衡？\n"
+            "> > [!success]- 参考答案\n"
+            "> > 因为存在单方面偏离动机。\n\n"
+            "中间散文。\n\n"
+            "> [!question]- 进阶\n"
+            "> 三家企业时结论如何变化？\n")
+    assert page_rules.extract_question_stems(body) == [
+        "为什么（抵赖, 抵赖）不是纳什均衡？",
+        "三家企业时结论如何变化？",
+    ]
+    # 只有标题行没有正文行 → 用标题文本兜底
+    assert page_rules.extract_question_stems("> [!question] 请推导最优反应函数\n") == ["请推导最优反应函数"]
+    assert page_rules.extract_question_stems("无题正文。\n") == []
+
+
+def test_extract_propositions():
+    body = ("正文。**命题（先发优势）**：斯塔克尔伯格领导者产量为古诺的 1.5 倍，利润严格更高。\n\n"
+            "另一段 **命题（伯特兰悖论）**: 两家同质竞争即可把价格压至边际成本。\n")
+    assert page_rules.extract_propositions(body) == [
+        ("先发优势", "斯塔克尔伯格领导者产量为古诺的 1.5 倍，利润严格更高。"),
+        ("伯特兰悖论", "两家同质竞争即可把价格压至边际成本。"),
+    ]
+    # 无命题 → []；加粗普通文本不误捕
+    assert page_rules.extract_propositions("**重点**：这是普通强调。\n") == []

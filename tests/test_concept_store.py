@@ -191,3 +191,23 @@ def test_create_concept_falls_back_when_template_missing(tmp_path):
         assert "## 直觉" in body  # 回退到内置 CONCEPT_BODY，骨架仍完整
     finally:
         concept_store._TEMPLATES_DIR = orig
+
+
+def test_slugify_cjk_with_ascii_fragment_kept():
+    # 回归（2026-07-04 game-theory 入库踩到 3 次）：中文名里夹 ASCII 片段（"AI"/"20"/"A-F"）时，
+    # 不得取出局部 ASCII 残片当 slug（曾产出 ai.md / 20.md）——含任何非 ASCII 字符即走 CJK 分支保留原字。
+    assert concept_store.slugify("生成式AI的科研辅助定位") == "生成式AI的科研辅助定位"
+    assert concept_store.slugify("逻辑自查清单20问") == "逻辑自查清单20问"
+    assert concept_store.slugify("组合创新方法与A-F框架") == "组合创新方法与A-F框架"
+    # 中文名含空白仍去空白（与纯 CJK 分支一致）
+    assert concept_store.slugify("生成式 AI 助手") == "生成式AI助手"
+
+
+def test_canonical_id_cjk_with_ascii_fragment_not_collapsed():
+    # 有 ASCII 别名 → cid 用别名（spec §6 不变）
+    cid = concept_store.canonical_id("research-method", "生成式AI的科研辅助定位",
+                                     aliases=["Generative AI Research Assistant"])
+    assert cid == "concept.research-method.generative-ai-research-assistant"
+    # 无 ASCII 别名 → 保留全名，绝不塌缩成 "ai"/"20"
+    assert concept_store.canonical_id("research-method", "逻辑自查清单20问") \
+        == "concept.research-method.逻辑自查清单20问"

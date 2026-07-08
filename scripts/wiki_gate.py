@@ -15,12 +15,14 @@ import page_rules
 import thresholds  # 门禁阈值单一真值（env 可覆盖）
 
 _EXCLUDE_TOP = {"Review-Queue", "_meta", "assets"}
-_DERIVED = {"index.generated.md", "aliases.md"}
+_DERIVED = {"index.generated.md", "aliases.md", "quiz-index.generated.md",
+            "propositions.generated.md"}
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)")
 # callout 学习白名单（设宽；不强制必须用 callout，只禁未知类型，防 LLM 乱编导致 Obsidian 不渲染）
 CALLOUT_WHITELIST = frozenset({"note", "tip", "info", "important", "warning", "question",
                                "example", "abstract", "summary", "quote", "success", "todo"})
-_CALLOUT = re.compile(r"^>\s*\[!([A-Za-z][\w-]*)\]", re.MULTILINE)
+# 匹配任意嵌套层级（`> > [!x]` 的折叠答案也过白名单——曾只查顶层，嵌套处发明未知类型可逃逸）
+_CALLOUT = re.compile(r"^(?:>\s*)+\[!([A-Za-z][\w-]*)\]", re.MULTILINE)
 # D-1/G1：发布正文禁嵌源图（`![[assets/...]]`）。源图只作 LLM 阅读证据，不进入发布产物。
 _SOURCE_IMG = re.compile(r"!\[\[\s*assets/")
 _PLACEHOLDER = re.compile(r"（待 /ingest 填写[^）]*）")
@@ -290,6 +292,91 @@ def build_index(vault) -> str:
 def write_index(vault) -> None:
     (Path(vault) / "index.generated.md").write_text(build_index(vault),
                                                     encoding="utf-8", newline="\n")
+
+
+def build_quiz_index(vault) -> str:
+    """quiz-index.generated.md：全库自测题索引（派生阅读层，零 LLM）。只收 published 页
+    [!question] 的题干 + 回链原页，按 domain（无 domain 按顶层目录）分组——**不带答案**：
+    答案在原页折叠块里，索引的价值就是给复习一个入口、把读者带回原页。"""
+    vault = Path(vault)
+    groups: dict[str, list[str]] = {}
+    total = 0
+    for f in sorted(vault.rglob("*.md")):
+        rel = f.relative_to(vault).as_posix()
+        if rel in _DERIVED or rel.split("/")[0] in _EXCLUDE_TOP:
+            continue
+        meta, body = mdpage.read_page(f)
+        if meta.get("status") != "published":
+            continue
+        stems = page_rules.extract_question_stems(body)
+        if not stems:
+            continue
+        display = meta.get("title") or meta.get("canonical_name") or Path(rel).stem
+        items = groups.setdefault(str(meta.get("domain") or rel.split("/")[0]), [])
+        for stem in stems:
+            items.append(f"- {stem} → [[{rel}|{display}]]")
+            total += 1
+    lines = ["# 自测题库（派生文件：由收尾 CLI 重建，只收录 published 页的自测题，勿手改）", "",
+             f"共 {total} 题。先自己作答，再点链接回原页展开折叠的参考答案核对。", ""]
+    for g in sorted(groups):
+        lines += [f"## {g}", ""] + groups[g] + [""]
+    return "\n".join(lines)
+
+
+def write_quiz_index(vault) -> None:
+    (Path(vault) / "quiz-index.generated.md").write_text(build_quiz_index(vault),
+                                                         encoding="utf-8", newline="\n")
+
+
+def collect_propositions(vault) -> list[dict]:
+    """全库 published 页的具名命题（`**命题（名）**：结论`）：
+    [{name, statement, rel, display, domain}]，rglob 排序确定性。"""
+    vault = Path(vault)
+    out: list[dict] = []
+    for f in sorted(vault.rglob("*.md")):
+        rel = f.relative_to(vault).as_posix()
+        if rel in _DERIVED or rel.split("/")[0] in _EXCLUDE_TOP:
+            continue
+        meta, body = mdpage.read_page(f)
+        if meta.get("status") != "published":
+            continue
+        props = page_rules.extract_propositions(body)
+        if not props:
+            continue
+        display = meta.get("title") or meta.get("canonical_name") or Path(rel).stem
+        dom = str(meta.get("domain") or rel.split("/")[0])
+        for name, stmt in props:
+            out.append({"name": name, "statement": stmt, "rel": rel,
+                        "display": display, "domain": dom})
+    return out
+
+
+def duplicate_proposition_names(props: list[dict]) -> list[str]:
+    """域内重名的命题名（名字即锚点，重名 = 引用歧义；软警告用）。"""
+    seen: dict[tuple, int] = {}
+    for p in props:
+        seen[(p["domain"], p["name"])] = seen.get((p["domain"], p["name"]), 0) + 1
+    return sorted(f"{d}/命题（{n}）" for (d, n), c in seen.items() if c > 1)
+
+
+def build_propositions_index(vault) -> str:
+    """propositions.generated.md：全库命题总表（派生阅读层，零 LLM）——这个库到底断言了哪些事。
+    名字即锚点（v1 不编号）；只列结论句 + 回链，完整论证在原页。"""
+    props = collect_propositions(vault)
+    lines = ["# 命题总表（派生文件：由收尾 CLI 重建，只收录 published 页的具名命题，勿手改）", "",
+             f"共 {len(props)} 条。引用写法：命题（名字）；点击回链查看完整论证。", ""]
+    groups: dict[str, list[str]] = {}
+    for p in props:
+        groups.setdefault(p["domain"], []).append(
+            f"- **{p['name']}** — {p['statement']}（出自 [[{p['rel']}|{p['display']}]]）")
+    for g in sorted(groups):
+        lines += [f"## {g}", ""] + groups[g] + [""]
+    return "\n".join(lines)
+
+
+def write_propositions_index(vault) -> None:
+    (Path(vault) / "propositions.generated.md").write_text(build_propositions_index(vault),
+                                                           encoding="utf-8", newline="\n")
 
 
 def promote(vault, pages: list[dict]) -> int:
