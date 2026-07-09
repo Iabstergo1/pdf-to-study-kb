@@ -60,7 +60,11 @@ Sub-unit command detail:
   today) at `domains/<home>/concepts/**` only — if `check-write` DENYs an unlisted home domain, that domain must be
   added to the audited allowlist first, don't force it elsewhere. High-value sub-concepts (纳什均衡 / 子博弈精炼纳什
   均衡 / 贝叶斯纳什均衡 / 完美贝叶斯均衡 / 逆向归纳) deserve **their own pages**, not just plaintext mentions.
-- U5: self-check primitives in `scripts/page_rules.py` (see "lint hard rules" below).
+- U5: self-check primitives in `scripts/page_rules.py` (see "lint hard rules" below). **Also verify every
+  `[[full-path]]` wikilink target in this window's pages actually exists on disk (or is written in this same
+  window)** — CJK long filenames are easy to mistype, and linking a page you *plan* to write later is the
+  top recurring lint failure (broken-link ×18 on one book). If the target is missing: create it via
+  `resolve-concept` now, or rephrase as plain text — never account a page with a dangling link.
 - U6: `python scripts/pipeline.py window-done --source <src> --window <id> --writes '["<page>"]'` (on failure use `window-fail --error "<reason>"`). If the shell strips quotes from the JSON (Windows `conda run` gotcha), write the array to a UTF-8 file and pass `--writes-file <path.json>` instead.
 - U7: refresh the `## RESUME` block at the **top** of `digest.md` each window (the resume anchor; on
   resume say "continue" or run `scripts/resume-ingest.ps1`, both relocate via the RESUME block + `pipeline.py

@@ -23,7 +23,11 @@
 - **topic (mandatory for concept-heavy sources, else lint `topics-missing` blocks):** when a source yields
   many concepts (~≥6), **group them by topic into `topics/<中文主题名>.md`** (把同一主题下的若干相关概念聚成一组），each with a core synthesis + a per-source
   contribution table + open questions, wikilinking the related concepts — the categorization/navigation
-  layer above flat concepts.
+  layer above flat concepts. **Build the grouping from the full enumerated concept list, never from memory:**
+  list every concept page this source actually wrote (glob `domains/*/concepts/` + the digest's cross-book
+  merge list), then tick each one off against some topic's body wikilinks or `related_concepts[]` — on a
+  100-concept book, memory-based grouping left 6 concepts uncovered and blocked publish (`concepts-uncovered`).
+  Any leftover concept: assign it to an existing topic or create the missing topic before `ingest-done`.
 - **comparison:** when 2+ comparable models/methods appear, create/update a `comparisons/` page (conclusion / dimensions / when-to-use / related concepts).
 - **synthesis:** when a cross-source insight emerges that no single source gives, write a `synthesis/` page.
 - **lessons are optional and downgraded (D-2):** only for a continuous teaching/example/exercise stretch that
