@@ -20,7 +20,7 @@ action" under the core constraints — **never an unattended batch run.** Projec
 
 ## 2. Inputs
 
-- The `skill-mine` output `pipeline-workspace/skill-evolution/backlog.yaml`: each entry has `signature / count / sources / sample_reason`.
+- The `skill-mine` output `pipeline-workspace/skill-evolution/backlog.yaml`: each entry has `signature / count / sources / sample_reason / last_seen`. Only `open` proposals are counted — signatures already fixed and retired via `proposals-resolve` drop out; use `last_seen` to judge how fresh a signal is.
 - The user-named backlog entry (by `signature` or index).
 - The target skill's `SKILL.md` (both trees) + failure-sample context (`review_proposals` `reason` / Review-Queue items).
 

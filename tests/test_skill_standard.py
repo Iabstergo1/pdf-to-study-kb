@@ -100,6 +100,10 @@ _PROTOCOL_KEYWORDS = {
     "kb-qa": ["Q-chain", "Review-Queue", "coverage", "mutually exclusive"],
     "source-xray": ["reports/source-xray", "published", "kb-save"],
     "skill-evolve": ["skill-mine", "skill-gate", "skill-stage", "skill-adopt", "backlog"],
+    "kb-postmortem": ["ingest-stats", "skill-mine", "backlog", "proposals-resolve",
+                      "digest.md", "reports/postmortem", "published"],
+    "pipeline-doctor": ["status", "next", "unlock", "window-fail", "reset-source",
+                        "writes-file", "reopen"],
 }
 
 

@@ -61,7 +61,7 @@ Sub-unit command detail:
   added to the audited allowlist first, don't force it elsewhere. High-value sub-concepts (纳什均衡 / 子博弈精炼纳什
   均衡 / 贝叶斯纳什均衡 / 完美贝叶斯均衡 / 逆向归纳) deserve **their own pages**, not just plaintext mentions.
 - U5: self-check primitives in `scripts/page_rules.py` (see "lint hard rules" below).
-- U6: `python scripts/pipeline.py window-done --source <src> --window <id> --writes '["<page>"]'` (on failure use `window-fail --error "<reason>"`).
+- U6: `python scripts/pipeline.py window-done --source <src> --window <id> --writes '["<page>"]'` (on failure use `window-fail --error "<reason>"`). If the shell strips quotes from the JSON (Windows `conda run` gotcha), write the array to a UTF-8 file and pass `--writes-file <path.json>` instead.
 - U7: refresh the `## RESUME` block at the **top** of `digest.md` each window (the resume anchor; on
   resume say "continue" or run `scripts/resume-ingest.ps1`, both relocate via the RESUME block + `pipeline.py
   next` — a machine-readable anchor for Claude and Codex alike, no session hook). The block runs from

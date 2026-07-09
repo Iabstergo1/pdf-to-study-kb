@@ -127,6 +127,58 @@ def get_source(db_path, source_id: str):
         con.close()
 
 
+# reset-source 允许的回退目标：只有预处理段（ingest 段有 reopen/resume，禁止 reset 进入）。
+RESETTABLE_TARGETS = ["registered", "profiled", "converted", "windowed", "workorder_ready"]
+
+
+def reset_source(db_path, source_id: str, to_stage: str, *, apply: bool = False) -> dict:
+    """确定性重置：回到「to_stage 刚完成」，其后阶段的 stage-run 缓存行作废可重跑
+    （不删则同 input_hash 永远被 should_run_stage 跳过，forward-only 状态机无法回退重预处理）。
+    只删 source_stage_runs 下游行 + 插一条 reset 审计行；ingest_progress / artifacts /
+    work_orders / review_proposals / staging 文件一概不动。默认 dry-run 只返回 plan。"""
+    if to_stage not in RESETTABLE_TARGETS:
+        raise InvalidTransition(f"reset target must be one of {RESETTABLE_TARGETS}, got {to_stage!r}")
+    con = connect(db_path)
+    try:
+        row = con.execute("SELECT current_stage,current_status FROM sources WHERE source_id=?",
+                          (source_id,)).fetchone()
+        if row is None:
+            raise InvalidTransition(f"unknown source: {source_id}")
+        if row["current_status"] == "running":
+            raise InvalidTransition(
+                f"{source_id} is running ({row['current_stage']}); fail / window-fail it first")
+        downstream = STAGES[STAGES.index(to_stage) + 1:]
+        ph = ",".join("?" * len(downstream))
+        plan_rows = con.execute(
+            f"SELECT stage, COUNT(*) AS n FROM source_stage_runs"
+            f" WHERE source_id=? AND stage IN ({ph}) GROUP BY stage",
+            (source_id, *downstream)).fetchall()
+        result = {"source_id": source_id,
+                  "from": f"{row['current_stage']}/{row['current_status']}",
+                  "to": f"{to_stage}/done",
+                  "delete_stage_runs": {r["stage"]: r["n"] for r in plan_rows},
+                  "applied": False}
+        if not apply:
+            return result
+        con.execute(f"DELETE FROM source_stage_runs WHERE source_id=? AND stage IN ({ph})",
+                    (source_id, *downstream))
+        con.execute(
+            "INSERT INTO source_stage_runs(source_id,stage,status,started_at,finished_at,input_hash)"
+            " VALUES (?,?,?,?,?,?)",
+            (source_id, "reset", "done", _now(), _now(),
+             f"to:{to_stage} from:{row['current_stage']}/{row['current_status']}"))
+        con.execute("UPDATE sources SET current_stage=?, current_status='done' WHERE source_id=?",
+                    (to_stage, source_id))
+        con.commit()
+        result["applied"] = True
+        return result
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
 # 可重开的"已收尾"态：跑完至少一轮（lint 终态或 ingested/proposed）才有发布物可增量补充。
 # ingesting/running 应 resume 而非 reopen；预处理中的源（registered..workorder_ready）无发布物。
 REOPENABLE = {("lint", "published"), ("lint", "done"), ("lint", "failed"),
@@ -421,5 +473,120 @@ def list_review_proposals(db_path, source_id: str | None = None) -> list[dict]:
             rows = con.execute("SELECT * FROM review_proposals WHERE source_id=? ORDER BY id",
                                (source_id,)).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def resolve_review_proposals(db_path, *, ids: list[int] | None = None, kind: str | None = None,
+                             source_id: str | None = None, apply: bool = False) -> dict:
+    """失败信号退场：按 ids 精确或 kind[+source_id] 批量选中 status='open' 的 proposals；
+    dry-run（默认）只返回匹配清单，apply 才 UPDATE status='resolved'。
+    没有退场路径时账本单调累积，skill-mine 的 backlog 会被已修复条目污染——这是补上的那条路。"""
+    con = connect(db_path)
+    try:
+        if ids:
+            ph = ",".join("?" * len(ids))
+            rows = con.execute(
+                f"SELECT * FROM review_proposals WHERE status='open' AND id IN ({ph}) ORDER BY id",
+                [int(i) for i in ids]).fetchall()
+        else:
+            sql = "SELECT * FROM review_proposals WHERE status='open' AND kind=?"
+            params: list = [kind]
+            if source_id is not None:
+                sql += " AND source_id=?"
+                params.append(source_id)
+            rows = con.execute(sql + " ORDER BY id", params).fetchall()
+        matched = [dict(r) for r in rows]
+        resolved = 0
+        if apply and matched:
+            ph = ",".join("?" * len(matched))
+            cur = con.execute(
+                f"UPDATE review_proposals SET status='resolved' WHERE id IN ({ph})",
+                [m["id"] for m in matched])
+            resolved = cur.rowcount
+            con.commit()
+        return {"matched": matched, "resolved": resolved}
+    finally:
+        con.close()
+
+
+def source_stats(db_path, source_id: str) -> dict | None:
+    """只读代理指标聚合（ingest-stats 用），不改任何行。诚实口径：
+    窗口耗时=最后一次尝试（start_window UPSERT 覆盖 started_at，非累计）；
+    pages_estimate=finished 窗 write_set_json 去重计数（估算）；拿不到的（token/费用）不伪造。"""
+    import json
+    con = connect(db_path)
+    try:
+        src = con.execute("SELECT * FROM sources WHERE source_id=?", (source_id,)).fetchone()
+        if src is None:
+            return None
+
+        def _secs(a, b):
+            if not a or not b:
+                return None
+            try:
+                return round((datetime.fromisoformat(b) - datetime.fromisoformat(a)).total_seconds(), 1)
+            except ValueError:
+                return None
+
+        windows = {"total": 0, "finished": 0, "failed": 0, "running": 0,
+                   "last_attempt_seconds_total": 0.0, "last_attempt_seconds_max": 0.0}
+        pages: set[str] = set()
+        for r in con.execute(
+                "SELECT status,started_at,finished_at,write_set_json FROM ingest_progress"
+                " WHERE source_id=?", (source_id,)):
+            windows["total"] += 1
+            if r["status"] in ("finished", "failed", "running"):
+                windows[r["status"]] += 1
+            d = _secs(r["started_at"], r["finished_at"])
+            if d is not None:
+                windows["last_attempt_seconds_total"] = round(
+                    windows["last_attempt_seconds_total"] + d, 1)
+                windows["last_attempt_seconds_max"] = max(windows["last_attempt_seconds_max"], d)
+            if r["status"] == "finished" and r["write_set_json"]:
+                try:
+                    ws = json.loads(r["write_set_json"])
+                except ValueError:
+                    ws = []
+                if isinstance(ws, list):
+                    pages.update(str(x).replace("\\", "/") for x in ws)
+
+        stages: dict[str, dict] = {}
+        lint_failures = 0
+        for r in con.execute(
+                "SELECT stage,status,started_at,finished_at FROM source_stage_runs"
+                " WHERE source_id=? ORDER BY id", (source_id,)):
+            s = stages.setdefault(r["stage"], {"runs": 0, "failed": 0, "last_done_seconds": None})
+            s["runs"] += 1
+            if r["status"] == "failed":
+                s["failed"] += 1
+                if r["stage"] == "lint":
+                    lint_failures += 1
+            elif r["status"] == "done":
+                d = _secs(r["started_at"], r["finished_at"])
+                if d is not None:
+                    s["last_done_seconds"] = d
+
+        proposals: dict[str, dict] = {}
+        for r in con.execute(
+                "SELECT kind,status,COUNT(*) AS n FROM review_proposals"
+                " WHERE source_id=? GROUP BY kind,status", (source_id,)):
+            k = proposals.setdefault(r["kind"], {"total": 0, "open": 0, "resolved": 0})
+            k["total"] += r["n"]
+            if r["status"] in ("open", "resolved"):
+                k[r["status"]] += r["n"]
+
+        return {
+            "source": dict(src),
+            "windows": windows,
+            "pages_estimate": len(pages),
+            "stages": stages,
+            "lint_failures": lint_failures,
+            "proposals_by_kind": proposals,
+            "notes": [
+                "窗口耗时=最后一次尝试（重启同窗会覆盖 started_at，非累计）",
+                "pages_estimate=finished 窗 write_set 去重计数（估算）",
+            ],
+        }
     finally:
         con.close()

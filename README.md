@@ -229,6 +229,8 @@ pdf-to-study-kb/
 | **`kb-qa`** | “给知识库做次 QA / 审计覆盖率” | 体检已发布库或保存前候选，产出报告 + Review-Queue proposal（只读不改库） |
 | **`source-preflight`** | “先预处理这个 PDF / 看看能不能 ingest” | 只跑确定性预处理链并验收 staging，不写语义页（**零-LLM 验收门，可零成本先验证**） |
 | **`source-xray`** | “给这个已发布来源做拆书阅读笔记” | 基于已发布内容生成 xray 笔记 / synthesis 候选报告，默认只写 `reports/` |
+| **`kb-postmortem`** | “复盘这次入库 / 这本书 ingest 得怎么样” | 发布后验后复盘：代理指标 + digest 偏离 + backlog 增量 → 一份报告，只出建议（skill-evolve 触发 / 门禁更新 / proposals-resolve 命令），绝不代执行 |
+| **`pipeline-doctor`** | “流水线卡住了 / 锁释放不掉 / 不让重跑 profile” | 症状→诊断→安全修复配方（只用白名单 CLI：unlock/fail/window-fail/reset-source/reopen/--writes-file），绝不手写 SQL 改状态库 |
 | **`skill-evolve`** | “把这次踩的坑沉淀进 skill / 让 skill 自我改进” | skill 自进化：mine 反复失败 → 你提炼 bounded 编辑 → gate(pytest+双树) → 人 adopt（改的是 skill 自己，不写 vault） |
 
 ---
@@ -285,7 +287,7 @@ pdf-to-study-kb/
 |------|------|------|
 | `ingest-start` / `ingest-done` | 开工（取锁 + stale registry 校验）/ 收工（释放锁） | `--source` |
 | `show-window` | 打印指定 window 的源文本 | `--source --window` |
-| `window-start` / `window-done` / `window-fail` | window 级记账（断点续跑 + 锁心跳） | `--source --window [--hash/--writes/--error]` |
+| `window-start` / `window-done` / `window-fail` | window 级记账（断点续跑 + 锁心跳）；`--writes-file` 从 UTF-8 文件读 JSON 数组（绕开 Windows 引号剥离坑，与 `--writes` 互斥） | `--source --window [--hash/--writes/--writes-file/--error]` |
 | `resolve-concept` | 概念归一唯一入口：命中合并 / 未命中新建 | `--mention --domain [--alias --ref-source --ref-sections]` |
 | `check-write` | 写前守卫：边界 + 覆盖保护（DENY 则 `exit 1`） | `--source --path` |
 | `snapshot-page` | 就地 merge 前快照该页 | `--source --path` |
@@ -298,18 +300,23 @@ pdf-to-study-kb/
 |------|------|------|
 | `lint` | 收尾门禁：proposed 过则 promote + 重建 index/registry + 知识图谱(graph-data+HTML)、败则回滚 + Review-Queue | `--source` |
 | `reopen` | 重开已收尾来源做增量补充（重建 workorder + 状态机回 `workorder_ready`） | `--source` |
+| `reset-source` | **维护**：确定性重置到某预处理阶段刚完成（forward-only 状态机的回退出口；**默认 dry-run**，只删下游 stage-run 缓存行 + 插 reset 审计行，不动 ingest_progress/artifacts/work_orders/review_proposals/staging） | `--source --to {registered,profiled,converted,windowed,workorder_ready} [--apply]` |
 | `sync-assets` | 把本源 staging 难页 PNG 同步进 `wiki/assets/<src>/`（预处理 / reopen 会自动调用） | `--source` |
+| `staging-clean` | **磁盘治理**：staging 三分类报告（审计保留 / 可再生可删 mineru_raw·audit·diag·dump_* / unknown 一律保留）；**默认 dry-run**，`--apply` 双护栏（source 已 published + assets 同步核对通过） | `--source [--apply]` |
 | `promotion-candidates` | 检测跨域提升候选（人工确认） | `--propose` |
 | `promote-concept` | 机械提升一个概念为 shared | `--id concept.<domain>.<slug>` |
 | `check-session` | query-session 目录契约检查（Q1） | `--id <run_id> [--saved]` |
+| `ingest-stats` | 只读代理指标：窗口成败/阶段耗时与重跑/lint 失败(≈回滚)/发布页数估算/违规按 kind 分布（不伪造 token/费用） | `--source [--json]` |
 
 ### skill 自进化（零 LLM 命令；唯一 LLM 是人触发的 `skill-evolve` skill）
 
 > **为什么有这组**：让**反复出现的 lint 失败**能被沉淀成对 skill 自身的有界改进，而不是同一个坑一踩再踩。`skill-mine` 把失败信号聚成 `backlog.yaml`；人触发的 `skill-evolve` skill 写出 bounded 编辑；`skill-gate` 当门禁（pytest + 双树字节对等 + 只许动 skill 两树，挡越权改 `tests/`）；`skill-stage` 登记候选；最终 `skill-adopt` 由**人**重跑门禁后才合并进双树。改的始终是 skill 自己，绝不写 vault。
+> **信号的进与出**：失败信号只增不减会让 backlog 越来越脏——已修复的坑永远占着计数。`proposals-resolve` 是配套的**退场机制**：修复验证后把对应信号标 `resolved`，backlog 只统计 `open` 行并给每簇带 `last_seen` 时间戳。每本书发布后跑一次 `kb-postmortem` skill（指标 + 偏离 + backlog 增量 → 报告 + 建议），这个"进（mine）—评（postmortem）—出（resolve）—改（evolve）"的循环才是完整闭环。
 
 | 命令 | 作用 | 关键参数 |
 |------|------|------|
-| `skill-mine` | 扫 `review_proposals` 失败信号 → 按规则聚类成 `backlog.yaml`（**`lint` 失败时自动刷新**，也可手动重扫） | — |
+| `skill-mine` | 扫 `review_proposals` 失败信号 → 按规则聚类成 `backlog.yaml`（**`lint` 失败时自动刷新**，也可手动重扫；只计 `open` 行，每簇带 `last_seen`） | — |
+| `proposals-resolve` | **退场机制**：把已修复的失败信号标 `resolved`，从 backlog 退场（**默认 dry-run**；`--id` 精确 / `--signature` 批量，批量落库须显式 `--all-matching`；`--apply` 后自动刷新 backlog） | `[--id N ...] [--signature <kind> [--source] --all-matching] [--apply]` |
 | `skill-gate` | 候选门：gate-integrity（只许动 skill 两树，挡 `tests/` 越权）+ `pytest`（含双树对等） | `--candidate [--base]` |
 | `skill-stage` | gate 绿后登记候选提案（diff + audit），线上不动 | `--candidate [--base]` |
 | `skill-adopt` | **人触发**：重跑 gate 兜底后把候选合并进双树（commit） | `--candidate [--base]` |
@@ -528,10 +535,10 @@ Windows 上建议每次给 pytest 一个新的 `--basetemp`，避免历史运行
 $env:PYTHONUTF8=1
 $bt="$PWD\tmp\pt-$(Get-Random)"
 
-# 日常层：跳过慢工作流和真实书籍验证，约 441 个测试 / 16s
+# 日常层：跳过慢工作流和真实书籍验证，约 511 个测试 / 37s
 python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt
 
-# 全量确定性门禁：约 501 个测试 / 93s，发布或大重构前跑
+# 全量确定性门禁：约 584 个测试 / 157s，发布或大重构前跑
 python -m pytest tests -q --basetemp=$bt
 
 # 只看分层收集是否符合预期

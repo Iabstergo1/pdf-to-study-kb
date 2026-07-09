@@ -18,6 +18,10 @@ deterministic CLI guards (orthogonal to auto-invocation). Skills can also be cal
   `wiki-lint-semantic`).
 - Reading notes / learning-path candidates from published content → `source-xray` (writes reports only,
   not the vault).
+- Post-publish retrospective on an ingested source (metrics / deviations / backlog delta) → `kb-postmortem`
+  (report + recommendations only; never edits the vault or resolves proposals itself).
+- The pipeline itself is stuck (lock / crashed running stage / corrupt window JSON / forward-only refuses a
+  re-run) → `pipeline-doctor` (whitelisted CLI repairs only, never hand-written SQL).
 
 ## Positive examples
 
@@ -28,6 +32,8 @@ deterministic CLI guards (orthogonal to auto-invocation). Skills can also be cal
 - "work the review queue" → `kb-review`; "do a semantic health check" → `wiki-lint-semantic`
 - "run a KB QA", "audit coverage", "spot-check evidence", "run the Q-chain" → `kb-qa`
 - "x-ray this published source", "make reading notes from published content" → `source-xray`
+- "postmortem this ingest", "复盘这次入库", "how did this book's ingest go" → `kb-postmortem`
+- "the pipeline is stuck", "状态机卡住了", "the lock won't release", "it won't let me re-run profile" → `pipeline-doctor`
 
 ## Counter-examples (never enter the write / ingest path)
 
@@ -40,3 +46,7 @@ deterministic CLI guards (orthogonal to auto-invocation). Skills can also be cal
 - `source-xray` uses published content only and writes no vault by default; to save, switch to `kb-save`.
 - "semantic health check / find contradictions / comparison dimensions / Q2 added value" → those belong to
   `wiki-lint-semantic`, not `kb-qa`.
+- "audit coverage / run the Q-chain" → `kb-qa`, not `kb-postmortem`; "distill this failure into the skill"
+  → `skill-evolve` — `kb-postmortem` only produces recommendations, it never edits skills or resolves proposals.
+- "this page's content looks wrong / bad writing" → content quality (`kb-qa` / `wiki-lint-semantic`), not
+  `pipeline-doctor`; `pipeline-doctor` fixes pipeline state only, via whitelisted CLI, never raw SQL.

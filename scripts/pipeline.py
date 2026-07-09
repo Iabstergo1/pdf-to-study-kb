@@ -203,6 +203,109 @@ def cmd_sync_assets(args):
     print(f"[OK] synced {n} source-page PNG(s) -> wiki/assets/{args.source}/")
 
 
+# staging 磁盘治理分类（staging-clean）。可再生重物可删；其余（审计件 / show-window·reopen
+# 续跑必需 / arbitration 裁决审计+补渲染图 / assets 难页图）一律保留；**未知项 fail-safe 保留**。
+_STAGING_REGEN_DIRS = ("mineru_raw", "audit", "diag")
+_STAGING_REGEN_GLOBS = ("dump_*.txt",)
+_STAGING_KEEP = ("reconciliation.json", "evidence.json", "parse_report.json", "workorder.yaml",
+                 "digest.md", "preflight_eval.json", "chapters.json", "pages.jsonl",
+                 "blocks.jsonl", "source.md", "windows.jsonl", "arbitration", "assets")
+
+
+def _path_bytes(p) -> int:
+    if p.is_file():
+        return p.stat().st_size
+    return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+
+
+def _classify_staging(source_id: str) -> dict:
+    """staging 根一层分类：keep（审计/续跑必需）/ regen（可再生可删）/ unknown（保留并列出）。"""
+    import fnmatch
+    staging = _staging_dir(source_id)
+    out = {"keep": [], "regen": [], "unknown": []}
+    for p in sorted(staging.iterdir()):
+        item = {"name": p.name, "bytes": _path_bytes(p), "path": p}
+        if p.is_dir() and p.name in _STAGING_REGEN_DIRS:
+            out["regen"].append(item)
+        elif p.is_file() and any(fnmatch.fnmatch(p.name, g) for g in _STAGING_REGEN_GLOBS):
+            out["regen"].append(item)
+        elif p.name in _STAGING_KEEP:
+            out["keep"].append(item)
+        else:
+            out["unknown"].append(item)
+    return out
+
+
+def _assets_synced(source_id: str) -> tuple[bool, list[str]]:
+    """staging 的 assets/ 与 arbitration/ 图片必须逐文件 sha256 对齐 wiki/assets/<src>/
+    （与 _sync_assets 同一来源集合），才允许 staging-clean --apply。"""
+    import hashlib
+    staging = _staging_dir(source_id)
+    dst_dir = _vault_dir() / "assets" / source_id
+    problems = []
+    for sub in ("assets", "arbitration"):
+        d = staging / sub
+        if not d.exists():
+            continue
+        for ext in ("*.png", "*.jpg", "*.jpeg"):
+            for img in d.glob(ext):
+                dst = dst_dir / img.name
+                if not dst.exists():
+                    problems.append(f"{sub}/{img.name}: 未同步进 wiki/assets/{source_id}/")
+                elif (hashlib.sha256(dst.read_bytes()).hexdigest()
+                      != hashlib.sha256(img.read_bytes()).hexdigest()):
+                    problems.append(f"{sub}/{img.name}: vault 副本 hash 不一致")
+    return (not problems), problems
+
+
+def cmd_staging_clean(args):
+    """磁盘治理：staging 三分类报告（默认 dry-run，一个字节不删）。--apply 双护栏：
+    source 必须 lint/published 且 assets 同步核对通过，才删可再生重物（mineru_raw/audit/diag/dump_*）。
+    unknown 一律保留（fail-safe），审计件与续跑必需产物绝不删。"""
+    import shutil
+    import state_store
+    staging = _staging_dir(args.source)
+    if not staging.exists():
+        raise SystemExit(f"no staging dir for '{args.source}'")
+    cls = _classify_staging(args.source)
+    mb = 1024 * 1024
+
+    def _fmt(items):
+        return "".join(f"  {i['name']:<24} {i['bytes'] / mb:8.1f} MB\n" for i in items) or "  (none)\n"
+
+    reclaim = sum(i["bytes"] for i in cls["regen"])
+    print(f"== staging-clean {args.source} ==")
+    print(f"keep (审计/续跑必需):\n{_fmt(cls['keep'])}", end="")
+    print(f"regen deletable (可再生):\n{_fmt(cls['regen'])}", end="")
+    print(f"unknown (fail-safe 保留，请人工核查):\n{_fmt(cls['unknown'])}", end="")
+    ok, problems = _assets_synced(args.source)
+    print(f"assets sync check: {'OK' if ok else 'FAIL'}")
+    for p in problems[:10]:
+        print(f"  [unsynced] {p}")
+    if not args.apply:
+        print(f"[dry-run] 可回收 {reclaim / mb:.1f} MB；核对清单后加 --apply 执行"
+              "（护栏：source 已 published + assets 同步核对通过）")
+        return
+    db = _vault_state_db()
+    row = state_store.get_source(db, args.source) if db.exists() else None
+    if row is None or (row["current_stage"], row["current_status"]) != ("lint", "published"):
+        cur = f"{row['current_stage']}/{row['current_status']}" if row is not None else "unregistered"
+        raise SystemExit(f"refuse --apply: source 未处于 lint/published（当前 {cur}）；先收尾发布")
+    if not ok:
+        raise SystemExit("refuse --apply: assets 未同步核对通过（先跑 sync-assets）："
+                         + "; ".join(problems[:5]))
+    freed = 0
+    for item in cls["regen"]:
+        freed += item["bytes"]
+        if item["path"].is_dir():
+            shutil.rmtree(item["path"])
+        else:
+            item["path"].unlink()
+        print(f"[deleted] {item['name']} ({item['bytes'] / mb:.1f} MB)")
+    print(f"[OK] staging-clean {args.source}: freed {freed / mb:.1f} MB"
+          f"（审计件/arbitration/assets/unknown 全部保留）")
+
+
 def cmd_source_audit(args):
     """source-audit：PDF 双审——跑 MinerU structural review 复核 PyMuPDF 抽取，写 reconciliation.json。
 
@@ -982,9 +1085,18 @@ def cmd_window_done(args):
     import json
     db = _vault_state_db()
     _require_vault_lock(db, args.source)
+    # --writes-file：从 UTF-8 文件读 JSON 数组，整体绕开 shell 引号问题（与 --writes 显式互斥）。
+    if getattr(args, "writes_file", None):
+        if args.writes not in (None, ""):
+            raise SystemExit("--writes 与 --writes-file 互斥（只能给一个）")
+        wf = Path(args.writes_file)
+        if not wf.exists():
+            raise SystemExit(f"--writes-file not found: {wf}")
+        args.writes = wf.read_text(encoding="utf-8").strip()
     # C3：--writes/--proposals 必须是合法 JSON 数组，否则 fail-fast。最常见的坑是 Windows 上
     # 经 `conda run` 调用时双引号被吞，["a.md"] 变成 [a.md]（非法 JSON）——旧行为是静默存损坏值、
-    # 收尾 lint 读取时才崩（JSONDecodeError）。这里提前拦截并给出修复指引（改用环境 python 直调）。
+    # 收尾 lint 读取时才崩（JSONDecodeError）。这里提前拦截并给出修复指引（改用环境 python 直调，
+    # 或把数组写进文件走 --writes-file）。
     for flag, raw in (("--writes", args.writes), ("--proposals", getattr(args, "proposals", None))):
         if raw in (None, ""):
             continue
@@ -1009,6 +1121,33 @@ def cmd_window_fail(args):
     _require_vault_lock(db, args.source)
     state_store.fail_window(db, args.source, args.window, error=args.error)
     print(f"[OK] window {args.window} failed: {args.error}")
+
+
+def cmd_reset_source(args):
+    """维护：确定性重置到某预处理阶段刚完成（forward-only 状态机的回退出口）。
+    默认 dry-run 打印 plan；--apply 才删下游 stage-run 缓存行并插 reset 审计行。"""
+    import state_store
+    import locks
+    db = _vault_state_db()
+    if not db.exists():
+        raise SystemExit("no state db yet")
+    lk = locks.get(db, scope="vault")
+    if lk is not None and lk["holder"] == args.source:
+        raise SystemExit(f"vault lock held by '{args.source}'; ingest-done / fail / unlock first")
+    try:
+        res = state_store.reset_source(db, args.source, args.to, apply=args.apply)
+    except state_store.InvalidTransition as e:
+        raise SystemExit(str(e))
+    tag = "OK" if res["applied"] else "dry-run"
+    print(f"[{tag}] reset-source {args.source}: {res['from']} -> {res['to']}")
+    verb = "deleted" if res["applied"] else "will delete"
+    for stage, n in sorted(res["delete_stage_runs"].items()):
+        print(f"  {verb} stage-run cache rows: {stage} x{n}")
+    if not res["delete_stage_runs"]:
+        print("  (no downstream stage-run rows)")
+    if not res["applied"]:
+        print("[dry-run] 未改任何行；核对 plan 后加 --apply 执行"
+              "（不动 ingest_progress/artifacts/work_orders/review_proposals/staging）")
 
 
 def cmd_resolve_concept(args):
@@ -1366,11 +1505,16 @@ def _refresh_skill_backlog(db):
     proposals = state_store.list_review_proposals(db) if Path(db).exists() else []
     clusters: dict[str, dict] = {}
     for p in proposals:
+        if p["status"] != "open":  # 退场：resolved（经 proposals-resolve）不再计入 backlog
+            continue
         c = clusters.setdefault(p["kind"], {"signature": p["kind"], "count": 0,
-                                            "sources": [], "sample_reason": p["reason"]})
+                                            "sources": [], "sample_reason": p["reason"],
+                                            "last_seen": p["created_at"]})
         c["count"] += 1
         if p["source_id"] not in c["sources"]:
             c["sources"].append(p["source_id"])
+        if p["created_at"] and p["created_at"] > c["last_seen"]:
+            c["last_seen"] = p["created_at"]
     backlog = sorted(clusters.values(), key=lambda c: (-c["count"], c["signature"]))
     out = _workspace_root() / "pipeline-workspace/skill-evolution/backlog.yaml"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1384,6 +1528,67 @@ def cmd_skill_mine(args):
     backlog = _refresh_skill_backlog(_vault_state_db())
     out = _workspace_root() / "pipeline-workspace/skill-evolution/backlog.yaml"
     print(f"[OK] skill-mine: {len(backlog)} signatures -> {out}")
+
+
+def cmd_proposals_resolve(args):
+    """自进化退场：把已修复的失败信号（review_proposals）标记 resolved，从 backlog 退场。
+    默认 dry-run 只列匹配行；--id 精确 / --signature 批量（批量落库须显式 --all-matching，
+    防把同类但未修复的 proposal 一起退场）。"""
+    import state_store
+    db = _vault_state_db()
+    if not db.exists():
+        raise SystemExit("no state db yet")
+    if bool(args.id) == bool(args.signature):
+        raise SystemExit("--id 与 --signature 必须二选一（精确按行 / 按签名批量）")
+    if args.id and args.source:
+        raise SystemExit("--source 只用于 --signature 批量过滤（--id 已精确到行）")
+    if args.signature and args.apply and not args.all_matching:
+        raise SystemExit("按签名批量 resolve 会连带同签名的全部 open 行，落库须显式 --all-matching 确认")
+    res = state_store.resolve_review_proposals(
+        db, ids=args.id, kind=args.signature, source_id=args.source, apply=args.apply)
+    for m in res["matched"]:
+        print(f"  #{m['id']} [{m['kind']}] {m['source_id']} {m['target_path']} :: {m['reason'][:80]}")
+    if not args.apply:
+        hint = "（批量另需 --all-matching）" if (args.signature and not args.all_matching) else ""
+        print(f"[dry-run] matched {len(res['matched'])} open proposals; 确认后加 --apply 落库{hint}")
+        return
+    _refresh_skill_backlog(db)
+    print(f"[OK] proposals-resolve: {res['resolved']} rows -> resolved; backlog.yaml 已刷新")
+
+
+def cmd_ingest_stats(args):
+    """只读代理指标（零 LLM，不改任何行）：窗口/阶段耗时/重跑/lint 失败/页数估算/违规分布。
+    诚实口径：token/费用拿不到就不伪造；耗时与页数的口径见输出 note。"""
+    import json
+    import state_store
+    db = _vault_state_db()
+    if not db.exists():
+        raise SystemExit("no state db yet")
+    stats = state_store.source_stats(db, args.source)
+    if stats is None:
+        raise SystemExit(f"unknown source: {args.source}")
+    if args.json:
+        print(json.dumps(stats, ensure_ascii=False, indent=2))
+        return
+    src = stats["source"]
+    w = stats["windows"]
+    print(f"== ingest-stats {args.source} ({src['domain']}/{src['format']}) "
+          f"{src['current_stage']}/{src['current_status']} ==")
+    print(f"windows: total={w['total']} finished={w['finished']} failed={w['failed']}"
+          f" running={w['running']}  last-attempt secs: total={w['last_attempt_seconds_total']}"
+          f" max={w['last_attempt_seconds_max']}")
+    print(f"pages_estimate (write_set 去重): {stats['pages_estimate']}")
+    print(f"lint failures (≈回滚次数): {stats['lint_failures']}")
+    for stage, s in stats["stages"].items():
+        rerun = f" reruns={s['runs'] - 1}" if s["runs"] > 1 else ""
+        dur = f" last_done={s['last_done_seconds']}s" if s["last_done_seconds"] is not None else ""
+        print(f"  stage {stage}: runs={s['runs']} failed={s['failed']}{rerun}{dur}")
+    if stats["proposals_by_kind"]:
+        print("violations by kind (review_proposals):")
+        for kind, k in sorted(stats["proposals_by_kind"].items()):
+            print(f"  {kind}: total={k['total']} open={k['open']} resolved={k['resolved']}")
+    for n in stats["notes"]:
+        print(f"note: {n}")
 
 
 def _skill_gate_check(base):
@@ -1530,6 +1735,11 @@ def main():
     rop.add_argument("--source", required=True)
     sap = subparsers.add_parser("sync-assets", help="把本源 staging 难页 PNG 同步进 wiki/assets/<src>/")
     sap.add_argument("--source", required=True)
+    stcp = subparsers.add_parser("staging-clean",
+                                 help="磁盘治理：staging 三分类报告（默认 dry-run）；--apply 只删可再生重物（双护栏）")
+    stcp.add_argument("--source", required=True)
+    stcp.add_argument("--apply", action="store_true",
+                      help="执行删除（须 source 已 published + assets 同步核对通过；默认 dry-run）")
     swp = subparsers.add_parser("show-window", help="打印指定 window 的源文本（默认含难页资产头）")
     swp.add_argument("--source", required=True)
     swp.add_argument("--window", required=True)
@@ -1548,6 +1758,8 @@ def main():
     wdp.add_argument("--source", required=True)
     wdp.add_argument("--window", required=True)
     wdp.add_argument("--writes", default=None)
+    wdp.add_argument("--writes-file", default=None, dest="writes_file",
+                     help="从 UTF-8 文件读 JSON 数组（绕开 Windows 引号剥离坑；与 --writes 互斥）")
     wdp.add_argument("--proposals", default=None)
     wfp = subparsers.add_parser("window-fail", help="记录一个 window 失败")
     wfp.add_argument("--source", required=True)
@@ -1578,8 +1790,27 @@ def main():
     fp.add_argument("--source", required=True, help="source_id")
     fp.add_argument("--stage", required=True, help="卡死的 stage 名")
     fp.add_argument("--error", required=True, help="失败原因（记入 source_stage_runs.error）")
+    from state_store import RESETTABLE_TARGETS
+    rstp = subparsers.add_parser("reset-source",
+                                 help="维护：确定性重置到某预处理阶段刚完成（默认 dry-run；只删下游 stage-run 缓存行）")
+    rstp.add_argument("--source", required=True, help="source_id")
+    rstp.add_argument("--to", required=True, choices=RESETTABLE_TARGETS,
+                      help="回退目标 stage（回到「它刚完成」；ingest 段请用 reopen/resume）")
+    rstp.add_argument("--apply", action="store_true", help="执行（默认 dry-run 只打印 plan）")
     subparsers.add_parser("skill-mine",
                           help="skill 自进化·零-LLM：扫失败信号(review_proposals) → backlog.yaml")
+    prp = subparsers.add_parser("proposals-resolve",
+                                help="自进化退场：把已修复的 review proposals 标记 resolved（默认 dry-run）")
+    prp.add_argument("--id", action="append", type=int, default=None, help="按行精确选择（可重复）")
+    prp.add_argument("--signature", default=None, help="按 kind 批量选择（落库须 --all-matching）")
+    prp.add_argument("--source", default=None, help="批量时限定 source_id")
+    prp.add_argument("--all-matching", action="store_true", dest="all_matching",
+                     help="确认批量 resolve 同签名的全部 open 行")
+    prp.add_argument("--apply", action="store_true", help="落库（默认 dry-run 只列匹配行）")
+    istp = subparsers.add_parser("ingest-stats",
+                                 help="只读代理指标：窗口/阶段耗时/重跑/lint 失败/页数估算/违规分布")
+    istp.add_argument("--source", required=True)
+    istp.add_argument("--json", action="store_true", help="输出 JSON（默认人类可读）")
     sgp = subparsers.add_parser("skill-gate",
                                 help="skill 自进化·零-LLM 门：候选只许动 skill 树(gate-integrity)+过 pytest")
     sgp.add_argument("--candidate", required=True)
@@ -1623,12 +1854,14 @@ def main():
         'workorder': cmd_workorder,
         'reopen': cmd_reopen,
         'sync-assets': cmd_sync_assets,
+        'staging-clean': cmd_staging_clean,
         'show-window': cmd_show_window,
         'ingest-start': cmd_ingest_start,
         'ingest-done': cmd_ingest_done,
         'window-start': cmd_window_start,
         'window-done': cmd_window_done,
         'window-fail': cmd_window_fail,
+        'reset-source': cmd_reset_source,
         'resolve-concept': cmd_resolve_concept,
         'check-write': cmd_check_write,
         'snapshot-page': cmd_snapshot_page,
@@ -1637,6 +1870,8 @@ def main():
         'promote-concept': cmd_promote_concept,
         'check-session': cmd_check_session,
         'skill-mine': cmd_skill_mine,
+        'proposals-resolve': cmd_proposals_resolve,
+        'ingest-stats': cmd_ingest_stats,
         'skill-gate': cmd_skill_gate,
         'skill-stage': cmd_skill_stage,
         'skill-adopt': cmd_skill_adopt,

@@ -64,10 +64,11 @@ backend produced which evidence, pages cross-checked, disagreements, accepted/de
 
 ## 5. Command layer (skills, model-invocable)
 
-LLM capability = `.agents/skills/{ingest,kb-query,kb-save,kb-review,kb-qa,wiki-lint-semantic,source-preflight,source-xray,skill-evolve}/SKILL.md`,
+LLM capability = `.agents/skills/{ingest,kb-query,kb-save,kb-review,kb-qa,kb-postmortem,pipeline-doctor,wiki-lint-semantic,source-preflight,source-xray,skill-evolve}/SKILL.md`,
 all model-invocable by `description` (misfires suppressed by negative samples; data safety enforced by the
 CLI guards, orthogonal to auto-invocation). `skill-evolve` is **skill self-evolution**: recurring lint
-failures (`skill-mine` clusters them into `backlog.yaml`) become bounded edits to a skill, gated by
+failures (`skill-mine` clusters them into `backlog.yaml` — open proposals only, each cluster carries
+`last_seen`; fixed signals retire via `proposals-resolve`, default dry-run) become bounded edits to a skill, gated by
 `skill-gate` (pytest + dual-tree parity + gate-integrity; candidates may only touch the two skill trees)
 and merged only by a human `skill-adopt`. Protocols: `docs/skill-runtime/{routing,schema,concept-resolution,save-back-policy,skill-standard}.md`.
 
@@ -109,8 +110,8 @@ default — run the fast tier for ordinary edits, the full gate before publish/r
 
 ```powershell
 $env:PYTHONUTF8=1; $bt="$PWD\tmp\pt-$(Get-Random)"
-python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt   # daily ~16s / 441 tests
-python -m pytest tests -q --basetemp=$bt                                  # full gate ~93s / 501 tests
+python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt   # daily ~37s / 511 tests
+python -m pytest tests -q --basetemp=$bt                                  # full gate ~157s / 584 tests
 ```
 
 ## 9. Authority & do-not-reintroduce

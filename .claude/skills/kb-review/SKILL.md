@@ -45,9 +45,12 @@ python scripts/pipeline.py status
 python scripts/pipeline.py lint --source <source_id>
 python scripts/pipeline.py promote-concept --id <canonical_id>
 python scripts/pipeline.py rebuild-registry
+python scripts/pipeline.py proposals-resolve --signature <kind> [--source <src>] --all-matching --apply
 ```
 
 Run vault-changing commands (e.g. `promote-concept` / page fixes / marking handled) only after user confirmation.
+After a fix is verified, retire the matching `review_proposals` rows with `proposals-resolve` (dry-run
+first, then `--apply` after user confirmation) so the skill-mine backlog stops counting fixed signals.
 
 ## 7. Workflow
 
