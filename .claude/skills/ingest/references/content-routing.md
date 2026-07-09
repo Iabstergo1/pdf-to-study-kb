@@ -25,8 +25,9 @@ After building whole-book understanding from `chapters.json`, write a `## 路由
 | ch16 行动计划表 | 弱化 | 按 purpose 取舍原则弱化，只提炼可复用概念 |
 ```
 
-- **Granularity = chapter, never the whole book.** One book may mix types (the game-theory book was
-  theory chapters + methodology chapters + downgraded schedule chapters).
+- **Granularity = chapter, never the whole book.** One book may mix types — e.g. a run of theory
+  chapters, a stretch of methodology chapters, and a downgraded schedule/appendix section, all in the
+  same source.
 - **Judgement signals:** chapter title + opening text, plus the deterministic signals preprocessing already
   computed (formula density, table density, needs_vision distribution in `parse_report.json`).
 - Unsure? Mark the chapter `待定` and decide when its first window is actually read — never force a label.

@@ -381,7 +381,7 @@ def test_lint_warns_on_unanswered_question(tmp_path):
 
 
 def test_lint_blocks_concept_batch_without_source_page_and_seed_overview(tmp_path):
-    # 回归（math-econ 真书入库实测缺口）：整本书发布完成而 sources/<src>.md 从未写过、
+    # 回归（真实书籍入库实测缺口）：整本书发布完成而 sources/<src>.md 从未写过、
     # overview 仍是 init-vault 种子——两者现均 fail-closed；补齐后放行。
     _ingest_ready(tmp_path)
     vault = tmp_path / "wiki"

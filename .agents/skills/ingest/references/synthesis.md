@@ -25,8 +25,9 @@
   contribution table + open questions, wikilinking the related concepts — the categorization/navigation
   layer above flat concepts. **Build the grouping from the full enumerated concept list, never from memory:**
   list every concept page this source actually wrote (glob `domains/*/concepts/` + the digest's cross-book
-  merge list), then tick each one off against some topic's body wikilinks or `related_concepts[]` — on a
-  100-concept book, memory-based grouping left 6 concepts uncovered and blocked publish (`concepts-uncovered`).
+  merge list), then tick each one off against some topic's body wikilinks or `related_concepts[]` —
+  memory-based grouping on a large, concept-heavy source reliably leaves a few concepts uncovered and
+  blocks publish (`concepts-uncovered`).
   Any leftover concept: assign it to an existing topic or create the missing topic before `ingest-done`.
 - **comparison:** when 2+ comparable models/methods appear, create/update a `comparisons/` page (conclusion / dimensions / when-to-use / related concepts).
 - **synthesis:** when a cross-source insight emerges that no single source gives, write a `synthesis/` page.
