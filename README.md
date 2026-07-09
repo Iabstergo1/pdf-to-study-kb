@@ -192,7 +192,7 @@ pdf-to-study-kb/
 ├── README.md                 # 本文件
 ├── requirements.txt          # 仅 PyMuPDF + PyYAML + pytest
 ├── scripts/
-│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（38 子命令，全部业务逻辑在此）
+│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（44 子命令，全部业务逻辑在此）
 │   ├── state_store.py / locks.py                # 业务 SQLite 状态机 / 单-ingest 并发锁
 │   ├── source_profile.py / source_convert.py / source_artifacts.py / chaptering.py   # L1 解析 + L2 结构契约
 │   ├── source_backends/      # 后端：pymupdf（fast path）/ markdown / 可选 mineru（结构化）
@@ -202,8 +202,8 @@ pdf-to-study-kb/
 │   ├── snapshots.py / ingest_guards.py / query_session.py  # 快照 / 写守卫 / 查询会话
 │   ├── install_mineru.py                         # 可选：按机型自动装 MinerU + 匹配 CUDA torch
 │   └── resume-ingest.ps1                         # 无人值守续跑（OS 调度脚本，模型可用性探针 + 有界续跑）
-├── .claude/skills/<name>/SKILL.md   # 9 个对话式 skill（Claude 读）
-├── .agents/skills/<name>/SKILL.md   # 同 9 个（Codex 读，与上者字节对等）
+├── .claude/skills/<name>/SKILL.md   # 11 个对话式 skill（Claude 读）
+├── .agents/skills/<name>/SKILL.md   # 同 11 个（Codex 读，与上者字节对等）
 ├── docs/skill-runtime/       # skill 运行时协议（routing / schema / 概念归一 / save-back / 标准）
 ├── templates/                # 运行时模板（concept：resolve-concept 新建骨架 / overview：init-vault seed）；其余页型正文交 purpose + 写作 LLM
 ├── tests/                    # 确定性测试（即规格）
@@ -577,5 +577,7 @@ python -m pytest tests --collect-only -q --basetemp=$bt
 |------|------|
 | [`CLAUDE.md`](CLAUDE.md) | **Claude Code 项目真值**（架构 / 约束 / 协作约定） |
 | [`AGENTS.md`](AGENTS.md) | **Codex 项目真值**（与 CLAUDE.md 对等） |
+| [`docs/user-guide.md`](docs/user-guide.md) | **用户使用说明**：面向使用者的完整操作手册（安装 / 端到端流程 / 每个操作怎么用 / 故障排查） |
+| [`docs/developer-guide.md`](docs/developer-guide.md) | **开发实现说明**：面向开发者的架构 / 模块职责 / 命令实现映射 / 数据契约 / 测试分层 |
 | [`docs/skill-runtime/`](docs/skill-runtime/) | skills 的运行时协议（routing / schema / 概念归一 / save-back 准入），skill 按需加载 |
-| [`.claude/skills/`](.claude/skills/) · [`.agents/skills/`](.agents/skills/) | 9 个对话式 skill 的指令文件（Claude 读前者、Codex 读后者，两树字节对等） |
+| [`.claude/skills/`](.claude/skills/) · [`.agents/skills/`](.agents/skills/) | 11 个对话式 skill 的指令文件（Claude 读前者、Codex 读后者，两树字节对等） |
