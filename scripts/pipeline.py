@@ -946,6 +946,9 @@ def cmd_show_window(args):
             break
     if selected is None:
         raise SystemExit(f"window not found: {args.window}")
+    # 读窗留痕：空写集跳窗是否真读过窗内容，事后靠这条记录审计（ingest-stats empty_writes_unread）
+    import state_store
+    state_store.record_window_read(_vault_state_db(), args.source, args.window)
     start, end = selected["char_start"], selected["char_end"]
     if selected.get("mode") == "blocks" and not getattr(args, "plain", False):
         # block-aware 窗的结构化头（纯加法；不改下方原窗正文输出语义）。
@@ -1170,6 +1173,11 @@ def cmd_resolve_concept(args):
     cid, path, action = concept_store.resolve_or_create_concept(
         vault, mention=args.mention, domain=args.domain, registry=registry,
         aliases=args.alias or [], source_ref=source_ref)
+    if action == "merged" and cid in registry and \
+            concept_store.is_alias_hit(args.mention, cid, registry[cid]):
+        print(f"[hit-alias] mention '{args.mention}' 命中的是 "
+              f"'{registry[cid]['canonical_name']}' 的别名（非本名）——确认这确实是同一概念；"
+              f"若它是被囤进整体页 aliases 的独立子概念，应从该页 aliases 移除后再 resolve 新建")
     print(f"[{action}] {cid} -> {path}")
 
 
@@ -1282,6 +1290,12 @@ def cmd_lint(args):
     for p in proposed:
         for stem in page_rules.unanswered_question_stems(p["body"]):
             print(f"[warn] 自测题缺解答（有题必有解：嵌套折叠答案或链接到解答处）：{p['rel_path']} :: {stem}")
+        for stem in page_rules.misplaced_question_stems(p["body"]):
+            print(f"[warn] 自测题干疑似写进 callout 标题（quiz 收割取块内首行会收错内容）："
+                  f"标题只放「自测」，题干做块内首行，答案进嵌套折叠：{p['rel_path']} :: {stem}")
+    # 收编垄断（软警告非阻断）：单 topic 收编域内过高比例概念 = 链接倾倒糊弄 A2 的征兆
+    for msg in wiki_gate.topic_coverage_monopoly(vault):
+        print(f"[warn] {msg}")
     ihash = hashlib.sha256(("\n".join(
         f"{p['rel_path']}:{hashlib.sha256(p['body'].encode('utf-8')).hexdigest()}"
         for p in proposed) + "\n!orphans:" + ",".join(p["rel_path"] for p in orphans)
@@ -1567,6 +1581,28 @@ def cmd_ingest_stats(args):
     stats = state_store.source_stats(db, args.source)
     if stats is None:
         raise SystemExit(f"unknown source: {args.source}")
+    # 装置使用统计（vault 只读扫描）：本源产出页的命题/推导折叠/自测题计数。
+    # 单页归零合法；整本书全部归零 = 写作偏好未被执行的强信号（复盘用，不进门禁）。
+    import page_rules
+    import mdpage
+    vault = _vault_dir()
+    src_pages: set[str] = {f"sources/{args.source}.md"}
+    for w in state_store.window_states(db, args.source):
+        if w["write_set_json"]:
+            try:
+                src_pages.update(str(x).replace("\\", "/") for x in json.loads(w["write_set_json"]))
+            except ValueError:
+                pass
+    usage = {"propositions": 0, "derivation_folds": 0, "questions": 0, "pages_scanned": 0}
+    for rel in sorted(src_pages):
+        f = vault / rel
+        if not f.exists():
+            continue
+        _m, body = mdpage.read_page(f)
+        for k, v in page_rules.device_usage(body).items():
+            usage[k] += v
+        usage["pages_scanned"] += 1
+    stats["device_usage"] = usage
     if args.json:
         print(json.dumps(stats, ensure_ascii=False, indent=2))
         return
@@ -1575,10 +1611,15 @@ def cmd_ingest_stats(args):
     print(f"== ingest-stats {args.source} ({src['domain']}/{src['format']}) "
           f"{src['current_stage']}/{src['current_status']} ==")
     print(f"windows: total={w['total']} finished={w['finished']} failed={w['failed']}"
-          f" running={w['running']}  last-attempt secs: total={w['last_attempt_seconds_total']}"
+          f" running={w['running']} empty_writes_unread={w['empty_writes_unread']}"
+          f"  last-attempt secs: total={w['last_attempt_seconds_total']}"
           f" max={w['last_attempt_seconds_max']}")
     print(f"pages_estimate (write_set 去重): {stats['pages_estimate']}")
     print(f"lint failures (≈回滚次数): {stats['lint_failures']}")
+    u = stats["device_usage"]
+    print(f"device_usage (装置使用/复盘信号): propositions={u['propositions']}"
+          f" derivation_folds={u['derivation_folds']} questions={u['questions']}"
+          f" pages_scanned={u['pages_scanned']}")
     for stage, s in stats["stages"].items():
         rerun = f" reruns={s['runs'] - 1}" if s["runs"] > 1 else ""
         dur = f" last_done={s['last_done_seconds']}s" if s["last_done_seconds"] is not None else ""

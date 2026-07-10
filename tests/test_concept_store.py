@@ -118,6 +118,19 @@ def test_resolve_hits_alias_in_domain_then_shared(tmp_path):
     assert concept_store.resolve("不存在的概念", domain="game-theory", registry=reg) is None
 
 
+def test_is_alias_hit_flags_alias_but_not_canonical(tmp_path):
+    _mk_concept(tmp_path, domain="game-theory", name="信号博弈", aliases=["Signaling Game"])
+    reg = _registry_of(tmp_path)
+    cid = "concept.game-theory.signaling-game"
+    entry = reg[cid]
+    # alias 命中 → True（囤积劫持风险提示点）
+    assert concept_store.is_alias_hit("Signaling Game", cid, entry)
+    assert concept_store.is_alias_hit("signaling game", cid, entry)  # 归一后仍算 alias
+    # canonical_name / canonical_id 命中 → False
+    assert not concept_store.is_alias_hit("信号博弈", cid, entry)
+    assert not concept_store.is_alias_hit(cid, cid, entry)
+
+
 def test_resolve_or_create_merges_existing_never_duplicates(tmp_path):
     _mk_concept(tmp_path, domain="game-theory", name="信号博弈", aliases=["Signaling Game"])
     reg = _registry_of(tmp_path)

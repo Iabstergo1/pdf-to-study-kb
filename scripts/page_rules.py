@@ -199,6 +199,28 @@ def extract_propositions(body: str) -> list[tuple[str, str]]:
     return [(m.group(1).strip(), m.group(2).strip()) for m in _PROPOSITION.finditer(body)]
 
 
+_DERIVATION_FOLD = re.compile(r"^>\s*\[!abstract\]-", re.IGNORECASE | re.MULTILINE)
+
+
+def device_usage(body: str) -> dict:
+    """页内写作装置计数（复盘 proxy 指标原语，不进门禁）：具名命题/推导折叠/自测题。
+    单页各项为零都合法；整本书全部归零是"写作偏好未被执行"的强信号。纯函数、无 I/O。"""
+    return {"propositions": len(extract_propositions(body)),
+            "derivation_folds": len(_DERIVATION_FOLD.findall(body)),
+            "questions": len(_question_blocks(body))}
+
+
+def misplaced_question_stems(body: str) -> list[str]:
+    """题干疑似写进 callout 标题的 [!question]（软警告原语）：标题以问号结尾、块内又有
+    正文行——quiz 收割取块内首行当题干，会把答案收进索引。标准写法：标题只放「自测」类
+    短语，题干做块内首行，答案进嵌套折叠 `> > [!success]-`。纯函数、无 I/O。"""
+    out: list[str] = []
+    for title, block, _f in _question_blocks(body):
+        if title.rstrip().endswith(("？", "?")) and _question_stem(title, block) != title:
+            out.append(title)
+    return out
+
+
 def unanswered_question_stems(body: str) -> list[str]:
     """有题无解的 [!question] 题干（软警告原语）：块内既无嵌套/相邻 callout 答案、
     也无 wikilink 指向解答（"never questions with no resolution"）。纯函数、无 I/O。"""

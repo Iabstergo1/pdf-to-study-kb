@@ -166,6 +166,12 @@ def resolve(mention: str, *, domain: str, registry: dict):
     return None
 
 
+def is_alias_hit(mention: str, cid: str, entry: dict) -> bool:
+    """mention 命中的是 alias 而非 canonical_name/canonical_id。alias 命中即静默合并，
+    若该 alias 是被囤进整体页的独立子概念名（会永久劫持后来者），这是唯一能提示的时刻。"""
+    return mention != cid and _norm(mention) != _norm(entry["canonical_name"])
+
+
 def create_concept(vault, *, domain: str, name: str, aliases=(), source_ref=None) -> Path:
     """新建骨架概念页（status: proposed；§8 最小结构）。页已存在则拒绝——必须走 merge。"""
     cid = canonical_id(domain, name, aliases)    # 稳定 ID（spec §6 不变：优先 ASCII 别名，去重键稳定）

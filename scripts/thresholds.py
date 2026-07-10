@@ -62,6 +62,7 @@ OCR_LOW_CONF_MEAN = _float("STUDY_KB_OCR_LOW_CONF_MEAN", 0.85)
 TOPIC_THRESHOLD = _int("STUDY_KB_TOPIC_THRESHOLD", 6)      # 本批≥N concept 却无 topic → 阻断
 LESSON_MIN_BODY = _int("STUDY_KB_LESSON_MIN_BODY", 80)     # lesson 正文最小字符
 CONTENT_MIN_BODY = _int("STUDY_KB_CONTENT_MIN_BODY", 120)  # concept/topic/comparison 正文最小字符（防残次页）
+TOPIC_MONOPOLY_RATIO = _float("STUDY_KB_TOPIC_MONOPOLY_RATIO", 0.6)  # 单 topic 收编域内概念占比≥ → 软警告（倾倒征兆）
 
 # ── 观测：preflight-eval 检测分布告警 ──
 DETECT_RATIO_HIGH = _float("STUDY_KB_DETECT_RATIO_HIGH", 0.90)  # needs_vision 比例> → 疑过召回（warn）

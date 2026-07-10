@@ -316,6 +316,35 @@ def test_lint_blocks_concepts_uncovered_by_topic(tmp_path):
     assert not any(v["rule"] == "concepts-uncovered" for v in vs2)
 
 
+def test_topic_coverage_monopoly_soft_signal(tmp_path):
+    # ②（软警告，非阻断）：单 topic 收编域内过高比例概念 = 链接倾倒糊弄 A2 的征兆
+    for i in range(10):
+        _page(tmp_path, f"domains/d/concepts/c{i}.md",
+              {"type": "concept", "status": "proposed", "canonical_id": f"concept.d.c{i}",
+               "canonical_name": f"C{i}", "domain": "d"}, f"# C{i}\n\n{_FILLED}")
+    _page(tmp_path, "topics/t1.md",
+          {"type": "topic", "status": "proposed", "domains": ["d"],
+           "related_concepts": [f"concept.d.c{i}" for i in range(10)]}, _TOPIC_OK)  # 一页收编全部
+    warns = wiki_gate.topic_coverage_monopoly(tmp_path)
+    assert warns and "topics/t1.md" in warns[0] and "10/10" in warns[0]
+    # 拆成两个 topic 各收一半 → 不再触发
+    _page(tmp_path, "topics/t1.md",
+          {"type": "topic", "status": "proposed", "domains": ["d"],
+           "related_concepts": [f"concept.d.c{i}" for i in range(5)]}, _TOPIC_OK)
+    _page(tmp_path, "topics/t2.md",
+          {"type": "topic", "status": "proposed", "domains": ["d"],
+           "related_concepts": [f"concept.d.c{i}" for i in range(5, 10)]}, _TOPIC_OK)
+    assert wiki_gate.topic_coverage_monopoly(tmp_path) == []
+    # 概念数不足 TOPIC_THRESHOLD 的小域不检查（单 topic 收编全部本来就合理）
+    for i in range(4, 10):
+        (tmp_path / "domains" / "d" / "concepts" / f"c{i}.md").unlink()
+    (tmp_path / "topics" / "t2.md").unlink()
+    _page(tmp_path, "topics/t1.md",
+          {"type": "topic", "status": "proposed", "domains": ["d"],
+           "related_concepts": [f"concept.d.c{i}" for i in range(4)]}, _TOPIC_OK)
+    assert wiki_gate.topic_coverage_monopoly(tmp_path) == []
+
+
 def test_lint_catches_published_placeholder_page(tmp_path):
     # A3：已发布页含占位（首轮漏发布的半成品，后续永不复检的洞）→ 仍要被抓出
     _page(tmp_path, "domains/d/concepts/old.md",

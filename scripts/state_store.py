@@ -46,7 +46,16 @@ CREATE TABLE IF NOT EXISTS ingest_progress (
   input_hash TEXT NOT NULL, started_at TEXT, finished_at TEXT, status TEXT NOT NULL,
   write_set_json TEXT, proposal_set_json TEXT, error TEXT, UNIQUE(source_id, window_id)
 );
+CREATE TABLE IF NOT EXISTS window_reads (
+  source_id TEXT NOT NULL, window_id TEXT NOT NULL, read_at TEXT NOT NULL,
+  UNIQUE(source_id, window_id)
+);
 """
+
+# 旧库升级护栏：window_reads 是后加表，读/写它的 API 先确保表存在（幂等，不动既有表）。
+_WINDOW_READS_DDL = ("CREATE TABLE IF NOT EXISTS window_reads ("
+                     "source_id TEXT NOT NULL, window_id TEXT NOT NULL, read_at TEXT NOT NULL,"
+                     " UNIQUE(source_id, window_id))")
 
 
 def connect(db_path) -> sqlite3.Connection:
@@ -405,6 +414,33 @@ def should_run_window(db_path, source_id: str, window_id: str, *, input_hash: st
         con.close()
 
 
+def record_window_read(db_path, source_id: str, window_id: str) -> None:
+    """show-window 留痕：读窗即记账（UPSERT 幂等）。空写集跳窗是否真读过窗内容，
+    靠这张表事后可审计——文档约束防自觉，这条防绕过。"""
+    init_db(db_path)  # show-window 可先于任何建库命令运行；幂等建目录+schema
+    con = connect(db_path)
+    try:
+        con.execute(_WINDOW_READS_DDL)
+        con.execute(
+            "INSERT INTO window_reads(source_id,window_id,read_at) VALUES (?,?,?)"
+            " ON CONFLICT(source_id,window_id) DO UPDATE SET read_at=excluded.read_at",
+            (source_id, window_id, _now()))
+        con.commit()
+    finally:
+        con.close()
+
+
+def window_read_ids(db_path, source_id: str) -> set[str]:
+    """已经 show-window 读过的窗口 id 集合。"""
+    con = connect(db_path)
+    try:
+        con.execute(_WINDOW_READS_DDL)
+        return {r["window_id"] for r in con.execute(
+            "SELECT window_id FROM window_reads WHERE source_id=?", (source_id,))}
+    finally:
+        con.close()
+
+
 def window_states(db_path, source_id: str) -> list[dict]:
     con = connect(db_path)
     try:
@@ -530,10 +566,14 @@ def source_stats(db_path, source_id: str) -> dict | None:
                 return None
 
         windows = {"total": 0, "finished": 0, "failed": 0, "running": 0,
+                   "empty_writes_unread": 0,
                    "last_attempt_seconds_total": 0.0, "last_attempt_seconds_max": 0.0}
         pages: set[str] = set()
+        con.execute(_WINDOW_READS_DDL)
+        read_ids = {r["window_id"] for r in con.execute(
+            "SELECT window_id FROM window_reads WHERE source_id=?", (source_id,))}
         for r in con.execute(
-                "SELECT status,started_at,finished_at,write_set_json FROM ingest_progress"
+                "SELECT window_id,status,started_at,finished_at,write_set_json FROM ingest_progress"
                 " WHERE source_id=?", (source_id,)):
             windows["total"] += 1
             if r["status"] in ("finished", "failed", "running"):
@@ -543,6 +583,7 @@ def source_stats(db_path, source_id: str) -> dict | None:
                 windows["last_attempt_seconds_total"] = round(
                     windows["last_attempt_seconds_total"] + d, 1)
                 windows["last_attempt_seconds_max"] = max(windows["last_attempt_seconds_max"], d)
+            ws = []
             if r["status"] == "finished" and r["write_set_json"]:
                 try:
                     ws = json.loads(r["write_set_json"])
@@ -550,6 +591,9 @@ def source_stats(db_path, source_id: str) -> dict | None:
                     ws = []
                 if isinstance(ws, list):
                     pages.update(str(x).replace("\\", "/") for x in ws)
+            # 静默遗漏信号：空写集收窗、又从未经 show-window 读过窗内容
+            if r["status"] == "finished" and not ws and r["window_id"] not in read_ids:
+                windows["empty_writes_unread"] += 1
 
         stages: dict[str, dict] = {}
         lint_failures = 0
@@ -586,6 +630,7 @@ def source_stats(db_path, source_id: str) -> dict | None:
             "notes": [
                 "窗口耗时=最后一次尝试（重启同窗会覆盖 started_at，非累计）",
                 "pages_estimate=finished 窗 write_set 去重计数（估算）",
+                "empty_writes_unread=空写集且从未 show-window 读过的窗（静默遗漏信号；旧源无读窗记录会偏高）",
             ],
         }
     finally:

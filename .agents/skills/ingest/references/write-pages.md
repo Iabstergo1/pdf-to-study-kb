@@ -60,6 +60,11 @@ Sub-unit command detail:
   today) at `domains/<home>/concepts/**` only — if `check-write` DENYs an unlisted home domain, that domain must be
   added to the audited allowlist first, don't force it elsewhere. High-value sub-concepts (纳什均衡 / 子博弈精炼纳什
   均衡 / 贝叶斯纳什均衡 / 完美贝叶斯均衡 / 逆向归纳) deserve **their own pages**, not just plaintext mentions.
+  **命名与 alias 卫生（aliases 是 resolve-concept 的命中键，写错会长期劫持后来者）：** ①工具级/实例级
+  概念**不得抢注通用名**——canonical_name 取它实际的名字（工具命令名/书内术语），通用学科名留给未来
+  真正讲该概念的书（例：讲某工具的"二分定位"功能就叫工具命令名，不叫「二分查找」）；②**别的概念的
+  名字绝不进本页 aliases**——组成部件/子概念（它们值得自己的页）塞进整体页的 aliases 后，未来对该
+  名字的 resolve 会永远命中错误的页并静默合并（`rebuild-registry` 对跨页撞名打 `[warn]`，见警即改）。
 - U5: self-check primitives in `scripts/page_rules.py` (see "lint hard rules" below). **Also verify every
   `[[full-path]]` wikilink target in this window's pages actually exists on disk (or is written in this same
   window)** — CJK long filenames are easy to mistype, and linking a page you *plan* to write later is a
@@ -113,10 +118,21 @@ Sub-unit command detail:
   supporting ones — weight by learning importance, do not write every page to the same length.** A model page
   reaches a usable result (assumptions → best-response → equilibrium solution → boundary conditions →
   interpretation). Vague summary pages are unfinished.
-- **Learning loop & source-page integrity:** a self-test must ship with answers / hints / back-links (a
-  collapsible `> [!question]` + the answer, or a link to the section that resolves it) — never questions with
-  no resolution (`lint` prints a non-blocking `[warn]` for unanswered questions; published questions are
-  harvested into the derived `quiz-index.generated.md` review entry — question stems + back-links only).
+- **Learning loop & source-page integrity:** a self-test must ship with answers / hints / back-links —
+  never questions with no resolution (`lint` prints a non-blocking `[warn]` for unanswered questions).
+  **自测题的标准形状是收割契约，不是排版偏好** —— 零 LLM 收割器按固定位置取内容进派生层
+  `quiz-index.generated.md`（只收题干+回链、不收答案），写错位置会把答案当题干收进复习索引：
+
+  ```markdown
+  > [!question] 自测
+  > <题干写在块内首行，以问号结尾>
+  > > [!success]- 参考答案
+  > > <答案只放嵌套折叠块里，读者点开才可见>
+  ```
+
+  三条硬位置：**标题只放「自测」类短语（题干绝不写进 callout 标题）**；题干做块内首个正文行；
+  答案只进嵌套折叠 `> > [!success]-`（或以 wikilink 指向解答小节），**绝不明文跟在题干后**——
+  答案可见会同时毁掉「先猜再看」装置与 quiz 索引（`lint` 对题干疑似写进标题打非阻断 `[warn]`）。
 - **装置预算（先于一切装置的硬约束）：** 正文默认**零装置**——散文必须先独立成立；除页尾自测与推导
   折叠（减重手段，不计预算）外，其余装置（案例解剖/定位段/具名命题/误区 warning/图）**一页至多启用
   一种**。负例：「参与者」这类基础概念页，零装置就是正确答案。**协议里提到某装置 ≠ 每页都要用**——

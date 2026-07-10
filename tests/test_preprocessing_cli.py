@@ -118,6 +118,19 @@ def test_show_window_prints_assets_header_by_default(tmp_path):
     assert "formula text page two" in r.stdout
 
 
+def test_show_window_records_window_read(tmp_path):
+    """show-window 留痕：读窗即在状态库记账（空写集跳窗是否真读过窗内容，事后可审计）。"""
+    _make_show_window_staging(tmp_path)
+    r = _run(["show-window", "--source", "book", "--window", "w0000"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    db = tmp_path / "pipeline-workspace" / "state" / "study-kb.sqlite"
+    assert state_store.window_read_ids(db, "book") == {"w0000"}
+    # 幂等：重复读同窗不炸、不重复记账
+    r2 = _run(["show-window", "--source", "book", "--window", "w0000"], tmp_path)
+    assert r2.returncode == 0, r2.stderr
+    assert state_store.window_read_ids(db, "book") == {"w0000"}
+
+
 def test_show_window_no_header_when_no_needs_vision_page(tmp_path):
     _make_show_window_staging(tmp_path)
     # w0000 只覆盖 page 1（needs_vision=false）→ 无资产头，纯文本

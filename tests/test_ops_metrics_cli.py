@@ -229,6 +229,48 @@ def test_ingest_stats_unknown_source_exits_nonzero(tmp_path):
     assert "unknown source" in (r.stdout + r.stderr)
 
 
+def test_ingest_stats_counts_empty_writes_unread(tmp_path):
+    """静默遗漏信号：finished 且空写集、又从未经 show-window 读过的窗计数。"""
+    db = _seed_stats_db(tmp_path)
+    con = state_store.connect(db)
+    try:
+        wins = [
+            ("s1", "w4", "h4", _iso(7), _iso(7, 1), "finished", json.dumps([]), None, None),
+            ("s1", "w5", "h5", _iso(8), _iso(8, 1), "finished", json.dumps([]), None, None),
+        ]
+        con.executemany(
+            "INSERT INTO ingest_progress(source_id,window_id,input_hash,started_at,finished_at,"
+            " status,write_set_json,proposal_set_json,error) VALUES (?,?,?,?,?,?,?,?,?)", wins)
+        con.commit()
+    finally:
+        con.close()
+    state_store.record_window_read(db, "s1", "w4")  # w4 读过再跳；w5 未读即跳
+
+    r = _run(tmp_path, "ingest-stats", "--source", "s1", "--json")
+    assert r.returncode == 0, r.stdout + r.stderr
+    stats = json.loads(r.stdout)
+    assert stats["windows"]["empty_writes_unread"] == 1
+
+
+def test_ingest_stats_device_usage_from_vault_pages(tmp_path):
+    """装置使用统计：扫本源 write_set 页计数命题/推导折叠/自测题（全书归零=偏好未执行信号）。"""
+    _seed_stats_db(tmp_path)
+    page = tmp_path / "wiki" / "domains" / "d" / "concepts" / "a.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "---\ntype: concept\nstatus: published\n---\n\n"
+        "**命题（先发优势）**：领导者利润严格更高。\n\n"
+        "> [!abstract]- 完整推导\n> 第一步……\n\n"
+        "> [!question] 自测\n> 为什么？\n> > [!success]- 参考答案\n> > 因为。\n",
+        encoding="utf-8")
+
+    r = _run(tmp_path, "ingest-stats", "--source", "s1", "--json")
+    assert r.returncode == 0, r.stdout + r.stderr
+    u = json.loads(r.stdout)["device_usage"]
+    assert (u["propositions"], u["derivation_folds"], u["questions"]) == (1, 1, 1)
+    assert u["pages_scanned"] == 1  # write_set 里其余页不在盘上，只扫到 a.md
+
+
 def test_ingest_stats_is_read_only(tmp_path):
     db = _seed_stats_db(tmp_path)
     before = _statuses(db)

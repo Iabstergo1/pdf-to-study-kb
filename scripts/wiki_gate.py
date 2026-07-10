@@ -112,12 +112,9 @@ def placeholder_violations(vault, pages: list[dict]) -> list[dict]:
     return vs
 
 
-def concepts_uncovered_by_topic(vault) -> list[str]:
-    """A2：概念全覆盖检查。复用 graph_model.topic_membership（与图谱社区同一套归属逻辑）算出
-    未被任何 topic 收编的 concept；仅对 concept-heavy 域（概念数 ≥ TOPIC_THRESHOLD）强制——
-    与 topics-missing 阈值一致。返回未覆盖的 concept page_path（排序）。
-    覆盖面 = vault 内 published ∪ proposed 的 concept/topic（proposed 页已在盘上，rglob 可见）。"""
-    import graph_model
+def _membership_nodes(vault) -> dict[str, dict]:
+    """topic 收编检查的共享输入：vault 内 published ∪ proposed 的 concept/topic 节点
+    （proposed 页已在盘上，rglob 可见），喂给 graph_model.topic_membership（唯一实现）。"""
     vault = Path(vault)
     nodes: dict[str, dict] = {}
     for f in sorted(vault.rglob("*.md")):
@@ -132,16 +129,53 @@ def concepts_uncovered_by_topic(vault) -> list[str]:
         nodes[rel] = {"type": meta["type"], "domain": meta.get("domain", "") or "",
                       "canonical_id": meta.get("canonical_id", "") or "",
                       "related_concepts": meta.get("related_concepts") or [], "links": links}
-    _membership, unassigned = graph_model.topic_membership(nodes)
+    return nodes
+
+
+def _concepts_by_domain(nodes: dict[str, dict]) -> dict[str, int]:
     n_by_dom: dict[str, int] = {}
     for n in nodes.values():
         if n["type"] == "concept":
             n_by_dom[n["domain"]] = n_by_dom.get(n["domain"], 0) + 1
+    return n_by_dom
+
+
+def concepts_uncovered_by_topic(vault) -> list[str]:
+    """A2：概念全覆盖检查。复用 graph_model.topic_membership（与图谱社区同一套归属逻辑）算出
+    未被任何 topic 收编的 concept；仅对 concept-heavy 域（概念数 ≥ TOPIC_THRESHOLD）强制——
+    与 topics-missing 阈值一致。返回未覆盖的 concept page_path（排序）。"""
+    import graph_model
+    nodes = _membership_nodes(vault)
+    _membership, unassigned = graph_model.topic_membership(nodes)
+    n_by_dom = _concepts_by_domain(nodes)
     out: list[str] = []
     for dom, cps in unassigned.items():
         if n_by_dom.get(dom, 0) >= thresholds.TOPIC_THRESHOLD:
             out.extend(sorted(cps))
     return sorted(out)
+
+
+def topic_coverage_monopoly(vault) -> list[str]:
+    """②软警告（非阻断）：单个 topic 收编了某域内过高比例的概念。A2 只查"链接存在"，
+    一页尾部链接倾倒即可便宜满足；收编占比异常是倾倒糊弄的征兆，提示人工复核收编质量
+    （按主题拆分/充实正文），不阻断发布。仅对 concept-heavy 域（≥ TOPIC_THRESHOLD）检查。"""
+    import graph_model
+    nodes = _membership_nodes(vault)
+    membership, _unassigned = graph_model.topic_membership(nodes)
+    n_by_dom = _concepts_by_domain(nodes)
+    out: list[str] = []
+    for tp in sorted(membership):
+        by_dom: dict[str, int] = {}
+        for cp in membership[tp]:
+            d = nodes[cp]["domain"]
+            by_dom[d] = by_dom.get(d, 0) + 1
+        for d, n in sorted(by_dom.items()):
+            total = n_by_dom.get(d, 0)
+            if total >= thresholds.TOPIC_THRESHOLD and n / total >= thresholds.TOPIC_MONOPOLY_RATIO:
+                out.append(f"{tp} 一页收编了域 {d} 的 {n}/{total} 个概念"
+                           f"（≥{thresholds.TOPIC_MONOPOLY_RATIO:.0%}）——链接倾倒给不了读者真实的"
+                           "导航结构，请按主题拆分 topic 或在正文里实质性收编")
+    return out
 
 
 def stray_files(vault) -> list[str]:

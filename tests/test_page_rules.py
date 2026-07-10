@@ -168,6 +168,40 @@ def test_extract_question_stems():
     assert page_rules.extract_question_stems("无题正文。\n") == []
 
 
+def test_device_usage_counts():
+    body = ("正文。**命题（先发优势）**：领导者利润严格更高。\n\n"
+            "结论：均衡唯一。\n\n"
+            "> [!abstract]- 完整推导\n"
+            "> 第一步……\n\n"
+            "> [!question] 自测\n"
+            "> 为什么均衡唯一？\n"
+            "> > [!success]- 参考答案\n"
+            "> > 因为最优反应函数只有一个交点。\n")
+    assert page_rules.device_usage(body) == {
+        "propositions": 1, "derivation_folds": 1, "questions": 1}
+    assert page_rules.device_usage("普通散文。\n") == {
+        "propositions": 0, "derivation_folds": 0, "questions": 0}
+
+
+def test_misplaced_question_stems():
+    # 题干写进 callout 标题 + 正文另有行（quiz 收割会取正文首行=答案）→ 命中
+    bad = ("> [!question] git bisect 最多需要测试几次？\n"
+           "> 大约 7 次，二分每次排除一半。\n")
+    assert page_rules.misplaced_question_stems(bad) == ["git bisect 最多需要测试几次？"]
+    # 标准写法：标题是"自测"短语、题干在正文首行 → 不命中
+    good = ("> [!question] 自测\n"
+            "> 为什么价格会压到边际成本？\n"
+            "> > [!success]- 参考答案\n"
+            "> > 因为存在单方面偏离动机。\n")
+    assert page_rules.misplaced_question_stems(good) == []
+    # 标题以问号结尾但没有正文行（收割兜底取标题，题干不会收错）→ 不命中
+    assert page_rules.misplaced_question_stems("> [!question] 请问结论是什么？\n") == []
+    # 标题不以问号结尾 + 有正文行 → 不命中（正文行就是题干）
+    assert page_rules.misplaced_question_stems(
+        "> [!question] 进阶\n> 三家企业时结论如何变化？\n") == []
+    assert page_rules.misplaced_question_stems("普通正文。\n") == []
+
+
 def test_extract_propositions():
     body = ("正文。**命题（先发优势）**：斯塔克尔伯格领导者产量为古诺的 1.5 倍，利润严格更高。\n\n"
             "另一段 **命题（伯特兰悖论）**: 两家同质竞争即可把价格压至边际成本。\n")
