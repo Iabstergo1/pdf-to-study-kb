@@ -31,6 +31,9 @@ After building whole-book understanding from `chapters.json`, write a `## 路由
 - **Judgement signals:** chapter title + opening text, plus the deterministic signals preprocessing already
   computed (formula density, table density, needs_vision distribution in `parse_report.json`).
 - Unsure? Mark the chapter `待定` and decide when its first window is actually read — never force a label.
+- **裸"跳过"禁止入表：**"弱化"不是 §2 taxonomy 中的类型，只是 `purpose.md` 的取舍原则；写法取向列
+  **不得只写"跳过"二字**——弱化章节必须写明跳过理由或最小提炼目标（如"纯目录，无可复用概念"、
+  "只提炼 X 一个概念"）。路由表授权的是**写作取向**，从不授权免读跳过任何窗口。
 
 ## 2. Taxonomy: type → recommended writing approach (5 types max; 取向 not 骨架)
 
@@ -57,6 +60,17 @@ one fixed-format line to that window's digest entry:
 Deviation is **not** a failure — it is evidence the taxonomy is aging. Recurring deviations with the same
 reason are exactly what the skill-evolve loop consumes to revise this manual (add a type / adjust a
 recommendation), adopted only by a human.
+
+**空写集窗口（`window-done --writes '[]'`）的审计规则：** 跳过一个窗口是合法操作，但前提永远是
+**先经 `show-window` 读过该窗口的真实内容**再判断——路由表是章节级建议，跳过决策只能在窗口级、
+读过内容后做出；按章节标注批量跳过而不读窗口，属于违反本手册的执行错误。决定空写集时，在 digest
+该窗口条目记一行固定格式：
+
+```text
+[window-skip] window=<id> 章=<ch> 依据=<一句话：为什么此窗口无可提炼内容>
+```
+
+连续多个窗口空写集而无 `[window-skip]` 记录，是复盘（kb-postmortem）应捕获的静默遗漏信号。
 
 ## 4. Relationship to other protocols (no conflicts by design)
 
