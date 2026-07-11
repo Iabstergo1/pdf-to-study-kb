@@ -148,21 +148,61 @@ def test_unaccounted_write_requires_ledger_not_just_source_refs(tmp_path):
     assert mdpage.read_page(topic)[0]["status"] == "published"
 
 
-def test_unaccounted_write_accepts_query_session_ledger(tmp_path):
-    """kb-save 的记账通道：query-session 的 candidate_write_set.json 等价于窗口记账。"""
+def _mk_saved_session(tmp_path, run_id, writes):
+    """构造一个过 saved 契约的 query-session（Q1：question/answer/decision + 三个 JSON 清单）。"""
     import json as _json
+    sess = tmp_path / "pipeline-workspace/query-sessions" / run_id
+    sess.mkdir(parents=True)
+    (sess / "question.md").write_text("问：跨源结论？\n", encoding="utf-8")
+    (sess / "answer.md").write_text("答：见综合页。\n", encoding="utf-8")
+    (sess / "decision.md").write_text("为何保存/写了哪些页/证据/为何不污染概念。\n", encoding="utf-8")
+    (sess / "related_pages.json").write_text("[]", encoding="utf-8")
+    (sess / "candidate_write_set.json").write_text(
+        _json.dumps(writes, ensure_ascii=False), encoding="utf-8")
+    (sess / "evidence_refs.json").write_text('["s §1"]', encoding="utf-8")
+    return sess
+
+
+def test_kb_save_session_scoped_membership_and_accounting(tmp_path):
+    """P1b：ingest 不再读 query-session 台账（历史会话不得代记账）；kb-save 走
+    `lint --source kb-save --session <run_id>`——该会话的 candidate 集同时决定
+    membership 与 accounting，集外页留给其所属来源。"""
     _ingest_ready(tmp_path, sid="s")
     syn = tmp_path / "wiki/synthesis/跨源综合乙.md"
     mdpage.write_page(syn, {"type": "synthesis", "status": "proposed", "managed_by": "pipeline",
                             "title": "跨源综合乙", "source_refs": [{"source": "s"}]}, _TOPIC_BODY)
-    sess = tmp_path / "pipeline-workspace/query-sessions/r1"
-    sess.mkdir(parents=True)
-    (sess / "candidate_write_set.json").write_text(
-        _json.dumps(["synthesis/跨源综合乙.md"], ensure_ascii=False), encoding="utf-8")
+    _mk_saved_session(tmp_path, "r1", ["synthesis/跨源综合乙.md"])
+    # ① ingest 路径：session 文件存在也不算数——unaccounted-write 阻断
     assert _run(["ingest-done", "--source", "s"], tmp_path).returncode == 0
     r = _run(["lint", "--source", "s"], tmp_path)
-    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.returncode != 0 and "unaccounted-write" in (r.stdout + r.stderr)
+    # ② kb-save 会话路径：membership=accounting=session 集 → 发布
+    r2 = _run(["lint", "--source", "kb-save", "--session", "r1"], tmp_path)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
     assert mdpage.read_page(syn)[0]["status"] == "published"
+
+
+def test_kb_save_lint_requires_session_and_saved_contract(tmp_path):
+    """P1b 守卫：无 --session 拒绝；session 未过 saved 契约（缺 decision.md）拒绝；
+    集外的他源 proposed 页不被 kb-save 顺手发布。"""
+    _ingest_ready(tmp_path, sid="s")
+    other = tmp_path / "wiki/topics/他源主题.md"
+    mdpage.write_page(other, {"type": "topic", "status": "proposed", "managed_by": "pipeline",
+                              "title": "他源主题", "source_refs": [{"source": "s"}]}, _TOPIC_BODY)
+    syn = tmp_path / "wiki/synthesis/跨源综合丙.md"
+    mdpage.write_page(syn, {"type": "synthesis", "status": "proposed", "managed_by": "pipeline",
+                            "title": "跨源综合丙", "source_refs": [{"source": "s"}]}, _TOPIC_BODY)
+    r0 = _run(["lint", "--source", "kb-save"], tmp_path)
+    assert r0.returncode != 0 and "--session" in (r0.stdout + r0.stderr)
+    sess = _mk_saved_session(tmp_path, "r2", ["synthesis/跨源综合丙.md"])
+    (sess / "decision.md").unlink()
+    r1 = _run(["lint", "--source", "kb-save", "--session", "r2"], tmp_path)
+    assert r1.returncode != 0 and "decision.md" in (r1.stdout + r1.stderr)
+    (sess / "decision.md").write_text("补齐决策记录。\n", encoding="utf-8")
+    r2 = _run(["lint", "--source", "kb-save", "--session", "r2"], tmp_path)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    assert mdpage.read_page(syn)[0]["status"] == "published"
+    assert mdpage.read_page(other)[0]["status"] == "proposed"  # 集外页留给来源 s 自己收尾
 
 
 def test_vault_lint_cli_reports_render_safety(tmp_path):

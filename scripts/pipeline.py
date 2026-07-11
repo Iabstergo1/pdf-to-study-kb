@@ -1260,6 +1260,23 @@ def cmd_lint(args):
     from datetime import date
     db = _vault_state_db()
     vault = _vault_dir()
+    # kb-save 会话模式（P1b）：发布范围与记账只认 --session 指定会话的 candidate_write_set.json。
+    # 历史/未保存/其他 run_id 一律不得代记账；kb-save 不是状态机 source，跳过 stage 记录。
+    session_mode = args.source == "kb-save"
+    session_set: set[str] = set()
+    if session_mode:
+        import query_session
+        if not getattr(args, "session", None):
+            raise SystemExit("lint --source kb-save 必须带 --session <run_id>：kb-save 的发布范围"
+                             "与记账只认该会话的 candidate_write_set.json（历史/未保存会话不得代记账）")
+        sess_dir = _workspace_root() / "pipeline-workspace/query-sessions" / args.session
+        problems = query_session.check_session(sess_dir, saved=True)
+        if problems:
+            for pb in problems:
+                print(f"[Q1] {pb}")
+            raise SystemExit(f"kb-save session {args.session} 未过 saved 契约（先补齐再 lint）")
+        session_set = {str(x).replace("\\", "/") for x in
+                       json.loads((sess_dir / "candidate_write_set.json").read_text(encoding="utf-8"))}
     proposed_all = wiki_gate.collect_proposed(vault) if vault.exists() else []
     for s in (wiki_gate.stray_files(vault) if vault.exists() else []):   # C4：杂物软警告（非阻断）
         print(f"[warn] 杂物文件（疑似 Obsidian 点坏链误建，可删）：{s}")
@@ -1278,7 +1295,17 @@ def cmd_lint(args):
         written_by[sid] = ws
     proposed, orphans = [], []
     for p in proposed_all:
-        if wiki_gate.belongs_to_source(p["rel_path"], p["meta"], args.source, written_by[args.source]):
+        if session_mode:
+            # 会话模式 membership：只认 session 集（页面 source_refs 指向真实来源，
+            # 必须先于"归属其他 source"分支判定，否则会话页会被让给原来源）
+            if p["rel_path"] in session_set:
+                proposed.append(p)
+            elif any(wiki_gate.belongs_to_source(p["rel_path"], p["meta"], s, written_by[s])
+                     for s in source_ids if s != args.source):
+                print(f"[skip] proposed 页归属其他 source，留待其所属 source 收尾: {p['rel_path']}")
+            else:
+                orphans.append(p)
+        elif wiki_gate.belongs_to_source(p["rel_path"], p["meta"], args.source, written_by[args.source]):
             proposed.append(p)
         elif any(wiki_gate.belongs_to_source(p["rel_path"], p["meta"], s, written_by[s])
                  for s in source_ids if s != args.source):
@@ -1325,18 +1352,19 @@ def cmd_lint(args):
         f"{p['rel_path']}:{hashlib.sha256(p['body'].encode('utf-8')).hexdigest()}"
         for p in proposed) + "\n!orphans:" + ",".join(p["rel_path"] for p in orphans)
     ).encode("utf-8")).hexdigest()
-    if not state_store.should_run_stage(db, args.source, "lint", input_hash=ihash):
-        print("[skip] lint up-to-date")
-        return
-    state_store.start_stage(db, args.source, "lint", input_hash=ihash)
+    if not session_mode:
+        if not state_store.should_run_stage(db, args.source, "lint", input_hash=ihash):
+            print("[skip] lint up-to-date")
+            return
+        state_store.start_stage(db, args.source, "lint", input_hash=ihash)
     violations = [{"path": p["rel_path"], "rule": "unattributed-proposed",
                    "detail": "proposed 页不归属任何 source（缺 window-done --writes 记账"
                              "或 frontmatter 归属），fail-closed 阻断发布"}
                   for p in orphans] + wiki_gate.lint_pages(vault, proposed)
     # 归属 ≠ 记账（契约对齐）：本轮 proposed 的导航/综合层页（topic/comparison/synthesis/
-    # overview）凭 source_refs 进批次，但写作动作必须入台账——窗口 write_set（ingest）或
-    # query-session candidate_write_set（kb-save）。不追溯 published 页。
-    accounted = set(written_by[args.source]) | _query_session_writes()
+    # overview）必须入台账——ingest 只认本源窗口 write_set，kb-save 只认本会话 candidate 集
+    # （P1b：历史/未保存会话不得代记账，两条通道互不越界）。不追溯 published 页。
+    accounted = session_set if session_mode else set(written_by[args.source])
     for p in proposed:
         if p["meta"].get("type") in ("topic", "comparison", "synthesis", "overview") and \
                 not wiki_gate.is_accounted_write(p["rel_path"], accounted):
@@ -1381,8 +1409,9 @@ def cmd_lint(args):
             "\n" + rollback_note +
             "\n处理后回流：修复 → 重新 /ingest（状态机已允许 lint failed → ingest_waiting）。\n",
             encoding="utf-8", newline="\n")
-        state_store.fail_stage(db, args.source, "lint",
-                               error=f"{len(violations)} lint violations")
+        if not session_mode:
+            state_store.fail_stage(db, args.source, "lint",
+                                   error=f"{len(violations)} lint violations")
         try:
             _refresh_skill_backlog(db)  # 自动 harvest：把刚记的失败聚进 skill backlog（best-effort）
         except Exception:
@@ -1424,8 +1453,12 @@ def cmd_lint(args):
     snap_dir = _workspace_root() / "pipeline-workspace/snapshots" / args.source
     if snap_dir.exists():
         shutil.rmtree(snap_dir)
-    state_store.complete_stage(db, args.source, "lint", output_hash=ihash)
-    print(f"[OK] lint passed: promoted {n} pages; index/registry/aliases rebuilt; source published")
+    if session_mode:
+        print(f"[OK] lint passed: promoted {n} pages; index/registry/aliases rebuilt;"
+              f" kb-save session {args.session} published")
+    else:
+        state_store.complete_stage(db, args.source, "lint", output_hash=ihash)
+        print(f"[OK] lint passed: promoted {n} pages; index/registry/aliases rebuilt; source published")
 
 
 def cmd_promotion_candidates(args):
@@ -1614,24 +1647,6 @@ def cmd_proposals_resolve(args):
         return
     _refresh_skill_backlog(db)
     print(f"[OK] proposals-resolve: {res['resolved']} rows -> resolved; backlog.yaml 已刷新")
-
-
-def _query_session_writes() -> set[str]:
-    """kb-save 的记账通道（unaccounted-write 的第二本台账）：query-sessions/*/
-    candidate_write_set.json（Q1 契约文件，保存后必非空）。坏 JSON 静默跳过——
-    session 契约完整性由 check-session 负责，不在 lint 里重复裁决。"""
-    import json as _json
-    out: set[str] = set()
-    base = _workspace_root() / "pipeline-workspace/query-sessions"
-    if base.exists():
-        for f in base.glob("*/candidate_write_set.json"):
-            try:
-                data = _json.loads(f.read_text(encoding="utf-8"))
-            except (ValueError, OSError):
-                continue
-            if isinstance(data, list):
-                out.update(str(x).replace("\\", "/") for x in data)
-    return out
 
 
 def cmd_vault_lint(args):
@@ -1902,6 +1917,8 @@ def main():
     spp.add_argument("--path", required=True)
     lp = subparsers.add_parser("lint", help="收尾门禁：lint proposed → promote 或 回滚+Review-Queue")
     lp.add_argument("--source", required=True)
+    lp.add_argument("--session", help="kb-save 会话模式必填：--source kb-save 时只认该 run_id 的"
+                                      " candidate_write_set.json 定发布范围与记账")
     pcp = subparsers.add_parser("promotion-candidates", help="检测跨域提升候选（--propose 落 Review-Queue）")
     pcp.add_argument("--propose", action="store_true")
     pmp = subparsers.add_parser("promote-concept", help="人工确认后机械提升一个概念为 shared")

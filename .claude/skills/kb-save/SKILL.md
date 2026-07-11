@@ -30,9 +30,11 @@ skill only orchestrates, surfaces acceptance, and marks failure stops.
 ## 4. Dependencies
 
 - CLI: `resolve-concept`, `check-write`, `snapshot-page`, `check-session --saved`; the finishing publish is decided by `lint`.
-- **记账契约：** 写下的每个 topic/comparison/synthesis/overview 页必须列入本 session 的
-  `candidate_write_set.json`——它是 kb-save 的处理台账（与 ingest 的窗口 `--writes` 对等），
-  `lint` 按 `unaccounted-write` 硬校验；`source_refs` 只定归属，不算记账。
+- **记账契约（会话作用域）：** 写下的每个页面必须列入本 session 的 `candidate_write_set.json`——
+  它是 kb-save 的处理台账（与 ingest 的窗口 `--writes` 对等），并在
+  `lint --source kb-save --session <run_id>` 中**同时决定发布范围（membership）与记账**；
+  历史/未保存/其他 run_id 的会话不得代记账，普通 ingest 的 lint 也完全不读会话台账；
+  `source_refs` 只定归属，不算记账。
 - Protocols: `save-back-policy.md` (admission gate), `schema.md` (page structure), `concept-resolution.md` (concept resolution).
 - Write discipline matches `ingest`: concepts merge on hit, never duplicate; never hand-write derived files (`aliases.md` retired — aliases in frontmatter). **新建 topic/comparison/synthesis 用中文文件名（与 `title` 一致，如 `comparisons/<甲> vs <乙>.md`）并带 `source_refs` 溯源；正文走高信息密度的学术散文、句式有起伏、结构由 purpose 与内容自然决定（不再有强制小节标题，D-4）；发布正文不嵌源图（D-1）——见 `ingest` 的 `write-pages.md`「写作风格」与「页面文件名用中文」。**
 
@@ -52,7 +54,9 @@ python scripts/pipeline.py snapshot-page --source kb-save --path <vault-rel-path
 python scripts/pipeline.py check-session --id <run_id> --saved
 ```
 
-After saving, prompt the user to run `python scripts/pipeline.py lint --source kb-save` (or the project's current finishing gate); do not bypass two-phase publish.
+After saving, prompt the user to run `python scripts/pipeline.py lint --source kb-save --session <run_id>`
+(the finishing gate first re-checks the saved-mode session contract, then lints/promotes **only the pages
+listed in that session's `candidate_write_set.json`**); do not bypass two-phase publish.
 
 ## 7. Workflow
 
