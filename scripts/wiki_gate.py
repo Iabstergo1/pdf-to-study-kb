@@ -259,8 +259,12 @@ def stray_files(vault) -> list[str]:
     return out
 
 
-def lint_pages(vault, pages: list[dict]) -> list[dict]:
-    """返回违规列表 [{path, rule, detail}]；空列表 = 门禁通过。"""
+def lint_pages(vault, pages: list[dict], *, phase_e: bool = True) -> list[dict]:
+    """返回违规列表 [{path, rule, detail}]；空列表 = 门禁通过。
+    phase_e=False（kb-save 会话模式）：跳过 ingest 阶段 E 的概念批义务
+    （L7-synthesis-missing / topics-missing / overview-seed）——kb-save 的准入门禁
+    已保证产出为综合层形态，且不背 overview 维护义务；A2 概念收编等 vault 级
+    不变量照常检查。"""
     vault = Path(vault)
     vs: list[dict] = []
 
@@ -325,23 +329,25 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
                 hit(rel, "legacy-concept-scaffold",
                     f"已废除的模板骨架成套复活（命中旧标题：{'、'.join(legacy)}）——正文应按内容"
                     "散文组织（D-4 无强制小节；单个自然标题合法，成套旧骨架阻断）")
-    # 综合层缺失（阶段 E 是一等产物，spec §3）：本批产出 concept 却无任何综合层页 → fail-closed
-    n_skip = concepts_without_synthesis(pages)
-    if n_skip:
-        hit("(synthesis-layer)", "L7-synthesis-missing",
-            f"本批产出 {n_skip} 个 concept 但无综合层页（overview/topic/comparison/synthesis）；"
-            "阶段 E 必做——至少更新 overview，再发布")
-    # 分类层缺失：概念多却无 topic 主题页 → fail-closed（扁平概念之上的导航层）
-    n_flat = concept_heavy_without_topic(pages)
-    if n_flat:
-        hit("(topics)", "topics-missing",
-            f"本批产出 {n_flat} 个 concept 却无 topic 主题页（≥{thresholds.TOPIC_THRESHOLD} 概念须按主题聚成 topic 页做分类层）；"
-            "阶段 E 必做——把概念按主题分组")
+    # ── 阶段 E 概念批义务（ingest 专属；kb-save 会话模式 phase_e=False 跳过）──
+    if phase_e:
+        # 综合层缺失（阶段 E 是一等产物，spec §3）：本批产出 concept 却无任何综合层页 → fail-closed
+        n_skip = concepts_without_synthesis(pages)
+        if n_skip:
+            hit("(synthesis-layer)", "L7-synthesis-missing",
+                f"本批产出 {n_skip} 个 concept 但无综合层页（overview/topic/comparison/synthesis）；"
+                "阶段 E 必做——至少更新 overview，再发布")
+        # 分类层缺失：概念多却无 topic 主题页 → fail-closed（扁平概念之上的导航层）
+        n_flat = concept_heavy_without_topic(pages)
+        if n_flat:
+            hit("(topics)", "topics-missing",
+                f"本批产出 {n_flat} 个 concept 却无 topic 主题页（≥{thresholds.TOPIC_THRESHOLD} 概念须按主题聚成 topic 页做分类层）；"
+                "阶段 E 必做——把概念按主题分组")
     # A1+A3：占位符残留（半成品）→ 阻断（含已 published 同类页复检）
     vs += placeholder_violations(vault, pages)
     # overview 种子复检：本批产出 concept（真实内容源）时，vault 入口页不得仍是未填充的
     # init-vault 种子（尖括号占位/待填写占位）。防"重写被回滚吃掉后无人复查"再次静默发布。
-    if any(p["meta"].get("type") == "concept" for p in pages):
+    if phase_e and any(p["meta"].get("type") == "concept" for p in pages):
         ov = vault / "overview.md"
         if ov.exists():
             _m, ov_body = mdpage.read_page(ov)

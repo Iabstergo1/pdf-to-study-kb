@@ -1360,7 +1360,8 @@ def cmd_lint(args):
     violations = [{"path": p["rel_path"], "rule": "unattributed-proposed",
                    "detail": "proposed 页不归属任何 source（缺 window-done --writes 记账"
                              "或 frontmatter 归属），fail-closed 阻断发布"}
-                  for p in orphans] + wiki_gate.lint_pages(vault, proposed)
+                  for p in orphans] + wiki_gate.lint_pages(vault, proposed,
+                                                           phase_e=not session_mode)
     # 归属 ≠ 记账（契约对齐）：本轮 proposed 的导航/综合层页（topic/comparison/synthesis/
     # overview）必须入台账——ingest 只认本源窗口 write_set，kb-save 只认本会话 candidate 集
     # （P1b：历史/未保存会话不得代记账，两条通道互不越界）。不追溯 published 页。
@@ -1372,9 +1373,26 @@ def cmd_lint(args):
                                "detail": "本轮 proposed 的导航/综合层页未入处理台账——ingest 补"
                                          "某窗口的 window-done --writes，kb-save 补 query-session"
                                          " 的 candidate_write_set.json；source_refs 只定归属不算记账"})
-    # 来源台账完整性：本批产出 concept（真实内容源）却没有 sources/<src>.md 台账页 → 阻断。
+    if session_mode:
+        # 会话完整性（fail-closed）：candidate 每条路径都必须真实在批（存在、proposed、身份匹配）。
+        # 路径拼错/页面未落盘/已被其他会话重写时绝不"promoted 0 还报成功"，也绝不代发他会话内容。
+        in_batch = {p["rel_path"] for p in proposed}
+        for missing in sorted(session_set - in_batch):
+            violations.append({"path": missing, "rule": "session-candidate-missing",
+                               "detail": "candidate_write_set 列出的路径不在本批（不存在/非 proposed"
+                                         "（可能已发布）/归属他源）——candidate 完整性 fail-closed，"
+                                         "不得部分发布"})
+        for p in proposed:
+            if p["meta"].get("save_session") != args.session:
+                violations.append({"path": p["rel_path"], "rule": "session-identity-mismatch",
+                                   "detail": f"页面 frontmatter save_session="
+                                             f"{p['meta'].get('save_session')!r} ≠ 本会话"
+                                             f" {args.session!r}——同路径已被其他会话重写或身份标记"
+                                             "缺失；candidate 只记路径，内容身份靠此标记，不符不得代发"})
+    # 来源台账完整性（ingest 专属；kb-save 不是内容来源、不该有 sources/kb-save.md）：
+    # 本批产出 concept（真实内容源）却没有 sources/<src>.md 台账页 → 阻断。
     # 曾发生：整本书发布完成而 source 页从未写过，"来过哪些书"台账缺口无任何门禁提示。
-    if any(p["meta"].get("type") == "concept" for p in proposed) and \
+    if not session_mode and any(p["meta"].get("type") == "concept" for p in proposed) and \
             not (vault / "sources" / f"{args.source}.md").exists():
         violations.append({"path": f"sources/{args.source}.md", "rule": "source-page-missing",
                            "detail": "本批产出 concept 但 sources/<src>.md 来源台账页不存在；"
@@ -1421,7 +1439,8 @@ def cmd_lint(args):
     n = wiki_gate.promote(vault, proposed)
     registry, errors, _w = concept_store.build_registry(concept_store.scan_concept_pages(vault))
     if errors:
-        state_store.fail_stage(db, args.source, "lint", error="; ".join(errors))
+        if not session_mode:  # kb-save 不是状态机 source，不写 stage 行
+            state_store.fail_stage(db, args.source, "lint", error="; ".join(errors))
         raise SystemExit("registry corrupt: " + "; ".join(errors))
     concept_store.write_registry(vault, registry)
     concept_store.remove_stale_aliases(vault)

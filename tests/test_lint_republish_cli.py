@@ -170,7 +170,8 @@ def test_kb_save_session_scoped_membership_and_accounting(tmp_path):
     _ingest_ready(tmp_path, sid="s")
     syn = tmp_path / "wiki/synthesis/跨源综合乙.md"
     mdpage.write_page(syn, {"type": "synthesis", "status": "proposed", "managed_by": "pipeline",
-                            "title": "跨源综合乙", "source_refs": [{"source": "s"}]}, _TOPIC_BODY)
+                            "title": "跨源综合乙", "save_session": "r1",
+                            "source_refs": [{"source": "s"}]}, _TOPIC_BODY)
     _mk_saved_session(tmp_path, "r1", ["synthesis/跨源综合乙.md"])
     # ① ingest 路径：session 文件存在也不算数——unaccounted-write 阻断
     assert _run(["ingest-done", "--source", "s"], tmp_path).returncode == 0
@@ -191,7 +192,8 @@ def test_kb_save_lint_requires_session_and_saved_contract(tmp_path):
                               "title": "他源主题", "source_refs": [{"source": "s"}]}, _TOPIC_BODY)
     syn = tmp_path / "wiki/synthesis/跨源综合丙.md"
     mdpage.write_page(syn, {"type": "synthesis", "status": "proposed", "managed_by": "pipeline",
-                            "title": "跨源综合丙", "source_refs": [{"source": "s"}]}, _TOPIC_BODY)
+                            "title": "跨源综合丙", "save_session": "r2",
+                            "source_refs": [{"source": "s"}]}, _TOPIC_BODY)
     r0 = _run(["lint", "--source", "kb-save"], tmp_path)
     assert r0.returncode != 0 and "--session" in (r0.stdout + r0.stderr)
     sess = _mk_saved_session(tmp_path, "r2", ["synthesis/跨源综合丙.md"])
@@ -203,6 +205,63 @@ def test_kb_save_lint_requires_session_and_saved_contract(tmp_path):
     assert r2.returncode == 0, r2.stdout + r2.stderr
     assert mdpage.read_page(syn)[0]["status"] == "published"
     assert mdpage.read_page(other)[0]["status"] == "proposed"  # 集外页留给来源 s 自己收尾
+
+
+def test_kb_save_session_content_identity_and_completeness(tmp_path):
+    """P1b 边界：candidate 只记路径没有内容身份 → 页面 frontmatter `save_session` 定身份。
+    两会话同路径互不代发；candidate 路径缺失 fail-closed（不得 promoted 0 还报成功）。"""
+    _ingest_ready(tmp_path, sid="s")
+    syn = tmp_path / "wiki/synthesis/同路径综合.md"
+    mdpage.write_page(syn, {"type": "synthesis", "status": "proposed", "managed_by": "pipeline",
+                            "title": "同路径综合", "save_session": "ra",
+                            "source_refs": [{"source": "s"}]}, _TOPIC_BODY)
+    _mk_saved_session(tmp_path, "ra", ["synthesis/同路径综合.md"])
+    # session B 随后合规重写同一路径（换上自己的身份标记 + 自己的台账）
+    _mk_saved_session(tmp_path, "rb", ["synthesis/同路径综合.md"])
+    mdpage.write_page(syn, {"type": "synthesis", "status": "proposed", "managed_by": "pipeline",
+                            "title": "同路径综合", "save_session": "rb",
+                            "source_refs": [{"source": "s"}]},
+                      _TOPIC_BODY + "\n这是 B 会话重写后的增补段落，与 A 的内容不同。\n")
+    # 执行 A 的 lint → 身份不匹配 fail-closed；B 的内容不被 A 代发
+    ra = _run(["lint", "--source", "kb-save", "--session", "ra"], tmp_path)
+    assert ra.returncode != 0 and "session-identity-mismatch" in (ra.stdout + ra.stderr)
+    assert mdpage.read_page(syn)[0]["status"] == "proposed"
+    # 执行 B 的 lint → 发布的是 B 的内容
+    rb = _run(["lint", "--source", "kb-save", "--session", "rb"], tmp_path)
+    assert rb.returncode == 0, rb.stdout + rb.stderr
+    meta, body = mdpage.read_page(syn)
+    assert meta["status"] == "published" and "B 会话重写" in body
+    # candidate 列了盘上不存在的路径 → fail-closed
+    _mk_saved_session(tmp_path, "rc", ["synthesis/不存在的页.md"])
+    rc = _run(["lint", "--source", "kb-save", "--session", "rc"], tmp_path)
+    assert rc.returncode != 0 and "session-candidate-missing" in (rc.stdout + rc.stderr)
+
+
+def test_kb_save_session_publishes_concept_page(tmp_path):
+    """P1b 边界：kb-save 允许产出 concept 页——不得被 ingest 专属的 source-page-missing
+    （sources/kb-save.md 不存在也不该存在）误拦。"""
+    _ingest_ready(tmp_path, sid="s")
+    concept_body = ("会话概念的散文定义正文，先给直觉再给边界条件，说明它与既有概念的关系；"
+                    "这一段足够长以越过残次页兜底检查的字符下限，并补充一个可核对的最小例子："
+                    "当且仅当查询会话中出现了可复用的新概念时，kb-save 才会落一个概念页。"
+                    "再补一句以稳定超过一百二十字符：概念页的价值在于给出可复用的判断标准，"
+                    "而不是复述查询会话里的一次性事实，后者按保存准入门禁本就不该入库。\n")
+    c = tmp_path / "wiki/domains/misc/concepts/会话概念.md"
+    mdpage.write_page(c, {"type": "concept", "status": "proposed", "managed_by": "pipeline",
+                          "canonical_id": "concept.misc.session-concept",
+                          "canonical_name": "会话概念", "domain": "misc",
+                          "save_session": "rk", "source_refs": [{"source": "s"}]}, concept_body)
+    syn = tmp_path / "wiki/synthesis/会话综合.md"
+    mdpage.write_page(syn, {"type": "synthesis", "status": "proposed", "managed_by": "pipeline",
+                            "title": "会话综合", "save_session": "rk",
+                            "source_refs": [{"source": "s"}]}, _TOPIC_BODY)
+    _mk_saved_session(tmp_path, "rk",
+                      ["domains/misc/concepts/会话概念.md", "synthesis/会话综合.md"])
+    r = _run(["lint", "--source", "kb-save", "--session", "rk"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "source-page-missing" not in (r.stdout + r.stderr)
+    assert mdpage.read_page(c)[0]["status"] == "published"
+    assert mdpage.read_page(syn)[0]["status"] == "published"
 
 
 def test_vault_lint_cli_reports_render_safety(tmp_path):

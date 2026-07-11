@@ -30,11 +30,15 @@ skill only orchestrates, surfaces acceptance, and marks failure stops.
 ## 4. Dependencies
 
 - CLI: `resolve-concept`, `check-write`, `snapshot-page`, `check-session --saved`; the finishing publish is decided by `lint`.
-- **记账契约（会话作用域）：** 写下的每个页面必须列入本 session 的 `candidate_write_set.json`——
-  它是 kb-save 的处理台账（与 ingest 的窗口 `--writes` 对等），并在
-  `lint --source kb-save --session <run_id>` 中**同时决定发布范围（membership）与记账**；
-  历史/未保存/其他 run_id 的会话不得代记账，普通 ingest 的 lint 也完全不读会话台账；
-  `source_refs` 只定归属，不算记账。
+- **记账契约（会话作用域 + 内容身份）：** 写下的每个页面必须①列入本 session 的
+  `candidate_write_set.json`（处理台账，与 ingest 的窗口 `--writes` 对等），②frontmatter 带
+  `save_session: <run_id>`（内容身份——candidate 只记路径，同路径被其他会话重写时靠此标记
+  fail-closed，绝不代发他会话内容）。`lint --source kb-save --session <run_id>` 以该会话
+  candidate 集**同时决定发布范围与记账**，并做完整性校验：集内路径缺失/非 proposed/身份
+  不符任一即 fail-closed，不得部分发布。历史/未保存/其他 run_id 的会话不得代记账，普通
+  ingest 的 lint 也完全不读会话台账；`source_refs` 只定归属，不算记账。kb-save 批次不背
+  ingest 阶段 E 义务（overview 重写/L7/topics-missing），vault 级不变量（A2 收编、渲染安全
+  preflight）照常。
 - Protocols: `save-back-policy.md` (admission gate), `schema.md` (page structure), `concept-resolution.md` (concept resolution).
 - Write discipline matches `ingest`: concepts merge on hit, never duplicate; never hand-write derived files (`aliases.md` retired — aliases in frontmatter). **新建 topic/comparison/synthesis 用中文文件名（与 `title` 一致，如 `comparisons/<甲> vs <乙>.md`）并带 `source_refs` 溯源；正文走高信息密度的学术散文、句式有起伏、结构由 purpose 与内容自然决定（不再有强制小节标题，D-4）；发布正文不嵌源图（D-1）——见 `ingest` 的 `write-pages.md`「写作风格」与「页面文件名用中文」。**
 
