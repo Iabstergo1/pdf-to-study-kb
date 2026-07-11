@@ -63,6 +63,73 @@ def test_lint_pass_promotes_and_indexes(tmp_path):
     assert "lint" in log and "note" in log
 
 
+BAD_NESTING = ("\n> [!question] 自测\n> 为什么？\n>\n> [!success]- 答案\n> 因为。\n")
+
+
+def test_vault_preflight_blocks_without_rolling_back_current_batch(tmp_path):
+    """事务隔离：旧来源 published 渲染旧伤 → 阻断 promote + Review-Queue 去重登记，
+    但当前批不回滚、保持 proposed；修复旧页后直接重跑 lint 即通过。"""
+    db = _ingest_ready(tmp_path, sid="old")
+    old_page = tmp_path / "wiki/domains/misc/lessons/old.md"
+    mdpage.write_page(old_page, {"type": "lesson", "status": "proposed", "managed_by": "pipeline",
+                                 "title": "旧课", "source": "old"}, GOOD_LESSON)
+    assert _run(["ingest-done", "--source", "old"], tmp_path).returncode == 0
+    assert _run(["lint", "--source", "old"], tmp_path).returncode == 0
+    # 模拟历史遗留：published 页含坏嵌套（当年门禁不存在，静默发布）
+    meta, body = mdpage.read_page(old_page)
+    mdpage.write_page(old_page, meta, body + BAD_NESTING)
+    # 新来源合格批次
+    _ingest_ready(tmp_path, sid="new")
+    new_page = tmp_path / "wiki/domains/misc/lessons/new.md"
+    mdpage.write_page(new_page, {"type": "lesson", "status": "proposed", "managed_by": "pipeline",
+                                 "title": "新课", "source": "new"}, GOOD_LESSON)
+    assert _run(["ingest-done", "--source", "new"], tmp_path).returncode == 0
+    r = _run(["lint", "--source", "new"], tmp_path)
+    assert r.returncode != 0
+    out = r.stdout + r.stderr
+    assert "vault-preflight" in out and "callout-nested-malformed" in out
+    # 当前批未回滚：new 仍 proposed、内容原样；不出现回滚输出
+    assert mdpage.read_page(new_page)[0]["status"] == "proposed"
+    assert "[rollback]" not in out and "就地编辑已被回滚还原" not in out
+    # 旧伤登记归属旧来源；重跑 lint 不重复造行（(rule,path,content_hash) 去重）
+    con = state_store.connect(db)
+    try:
+        n1 = con.execute("SELECT COUNT(*) FROM review_proposals"
+                         " WHERE kind='callout-nested-malformed'").fetchone()[0]
+        owner = con.execute("SELECT source_id FROM review_proposals"
+                            " WHERE kind='callout-nested-malformed'").fetchone()[0]
+    finally:
+        con.close()
+    assert n1 == 1 and owner == "old"
+    assert _run(["lint", "--source", "new"], tmp_path).returncode != 0
+    con = state_store.connect(db)
+    try:
+        n2 = con.execute("SELECT COUNT(*) FROM review_proposals"
+                         " WHERE kind='callout-nested-malformed'").fetchone()[0]
+    finally:
+        con.close()
+    assert n2 == 1
+    # 修复旧页（真空行拆块）→ 当前批直接通过并发布
+    meta, body = mdpage.read_page(old_page)
+    mdpage.write_page(old_page, meta, body.replace("？\n>\n> [!success]", "？\n\n> [!success]"))
+    r3 = _run(["lint", "--source", "new"], tmp_path)
+    assert r3.returncode == 0, r3.stdout + r3.stderr
+    assert mdpage.read_page(new_page)[0]["status"] == "published"
+
+
+def test_vault_lint_cli_reports_render_safety(tmp_path):
+    assert _run(["init-vault"], tmp_path).returncode == 0
+    bad = tmp_path / "wiki/domains/misc/lessons/x.md"
+    mdpage.write_page(bad, {"type": "lesson", "status": "published", "source": "s"},
+                      GOOD_LESSON + BAD_NESTING)
+    r = _run(["vault-lint"], tmp_path)
+    assert r.returncode != 0 and "callout-nested-malformed" in r.stdout
+    meta, body = mdpage.read_page(bad)
+    mdpage.write_page(bad, meta, body.replace("？\n>\n> [!success]", "？\n\n> [!success]"))
+    r2 = _run(["vault-lint"], tmp_path)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+
+
 def test_lint_scopes_to_own_source_pages(tmp_path):
     # P1 回归（2026-06-11 P9 code review）：lint --source B 不得 promote 其他
     # source 的 proposed 页；无 frontmatter 归属的页靠本 source 的 window write_set 归属。

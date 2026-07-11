@@ -414,6 +414,18 @@ def should_run_window(db_path, source_id: str, window_id: str, *, input_hash: st
         con.close()
 
 
+def has_open_review_proposal(db_path, *, kind: str, target_path: str, reason: str) -> bool:
+    """vault preflight 去重：同 (kind, target_path, reason) 的 open 行已存在则不重复登记
+    （reason 内嵌页面 content hash——页面内容变了才允许再登记一条）。"""
+    con = connect(db_path)
+    try:
+        return con.execute(
+            "SELECT 1 FROM review_proposals WHERE kind=? AND target_path=? AND reason=?"
+            "   AND status='open' LIMIT 1", (kind, target_path, reason)).fetchone() is not None
+    finally:
+        con.close()
+
+
 def record_window_read(db_path, source_id: str, window_id: str) -> None:
     """show-window 留痕：读窗即记账（UPSERT 幂等）。空写集跳窗是否真读过窗内容，
     靠这张表事后可审计——文档约束防自觉，这条防绕过。"""

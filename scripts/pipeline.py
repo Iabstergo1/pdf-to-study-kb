@@ -1296,6 +1296,31 @@ def cmd_lint(args):
     # 收编垄断（软警告非阻断）：单 topic 收编域内过高比例概念 = 链接倾倒糊弄 A2 的征兆
     for msg in wiki_gate.topic_coverage_monopoly(vault):
         print(f"[warn] {msg}")
+    # vault preflight（与当前批**事务隔离**）：全库 published 页的渲染安全旧伤 → 阻断 promote、
+    # 按 (rule, path, content_hash) 去重登记 Review-Queue，但不回滚当前批、不写 lint 阶段状态——
+    # 旧书的旧伤不该吃掉新书这一轮的就地编辑（"回滚吞就地编辑"曾两书连踩）。修复旧页后直接重跑。
+    stale = wiki_gate.vault_render_safety(vault)
+    if stale:
+        for v in stale:
+            print(f"[vault-preflight] {v['rule']} {v['path']}: {v['detail']}")
+            page = vault / v["path"]
+            chash = hashlib.sha256(page.read_bytes()).hexdigest()[:12] if page.exists() else "?"
+            reason = f"{v['detail']} [content={chash}]"
+            if not state_store.has_open_review_proposal(db, kind=v["rule"],
+                                                        target_path=v["path"], reason=reason):
+                state_store.add_review_proposal(db, v["owner"], target_path=v["path"],
+                                                kind=v["rule"], reason=reason)
+        queue = vault / "Review-Queue" / f"vault-health-{date.today().isoformat()}.md"
+        queue.parent.mkdir(parents=True, exist_ok=True)
+        queue.write_text(
+            "# Vault preflight 未过（历史 published 渲染安全旧伤；当前批未回滚）\n\n" +
+            "\n".join(f"- **{v['rule']}** `{v['path']}`（owner: {v['owner']}）：{v['detail']}"
+                      for v in stale) +
+            "\n\n修复旧页（人工确认小修，或 reopen 对应来源走增量流程）后重跑 lint；"
+            "当前批的 proposed 页与就地编辑原样保留。\n",
+            encoding="utf-8", newline="\n")
+        raise SystemExit(f"lint blocked by vault preflight: {len(stale)} 处 published 渲染旧伤"
+                         f" -> {queue}（当前批未回滚，修复旧页后直接重跑 lint）")
     ihash = hashlib.sha256(("\n".join(
         f"{p['rel_path']}:{hashlib.sha256(p['body'].encode('utf-8')).hexdigest()}"
         for p in proposed) + "\n!orphans:" + ",".join(p["rel_path"] for p in orphans)
@@ -1570,6 +1595,22 @@ def cmd_proposals_resolve(args):
     print(f"[OK] proposals-resolve: {res['resolved']} rows -> resolved; backlog.yaml 已刷新")
 
 
+def cmd_vault_lint(args):
+    """全库渲染安全健康门禁（零 LLM，只读，不写任何行）：扫描 published ∪ proposed 页的
+    已知渲染陷阱（callout 类型/嵌套/数学分隔符/空题干），有违规则非零退出（可 CI 化）。"""
+    import wiki_gate
+    vault = _vault_dir()
+    if not vault.exists():
+        raise SystemExit("no wiki/ vault yet")
+    vs = wiki_gate.vault_render_safety(vault, statuses=("published", "proposed"))
+    if not vs:
+        print("[OK] vault-lint: 0 render-safety violations")
+        return
+    for v in vs:
+        print(f"[vault-lint] {v['rule']} {v['path']} (owner: {v['owner']}): {v['detail']}")
+    raise SystemExit(1)
+
+
 def cmd_ingest_stats(args):
     """只读代理指标（零 LLM，不改任何行）：窗口/阶段耗时/重跑/lint 失败/页数估算/违规分布。
     诚实口径：token/费用拿不到就不伪造；耗时与页数的口径见输出 note。"""
@@ -1766,6 +1807,8 @@ def main():
                           help="重建知识图谱：graph-data + 力导向交互 HTML（零 LLM，手动 fail-hard；点击节点跳 Obsidian）")
     subparsers.add_parser("graph-lint",
                           help="校验 graph-data.generated.json(+HTML)：fail-hard 非零退出，warn-only 不阻断")
+    subparsers.add_parser("vault-lint",
+                          help="全库渲染安全健康门禁（零 LLM 只读；published∪proposed 已知渲染陷阱，违规非零退出）")
     subparsers.add_parser("rebuild-quiz",
                           help="重建自测题库索引 quiz-index.generated.md（零 LLM；published 页 [!question] 题干+回链）")
     subparsers.add_parser("rebuild-propositions",
@@ -1892,6 +1935,7 @@ def main():
         'rebuild-quiz': cmd_rebuild_quiz,
         'rebuild-propositions': cmd_rebuild_propositions,
         'graph-lint': cmd_graph_lint,
+        'vault-lint': cmd_vault_lint,
         'workorder': cmd_workorder,
         'reopen': cmd_reopen,
         'sync-assets': cmd_sync_assets,

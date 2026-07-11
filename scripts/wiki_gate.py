@@ -112,6 +112,61 @@ def placeholder_violations(vault, pages: list[dict]) -> list[dict]:
     return vs
 
 
+# 非 Obsidian 数学分隔符：`\(`/`\[` 在 Obsidian 里不渲染（行内应 $…$，块级 $$…$$）。
+# 负向后顾排除 `\\[4pt]` 这类 KaTeX 换行间距；只查开分隔符，行内代码已被 strip 剔除。
+_MATH_DELIM = re.compile(r"(?<!\\)\\[\(\[]")
+
+
+def render_safety_violations(rel: str, body: str) -> list[dict]:
+    """已知、确定性、可高置信识别的渲染陷阱（唯一实现）：proposed 批（lint_pages）与
+    published preflight（vault_render_safety）共用。覆盖：callout 未知类型 / 块内同级
+    callout 头 / 非 Obsidian 数学分隔符 / 空题干。未知渲染陷阱不在此穷举——由
+    kb-postmortem 循环发现后立法。纯函数、无 I/O。"""
+    import page_rules
+    vs: list[dict] = []
+    b = page_rules.strip_code_blocks(body)
+    for ct in _CALLOUT.findall(b):
+        if ct.lower() not in CALLOUT_WHITELIST:
+            vs.append({"path": rel, "rule": "callout-unknown",
+                       "detail": f"未知 callout 类型 [!{ct}]"
+                                 f"（白名单：{', '.join(sorted(CALLOUT_WHITELIST))}）"})
+    for e in page_rules.parse_callouts(b)[1]:
+        if e["kind"] == "same-depth-callout-inside-active-block":
+            vs.append({"path": rel, "rule": "callout-nested-malformed",
+                       "detail": f"callout 块内出现同级 `[!…]` 头，会被 Obsidian 渲染成字面量文本"
+                                 f"（答案不再折叠）；嵌套请写 `> > [!type]`，或用真空行结束上一个块：{e['text']}"})
+        elif e["kind"] == "empty-question-stem":
+            vs.append({"path": rel, "rule": "question-stem-empty",
+                       "detail": "自测题既无标题文本也无正文题干行——空题干进不了复习闭环，补题干或删除该块"})
+    for line in sorted({b[:m.start()].count("\n") + 1 for m in _MATH_DELIM.finditer(b)}):
+        vs.append({"path": rel, "rule": "math-delimiter-nonobsidian",
+                   "detail": f"LaTeX 分隔符 `\\(`/`\\[` Obsidian 不渲染（第 {line} 行）——"
+                             "行内公式用 $…$，块级用 $$…$$"})
+    return vs
+
+
+def vault_render_safety(vault, statuses: tuple = ("published",)) -> list[dict]:
+    """全库渲染安全复检（lint 的 vault preflight 与 vault-lint CLI 共用）：扫描指定状态的
+    页面，违规附 `owner`（frontmatter source / source_id / source_refs 首源，缺省
+    vault-health）供 Review-Queue 归属与去重。只读、零 LLM。"""
+    vault = Path(vault)
+    out: list[dict] = []
+    for f in sorted(vault.rglob("*.md")):
+        rel = f.relative_to(vault).as_posix()
+        if rel in _DERIVED or rel.split("/")[0] in _EXCLUDE_TOP:
+            continue
+        meta, body = mdpage.read_page(f)
+        if meta.get("status") not in statuses:
+            continue
+        owner = (meta.get("source") or meta.get("source_id")
+                 or next((r.get("source") for r in (meta.get("source_refs") or [])
+                          if isinstance(r, dict) and r.get("source")), None) or "vault-health")
+        for v in render_safety_violations(rel, body):
+            v["owner"] = owner
+            out.append(v)
+    return out
+
+
 def _membership_nodes(vault) -> dict[str, dict]:
     """topic 收编检查的共享输入：vault 内 published ∪ proposed 的 concept/topic 节点
     （proposed 页已在盘上，rglob 可见），喂给 graph_model.topic_membership（唯一实现）。"""
@@ -247,16 +302,8 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
                 continue
             if not _link_exists(vault, target):
                 hit(rel, "broken-link", f"[[{target}]] not found")
-        # callout 类型白名单（未知类型 → 阻断，复用现有 lint 通道）
-        for ct in _CALLOUT.findall(page_rules.strip_code_blocks(body)):
-            if ct.lower() not in CALLOUT_WHITELIST:
-                hit(rel, "callout-unknown",
-                    f"未知 callout 类型 [!{ct}]（白名单：{', '.join(sorted(CALLOUT_WHITELIST))}）")
-        # 块内同级 callout 头 → 渲染成字面量、折叠答案明文可见（嵌套须 `> > [!type]`）→ 阻断
-        for bad in page_rules.malformed_nested_callouts(page_rules.strip_code_blocks(body)):
-            hit(rel, "callout-nested-malformed",
-                f"callout 块内出现同级 `[!…]` 头，会被 Obsidian 渲染成字面量文本（答案不再折叠）；"
-                f"嵌套请写 `> > [!type]`，或用真空行结束上一个块：{bad}")
+        # 渲染安全（callout 类型/嵌套/数学分隔符/空题干）：与 published preflight 同一实现
+        vs += render_safety_violations(rel, body)
     # 综合层缺失（阶段 E 是一等产物，spec §3）：本批产出 concept 却无任何综合层页 → fail-closed
     n_skip = concepts_without_synthesis(pages)
     if n_skip:

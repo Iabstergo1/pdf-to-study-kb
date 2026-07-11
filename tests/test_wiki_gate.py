@@ -316,6 +316,40 @@ def test_lint_blocks_concepts_uncovered_by_topic(tmp_path):
     assert not any(v["rule"] == "concepts-uncovered" for v in vs2)
 
 
+def test_render_safety_violations_shared_rules():
+    # 渲染安全唯一实现：proposed 批与 published preflight 共用
+    # ① 非 Obsidian 数学分隔符（按行去重；`\\[4pt]` 的换行间距不误报；行内代码不误报）
+    vs = wiki_gate.render_safety_violations("x.md", "行内 \\(a+b\\) 应写 $a+b$。\n")
+    assert [v["rule"] for v in vs] == ["math-delimiter-nonobsidian"]
+    assert wiki_gate.render_safety_violations("x.md", "$$a \\\\[4pt] b$$\n") == []
+    assert wiki_gate.render_safety_violations("x.md", "代码 `\\(x\\)` 不算。\n") == []
+    # ② 空题干
+    vs = wiki_gate.render_safety_violations("x.md", "> [!question]\n")
+    assert [v["rule"] for v in vs] == ["question-stem-empty"]
+    # ③ 坏嵌套 + 未知类型仍走同一入口
+    bad = "> [!question] 自测\n> 一？\n>\n> [!danger] 假\n> 内容。\n"
+    rules = {v["rule"] for v in wiki_gate.render_safety_violations("x.md", bad)}
+    assert rules == {"callout-nested-malformed", "callout-unknown"}
+
+
+def test_vault_render_safety_scans_published_with_owner(tmp_path):
+    # published 旧伤复检：带 owner（source_refs 首源），proposed 页不在 published 扫描范围
+    _page(tmp_path, "domains/d/lessons/old.md",
+          {"type": "lesson", "status": "published", "source": "oldsrc"},
+          GOOD_LESSON + "\n> [!question] 自测\n> 一？\n>\n> [!success]- 答\n> 内容。\n")
+    _page(tmp_path, "domains/d/lessons/new.md",
+          {"type": "lesson", "status": "proposed", "source": "newsrc"},
+          "> [!question]\n")
+    vs = wiki_gate.vault_render_safety(tmp_path)
+    assert [(v["rule"], v["path"], v["owner"]) for v in vs] == \
+        [("callout-nested-malformed", "domains/d/lessons/old.md", "oldsrc")]
+    # vault-lint 口径（published ∪ proposed）能同时看到两处
+    both = wiki_gate.vault_render_safety(tmp_path, statuses=("published", "proposed"))
+    assert {(v["rule"], v["path"]) for v in both} == {
+        ("callout-nested-malformed", "domains/d/lessons/old.md"),
+        ("question-stem-empty", "domains/d/lessons/new.md")}
+
+
 def test_topic_coverage_monopoly_soft_signal(tmp_path):
     # ②（软警告，非阻断）：单 topic 收编域内过高比例概念 = 链接倾倒糊弄 A2 的征兆
     for i in range(10):
