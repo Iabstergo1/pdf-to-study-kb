@@ -214,6 +214,14 @@ def test_parse_callouts_nodes_and_errors():
     empty = "> [!question]\n"
     _n, errors = page_rules.parse_callouts(empty)
     assert [e["kind"] for e in errors] == ["empty-question-stem"]
+    # 类型捕获必须覆盖所有合法头形状（唯一语法入口——两套正则曾双向分裂：
+    # Unicode 类型逃逸未知检查、连字符类型对解析器隐身）
+    nodes, errors = page_rules.parse_callouts("> [!问题] 自测\n> 内容。\n")
+    assert [n["type"] for n in nodes] == ["问题"] and errors == []
+    nodes, errors = page_rules.parse_callouts("> [!my-type]- 折叠\n> 内容。\n")
+    assert [(n["type"], n["folded"]) for n in nodes] == [("my-type", True)] and errors == []
+    # 非法形状（! 后带空格）不是 callout 头 → 无节点（Obsidian 同样不渲染为 callout）
+    assert page_rules.parse_callouts("> [! question] 假\n")[0] == []
 
 
 def test_unanswered_precise_resolution_kinds():

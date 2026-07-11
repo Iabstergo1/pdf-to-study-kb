@@ -21,8 +21,8 @@ _WIKILINK = re.compile(r"\[\[([^\]|#]+)")
 # callout 学习白名单（设宽；不强制必须用 callout，只禁未知类型，防 LLM 乱编导致 Obsidian 不渲染）
 CALLOUT_WHITELIST = frozenset({"note", "tip", "info", "important", "warning", "question",
                                "example", "abstract", "summary", "quote", "success", "todo"})
-# 匹配任意嵌套层级（`> > [!x]` 的折叠答案也过白名单——曾只查顶层，嵌套处发明未知类型可逃逸）
-_CALLOUT = re.compile(r"^(?:>\s*)+\[!([A-Za-z][\w-]*)\]", re.MULTILINE)
+# callout 类型的语法入口只有一个：page_rules.parse_callouts（render_safety_violations 遍历其
+# 节点+错误头做白名单检查）。这里不再维护第二套类型正则——两套语法曾双向分裂。
 # D-1/G1：发布正文禁嵌源图（`![[assets/...]]`）。源图只作 LLM 阅读证据，不进入发布产物。
 _SOURCE_IMG = re.compile(r"!\[\[\s*assets/")
 _PLACEHOLDER = re.compile(r"（待 /ingest 填写[^）]*）")
@@ -134,12 +134,17 @@ def render_safety_violations(rel: str, body: str) -> list[dict]:
     import page_rules
     vs: list[dict] = []
     b = page_rules.strip_code_blocks(body)
-    for ct in _CALLOUT.findall(b):
+    nodes, errors = page_rules.parse_callouts(b)
+    # 类型白名单直接遍历解析器视野（节点 + 结构错误头）——曾有第二套正则只认 ASCII 开头，
+    # Unicode 类型逃逸未知检查、连字符类型对解析器隐身，两套语法双向分裂。
+    seen_types: list[str] = [n["type"] for n in nodes] + \
+        [e["type"] for e in errors if e["kind"] != "empty-question-stem"]
+    for ct in seen_types:
         if ct.lower() not in CALLOUT_WHITELIST:
             vs.append({"path": rel, "rule": "callout-unknown",
                        "detail": f"未知 callout 类型 [!{ct}]"
                                  f"（白名单：{', '.join(sorted(CALLOUT_WHITELIST))}）"})
-    for e in page_rules.parse_callouts(b)[1]:
+    for e in errors:
         if e["kind"] == "same-depth-callout-inside-active-block":
             vs.append({"path": rel, "rule": "callout-nested-malformed",
                        "detail": f"callout 块内出现同级 `[!…]` 头，会被 Obsidian 渲染成字面量文本"

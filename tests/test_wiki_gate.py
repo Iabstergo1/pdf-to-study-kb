@@ -348,6 +348,14 @@ def test_render_safety_violations_shared_rules():
     bad = "> [!question] 自测\n> 一？\n>\n> [!danger] 假\n> 内容。\n"
     rules = {v["rule"] for v in wiki_gate.render_safety_violations("x.md", bad)}
     assert rules == {"callout-nested-malformed", "callout-unknown"}
+    # ④ 类型检查消费解析器节点（唯一语法入口）：Unicode 类型不再逃逸，连字符类型不再隐身
+    assert [v["rule"] for v in wiki_gate.render_safety_violations(
+        "x.md", "> [!问题] 自测\n> 内容。\n")] == ["callout-unknown"]
+    assert [v["rule"] for v in wiki_gate.render_safety_violations(
+        "x.md", "> [!my-type] 标题\n> 内容。\n")] == ["callout-unknown"]
+    # 嵌套层的未知类型同样被看到（同级错误头也带类型）
+    assert "callout-unknown" in {v["rule"] for v in wiki_gate.render_safety_violations(
+        "x.md", "> [!question] 自测\n> 一？\n> > [!фейк]- 答\n> > 内容。\n")}
 
 
 def test_vault_render_safety_scans_published_with_owner(tmp_path):

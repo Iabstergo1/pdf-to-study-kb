@@ -149,7 +149,9 @@ def bare_pipe_wikilink_in_table(body: str) -> list[str]:
 # 前导 ≤3 空格与 CRLF 容忍；fenced code 内不解析。纯函数、无 I/O。
 
 _QUOTE_PREFIX = re.compile(r"^ {0,3}((?:> ?)+)")
-_CALLOUT_HEAD = re.compile(r"\[!(\w+)\](-?)[ \t]*(.*)$")
+# 类型捕获 = 任意非空白、非 `]` 序列（Unicode/连字符都进解析器视野）——类型是否合法交给
+# 白名单检查（wiki_gate.render_safety_violations 遍历本解析结果，全库唯一语法入口）。
+_CALLOUT_HEAD = re.compile(r"\[!([^\]\s]+)\](-?)[ \t]*(.*)$")
 
 
 def parse_callouts(body: str) -> tuple[list[dict], list[dict]]:
