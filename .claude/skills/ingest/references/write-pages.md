@@ -184,7 +184,11 @@ Sub-unit command detail:
 4. **Published body embeds NO source image (`source-image-embed`, blocks the proposed batch too):** re-express formulas as native KaTeX (with the result), tables as Markdown/prose, figures as mermaid/prose — the source image is read-only evidence. A `concept`/`topic`/`comparison` that is too short blocks as `content-too-short`; a lesson too short blocks as `L6-empty-lesson`.
 5. **No body H1 that duplicates the filename (`title-duplicate-h1`):** Obsidian already shows the filename as the inline title — start the body with prose, not `# <same title>`.
 6. **Concept dedup:** only via resolve-concept, merge on hit, never hand-build a duplicate (duplicate `canonical_id` blocks). Concepts resolve to their **home domain** (methodology → `research-method`, not the source's domain); aliases live only in the concept's `aliases:` frontmatter (`aliases.md` is retired).
-7. **Ownership (most-missed):** a page with no `source:` frontmatter (`topics/**`/`comparisons/**`/`synthesis/**`/`overview.md`) **must be in some window's `window-done --writes`**, or it is fail-closed as an orphan.
+7. **Ownership ≠ accounting (most-missed):** `source_refs` only decides **which source's lint owns a page**;
+   it never substitutes for the write ledger. Every proposed `topic`/`comparison`/`synthesis`/`overview`
+   page **must be in some window's `window-done --writes`** (kb-save pages ride the query-session
+   `candidate_write_set.json` instead), or lint fail-closes it as `unaccounted-write`; a page with no
+   frontmatter attribution at all is fail-closed as an orphan.
 8. **No bare `|` in table-cell formulas:** use `\lvert S \rvert` for `|S|` (or escape `\|`, or move the formula out of the table) — a bare `|` is read as a column separator and breaks KaTeX (`formula-table-pipe` hard-block). **表格单元格内带别名的 wikilink 同理：必须转义为 `[[path\|alias]]`（Obsidian 标准写法，lint 认可）——裸 `|` 会撕碎表格列；误把转义"改回"裸竖线曾同时骗过 lint 并弄坏渲染。最稳妥：链接放表格外的散文，单元格保留纯文本。**
 9. **Synthesis (phase E) mandatory:** after producing concepts you must update overview + build topic/comparison/synthesis as needed (into `--writes`), else lint `L7-synthesis-missing` blocks.
 10. **Concept coverage (`concepts-uncovered`):** in a concept-heavy domain (≥6 concepts) **every concept must be收编 by some topic** (topic body full-path wikilink or `related_concepts[]`); any uncovered concept blocks publish (already-published pages are re-checked too).
@@ -195,7 +199,11 @@ Sub-unit command detail:
 - **Callouts** (whitelist — unknown types hard-fail lint): pitfalls → `> [!warning]`, self-test →
   `> [!question]`, worked examples → `> [!example]`, key takeaways → `> [!tip]`. Whitelist:
   `note tip info important warning question example abstract summary quote success todo`. Not required
-  to use callouts — just never invent a type outside the whitelist.
+  to use callouts — just never invent a type outside the whitelist. **Nesting is one extra `>` per level
+  (`> > [!type]`)** — a same-depth `[!type]` head inside an open block renders as literal text and
+  hard-fails as `callout-nested-malformed`; an empty question stem hard-fails as `question-stem-empty`;
+  inline math is `$…$` and display math `$$…$$` — LaTeX `\(…\)`/`\[…\]` do not render in Obsidian and
+  hard-fail as `math-delimiter-nonobsidian`.
 - **No source-image embeds (D-1):** published pages never contain `![[assets/<src>/pNNNN.png]]`. Source images
   are evidence you read via `show-window`; render knowledge natively (KaTeX / Markdown table / mermaid / prose).
 

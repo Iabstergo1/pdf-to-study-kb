@@ -117,6 +117,54 @@ def test_vault_preflight_blocks_without_rolling_back_current_batch(tmp_path):
     assert mdpage.read_page(new_page)[0]["status"] == "published"
 
 
+_TOPIC_BODY = ("本主题把 aaa 的相关概念聚拢成一条阅读脉络，用足够长的散文说明各页之间的依赖顺序，"
+               "先读什么后读什么、遇到卡点回哪一页补课。再补一段展开：主题页的价值不在罗列链接，"
+               "而在给出概念之间的因果与递进关系，让读者按需进入正确的页面并知道何时返回；"
+               "这一段的存在纯粹为了让正文长度稳定越过残次页兜底检查的字符下限，不承担其他语义。\n")
+
+
+def test_unaccounted_write_requires_ledger_not_just_source_refs(tmp_path):
+    """归属 ≠ 记账：topic/synthesis 等导航层页凭 source_refs 进本源 lint 批次，
+    但本轮 proposed 必须出现在处理台账（窗口 write_set ∪ query-session 写集）。"""
+    _ingest_ready(tmp_path, sid="s")
+    topic = tmp_path / "wiki/topics/主题甲.md"
+    mdpage.write_page(topic, {"type": "topic", "status": "proposed", "managed_by": "pipeline",
+                              "title": "主题甲", "source_refs": [{"source": "s"}]}, _TOPIC_BODY)
+    assert _run(["ingest-done", "--source", "s"], tmp_path).returncode == 0
+    r = _run(["lint", "--source", "s"], tmp_path)
+    assert r.returncode != 0 and "unaccounted-write" in (r.stdout + r.stderr)
+    # 补窗口记账 → 通过（lint failed → 重新 ingest-start 合法）
+    assert _run(["ingest-start", "--source", "s"], tmp_path).returncode == 0
+    assert _run(["window-start", "--source", "s", "--window", "w0000", "--hash", "h1"],
+                tmp_path).returncode == 0
+    assert _run(["window-done", "--source", "s", "--window", "w0000",
+                 "--writes", '["topics/主题甲.md"]'], tmp_path).returncode == 0
+    # 回滚吃掉的就地编辑重新应用（页面是新建页，回滚即删除，需重写）
+    mdpage.write_page(topic, {"type": "topic", "status": "proposed", "managed_by": "pipeline",
+                              "title": "主题甲", "source_refs": [{"source": "s"}]}, _TOPIC_BODY)
+    assert _run(["ingest-done", "--source", "s"], tmp_path).returncode == 0
+    r2 = _run(["lint", "--source", "s"], tmp_path)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    assert mdpage.read_page(topic)[0]["status"] == "published"
+
+
+def test_unaccounted_write_accepts_query_session_ledger(tmp_path):
+    """kb-save 的记账通道：query-session 的 candidate_write_set.json 等价于窗口记账。"""
+    import json as _json
+    _ingest_ready(tmp_path, sid="s")
+    syn = tmp_path / "wiki/synthesis/跨源综合乙.md"
+    mdpage.write_page(syn, {"type": "synthesis", "status": "proposed", "managed_by": "pipeline",
+                            "title": "跨源综合乙", "source_refs": [{"source": "s"}]}, _TOPIC_BODY)
+    sess = tmp_path / "pipeline-workspace/query-sessions/r1"
+    sess.mkdir(parents=True)
+    (sess / "candidate_write_set.json").write_text(
+        _json.dumps(["synthesis/跨源综合乙.md"], ensure_ascii=False), encoding="utf-8")
+    assert _run(["ingest-done", "--source", "s"], tmp_path).returncode == 0
+    r = _run(["lint", "--source", "s"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert mdpage.read_page(syn)[0]["status"] == "published"
+
+
 def test_vault_lint_cli_reports_render_safety(tmp_path):
     assert _run(["init-vault"], tmp_path).returncode == 0
     bad = tmp_path / "wiki/domains/misc/lessons/x.md"
@@ -473,7 +521,8 @@ def test_lint_blocks_concept_batch_without_source_page_and_seed_overview(tmp_pat
     queue = list((vault / "Review-Queue").glob("note-lint-*.md"))
     qtext = queue[0].read_text(encoding="utf-8")
     assert "source-page-missing" in qtext and "overview-seed" in qtext
-    # 补齐：写来源台账页 + 重写 overview（归属靠 source_refs）
+    # 补齐：写来源台账页 + 重写 overview（归属靠 source_refs；记账靠窗口 write_set——
+    # unaccounted-write 上线后 topic 页须入台账，测试同步契约）
     mdpage.write_page(vault / "sources/note.md",
                       {"type": "source", "status": "proposed", "managed_by": "pipeline",
                        "source_id": "note", "title": "Note 小册", "domain": "misc",
@@ -483,6 +532,12 @@ def test_lint_blocks_concept_batch_without_source_page_and_seed_overview(tmp_pat
     meta["source_refs"] = [{"source": "note", "sections": ["1"]}]
     mdpage.write_page(vault / "overview.md", meta,
                       "## 主题导航\n\n从 [[topics/主题一|主题一]] 进入概念网络，按需深入。\n")
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["window-start", "--source", "note", "--window", "w0000", "--hash", "h1"],
+                tmp_path).returncode == 0
+    assert _run(["window-done", "--source", "note", "--window", "w0000",
+                 "--writes", '["topics/主题一.md"]'], tmp_path).returncode == 0
+    assert _run(["ingest-done", "--source", "note"], tmp_path).returncode == 0
     r2 = _run(["lint", "--source", "note"], tmp_path)
     assert r2.returncode == 0, r2.stdout + r2.stderr
     assert mdpage.read_page(vault / "sources/note.md")[0]["status"] == "published"

@@ -1333,6 +1333,17 @@ def cmd_lint(args):
                    "detail": "proposed 页不归属任何 source（缺 window-done --writes 记账"
                              "或 frontmatter 归属），fail-closed 阻断发布"}
                   for p in orphans] + wiki_gate.lint_pages(vault, proposed)
+    # 归属 ≠ 记账（契约对齐）：本轮 proposed 的导航/综合层页（topic/comparison/synthesis/
+    # overview）凭 source_refs 进批次，但写作动作必须入台账——窗口 write_set（ingest）或
+    # query-session candidate_write_set（kb-save）。不追溯 published 页。
+    accounted = set(written_by[args.source]) | _query_session_writes()
+    for p in proposed:
+        if p["meta"].get("type") in ("topic", "comparison", "synthesis", "overview") and \
+                not wiki_gate.is_accounted_write(p["rel_path"], accounted):
+            violations.append({"path": p["rel_path"], "rule": "unaccounted-write",
+                               "detail": "本轮 proposed 的导航/综合层页未入处理台账——ingest 补"
+                                         "某窗口的 window-done --writes，kb-save 补 query-session"
+                                         " 的 candidate_write_set.json；source_refs 只定归属不算记账"})
     # 来源台账完整性：本批产出 concept（真实内容源）却没有 sources/<src>.md 台账页 → 阻断。
     # 曾发生：整本书发布完成而 source 页从未写过，"来过哪些书"台账缺口无任何门禁提示。
     if any(p["meta"].get("type") == "concept" for p in proposed) and \
@@ -1593,6 +1604,24 @@ def cmd_proposals_resolve(args):
         return
     _refresh_skill_backlog(db)
     print(f"[OK] proposals-resolve: {res['resolved']} rows -> resolved; backlog.yaml 已刷新")
+
+
+def _query_session_writes() -> set[str]:
+    """kb-save 的记账通道（unaccounted-write 的第二本台账）：query-sessions/*/
+    candidate_write_set.json（Q1 契约文件，保存后必非空）。坏 JSON 静默跳过——
+    session 契约完整性由 check-session 负责，不在 lint 里重复裁决。"""
+    import json as _json
+    out: set[str] = set()
+    base = _workspace_root() / "pipeline-workspace/query-sessions"
+    if base.exists():
+        for f in base.glob("*/candidate_write_set.json"):
+            try:
+                data = _json.loads(f.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                continue
+            if isinstance(data, list):
+                out.update(str(x).replace("\\", "/") for x in data)
+    return out
 
 
 def cmd_vault_lint(args):

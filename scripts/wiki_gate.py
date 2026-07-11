@@ -72,9 +72,18 @@ def concept_heavy_without_topic(pages: list[dict]) -> int:
     return n_concept if (n_concept >= thresholds.TOPIC_THRESHOLD and not has_topic) else 0
 
 
+def is_accounted_write(rel_path: str, accounted: set[str]) -> bool:
+    """记账判定（与归属 belongs_to_source **正交**）：本轮写作动作是否进入处理台账——
+    窗口 write_set ∪ query-session candidate_write_set（kb-save 的记账通道）。
+    source_refs 只解决"哪个来源的 lint 管这页"，不能替代记账（曾出现整本书 66 窗写集
+    零非概念页仍全部过门禁——文档契约与实现脱节）。"""
+    return rel_path.replace("\\", "/") in accounted
+
+
 def belongs_to_source(rel_path: str, meta: dict, source_id: str, written: set[str]) -> bool:
-    """页面归属判定（lint/promote 范围隔离）：本 source 的 window write_set 优先（覆盖
-    topic/synthesis/overview 等无归属字段的页），其次 frontmatter 归属。"""
+    """页面**归属**判定（lint/promote 范围隔离，只回答"哪个来源负责这页"）：本 source 的
+    window write_set 优先（覆盖无归属字段的页），其次 frontmatter 归属。
+    记账检查另走 is_accounted_write——归属命中不等于本轮动作已入台账。"""
     if rel_path in written or rel_path == f"sources/{source_id}.md":
         return True
     if meta.get("source") == source_id or meta.get("source_id") == source_id:
