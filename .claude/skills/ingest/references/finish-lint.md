@@ -13,8 +13,13 @@
 2. Write/update `sources/<src>.md` (the source summary page; body is purpose-driven, no fixed template).
 3. `python scripts/pipeline.py ingest-done --source <src>` — state advances to `ingested/proposed`, releases the vault lock.
 4. **Finishing gate:** `python scripts/pipeline.py lint --source <src>`.
+   - **Vault preflight（先于批检查，事务隔离）** → if *previously published* pages (any source) carry
+     render-safety violations (callout type/nesting, math delimiters, empty question stems), lint blocks
+     promote and queues them to `Review-Queue/vault-health-*.md`, **but the current batch is NOT rolled
+     back** — proposed pages and in-place edits stay intact. Fix the old page (small human-confirmed edit,
+     or reopen its source) and simply re-run `lint`; do not redo this batch's work.
    - **Pass** → proposed promotes to `published`, folds into `index.generated.md`, rebuilds `_registry.yaml` (`aliases.md` is retired — aliases stay in concept frontmatter) + the derived reading layer (knowledge graph + `quiz-index.generated.md` + `propositions.generated.md`, publish-isolated: their failure never blocks publish), and cleans this source's stale `<src>-lint-*.md` failure reports. Report which pages were published.
-   - **Fail** → in-place merges are rolled back, the violation list goes to `wiki/Review-Queue/<src>-lint-*.md`; **stop** and give the user the violations + fix suggestions (edit pages and re-run `lint`, or use kb-review). **⚠ Rollback restores in-place-merged pages (`overview.md` / existing concept merges) to their pre-edit state — after fixing the violations you MUST re-apply those in-place edits before re-running `lint`, or the "updated overview" silently reverts to the seed (happened on two consecutive books; the `overview-seed` / `source-page-missing` gates now fail-closed on this).**
+   - **Fail（current-batch violations only）** → in-place merges are rolled back, the violation list goes to `wiki/Review-Queue/<src>-lint-*.md`; **stop** and give the user the violations + fix suggestions (edit pages and re-run `lint`, or use kb-review). **⚠ Rollback restores in-place-merged pages (`overview.md` / existing concept merges) to their pre-edit state — after fixing the violations you MUST re-apply those in-place edits before re-running `lint`, or the "updated overview" silently reverts to the seed (happened on two consecutive books; the `overview-seed` / `source-page-missing` gates now fail-closed on this).**
 
 ## Skipping phase E → lint blocks (no longer a soft warning)
 

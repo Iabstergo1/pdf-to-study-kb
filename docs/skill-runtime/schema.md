@@ -19,6 +19,15 @@
   `topic`/`comparison`/`synthesis`/`overview` **must carry `source_refs`** (derived-page provenance);
   `concept` needs `canonical_id`/`canonical_name`/`domain`; `lesson` needs the common trio (attribution via
   `source`/window write_set).
+- **Ownership ≠ accounting:** `source_refs` only decides which source's lint owns a page. The write ledger
+  is separate — a proposed `topic`/`comparison`/`synthesis`/`overview` must be in a window's `--writes`
+  (ingest) or the session's `candidate_write_set.json` (kb-save), else `unaccounted-write` blocks.
+  **kb-save pages additionally carry `save_session: <run_id>`** (content identity — the candidate set only
+  records paths; this marker is what stops one session publishing content later rewritten at the same path
+  by another session; verified by `lint --source kb-save --session <run_id>`).
+- **Render safety is frontmatter-independent and re-checked vault-wide:** callout whitelist + nesting
+  (`> > [!type]`), `$…$`/`$$…$$` math delimiters, non-empty question stems — same scan runs on the proposed
+  batch and as a transaction-isolated published preflight (`vault-lint` standalone).
 - **A concept page's frontmatter is the single source of truth:** `canonical_id` / `canonical_name` /
   `aliases` / `scope` / `domain` / `source_refs` / `page_path`. Derived files
   (`_registry.yaml` / `index.generated.md`) are rebuilt by the finishing CLI and must never be hand-written.

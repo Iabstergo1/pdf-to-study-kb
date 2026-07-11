@@ -18,7 +18,15 @@
 
 - Concept writes still go through the `resolve_or_create_concept` protocol (merge on hit, never create a
   duplicate).
-- Every written page is `status: proposed`; the finishing `lint` decides promotion, and a Q2 semantic
-  judgement can block.
+- Every written page is `status: proposed`; the finishing gate is **session-scoped**:
+  `lint --source kb-save --session <run_id>` re-checks the saved-mode session contract, then lints/promotes
+  **only** the pages listed in that session's `candidate_write_set.json`. Historical/unsaved/other sessions
+  never account; ingest lints never read session ledgers. A Q2 semantic judgement can still block.
+- **Every written page carries `save_session: <run_id>` in frontmatter and is listed in
+  `candidate_write_set.json`** — the ledger records paths, the marker is the content identity; a missing
+  path / non-proposed page / mismatched marker fail-closes the whole session (`session-candidate-missing` /
+  `session-identity-mismatch`, no partial publish). kb-save batches do not carry ingest phase-E duties
+  (overview rewrite / L7 / topics-missing); vault-level invariants (A2 coverage, render-safety preflight)
+  still apply.
 - `decision.md` must record: why it was saved / which pages were written / which evidence was cited /
   why no existing concept was polluted.
