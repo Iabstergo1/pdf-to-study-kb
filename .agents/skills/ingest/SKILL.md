@@ -10,7 +10,7 @@ lessons are an **optional, downgraded** secondary layer (only for continuous tea
 that don't sink into concepts) — **named by theme, never `第X章`, never a chapter recap, never "本章/本书/作者"
 meta-narrative.** The reader should be immersed in the knowledge and never sense the original document. Work under
 the work-order transaction protocol the whole way. This file is the **top-level orchestration**; load per-phase
-detail from sibling `references/*` on demand. Project truth: `AGENTS.md`. Engineering format: `docs/skill-runtime/skill-standard.md`.
+detail from sibling `references/*` on demand. Project truth: `CLAUDE.md`. Engineering format: `docs/skill-runtime/skill-standard.md`.
 
 > **Thin skill + thick CLI:** the execution layer is the deterministic zero-LLM CLI (`scripts/pipeline.py`);
 > this skill carries no business code, only orchestrates it. `<src>` = this source's source_id; run commands
@@ -100,8 +100,11 @@ incremental reopen        reopen → ingest-start →[ per-window backfill ]→ 
 
 Any preprocessing step errors; `check-write` DENY (out of scope / overwrite protection); lint fails;
 `managed_by: human` page conflict; cross-domain promotion candidate; the vault lock is held. **Recovery:**
-after an interruption, re-read `chapters.json` + the digest `## RESUME` block and resume from the next
-unfinished window (`pipeline.py next` is the machine anchor); otherwise auto-advance and report progress.
+after an interruption, re-read `chapters.json` + the digest `## RESUME` block, **and re-read
+`references/write-pages.md` before writing any page** — an interrupted session has lost the writing
+contracts (prose organization, self-test nesting, accounting), and a fresh page's seed scaffold never
+substitutes for the contract file; then resume from the next unfinished window (`pipeline.py next` is
+the machine anchor); otherwise auto-advance and report progress.
 
 ## 9. Acceptance criteria
 

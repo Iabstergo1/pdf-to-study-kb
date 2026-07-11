@@ -118,6 +118,23 @@ def test_show_window_prints_assets_header_by_default(tmp_path):
     assert "formula text page two" in r.stdout
 
 
+def test_next_prints_writing_contract_reminder_when_ingesting(tmp_path):
+    """恢复链路软加固：存在进行中的 ingest 时，next 输出写作契约 hash 提醒
+    （软提示；契约执行仍由 lint 硬门禁兜底，不接入状态机阻断）。"""
+    note = tmp_path / "raw" / "note.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# A\n\naaa\n", encoding="utf-8")
+    for cmd in (["add-source", "--source", "note", "--domain", "misc", "--path", str(note), "--fmt", "md"],
+                ["profile", "--source", "note"], ["source-convert", "--source", "note"],
+                ["windows", "--source", "note"], ["workorder", "--source", "note"]):
+        assert _run(cmd, tmp_path).returncode == 0
+    r = _run(["next"], tmp_path)
+    assert "[contract]" not in r.stdout  # 未进 ingesting 不打扰
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    r2 = _run(["next"], tmp_path)
+    assert "[contract] write-pages.md sha256=" in r2.stdout
+
+
 def test_show_window_records_window_read(tmp_path):
     """show-window 留痕：读窗即在状态库记账（空写集跳窗是否真读过窗内容，事后可审计）。"""
     _make_show_window_staging(tmp_path)

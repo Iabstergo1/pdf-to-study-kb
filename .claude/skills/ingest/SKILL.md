@@ -100,8 +100,11 @@ incremental reopen        reopen → ingest-start →[ per-window backfill ]→ 
 
 Any preprocessing step errors; `check-write` DENY (out of scope / overwrite protection); lint fails;
 `managed_by: human` page conflict; cross-domain promotion candidate; the vault lock is held. **Recovery:**
-after an interruption, re-read `chapters.json` + the digest `## RESUME` block and resume from the next
-unfinished window (`pipeline.py next` is the machine anchor); otherwise auto-advance and report progress.
+after an interruption, re-read `chapters.json` + the digest `## RESUME` block, **and re-read
+`references/write-pages.md` before writing any page** — an interrupted session has lost the writing
+contracts (prose organization, self-test nesting, accounting), and a fresh page's seed scaffold never
+substitutes for the contract file; then resume from the next unfinished window (`pipeline.py next` is
+the machine anchor); otherwise auto-advance and report progress.
 
 ## 9. Acceptance criteria
 

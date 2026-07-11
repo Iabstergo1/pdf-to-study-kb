@@ -1518,8 +1518,18 @@ def cmd_next(args):
     if not db.exists():
         print("no state db yet")
         return
-    for r in state_store.next_actions(db):
+    rows = state_store.next_actions(db)
+    for r in rows:
         print(f"{r['source_id']:<28} {r['current_stage']:<16} -> {r['next_action']}")
+    # 写作契约提醒（软提示，不接状态机）：有进行中的 ingest 时打印契约文件 hash——
+    # 中断恢复的新会话没有写作契约记忆，动笔前须重读；hash 变化 = 契约在会话中断期间更新过。
+    if any(r["current_stage"] == "ingesting" for r in rows):
+        import hashlib as _hashlib
+        wp = Path(__file__).resolve().parent.parent / ".claude/skills/ingest/references/write-pages.md"
+        if wp.exists():
+            h = _hashlib.sha256(wp.read_bytes()).hexdigest()[:12]
+            print(f"[contract] write-pages.md sha256={h} —— 恢复会话动笔前必须重读该写作契约"
+                  f"（散文组织/自测嵌套折叠/记账；.agents 树同名文件字节对等）")
     row = locks.get(db, scope="vault")
     if row and locks.is_stale(db, scope="vault", ttl_seconds=LOCK_TTL_SECONDS):
         print(f"vault-lock ({row['holder']}){'':<13} -> stale (heartbeat {row['heartbeat_at']});"
