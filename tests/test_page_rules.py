@@ -168,6 +168,66 @@ def test_extract_question_stems():
     assert page_rules.extract_question_stems("无题正文。\n") == []
 
 
+def test_parse_callouts_nodes_and_errors():
+    """统一解析器契约：同时返回可定位节点与结构错误（错误不吞节点——quiz 仍能看见第二题）。"""
+    # 真实缺陷 fixture（存量清理前的 published 页形状）：两个顶层 question 之间只有一行 >
+    swallowed = ("> [!question] 自测\n"
+                 "> 第一问？\n"
+                 "> > [!success]- 参考答案\n"
+                 "> > 答一。\n"
+                 ">\n"
+                 "> [!question] 自测（第二问）\n"
+                 "> 第二问？\n"
+                 "> > [!success]- 参考答案\n"
+                 "> > 答二。\n")
+    nodes, errors = page_rules.parse_callouts(swallowed)
+    qs = [n for n in nodes if n["type"] == "question"]
+    assert len(qs) == 2, "第二题必须成为可定位节点，不能被吞"
+    assert [e["kind"] for e in errors] == ["same-depth-callout-inside-active-block"]
+    assert errors[0]["line"] == 6
+    # 正确嵌套：question 有 success 子节点，零错误
+    good = ("> [!question] 自测\n> 为什么？\n> > [!success]- 参考答案\n> > 因为。\n")
+    nodes, errors = page_rules.parse_callouts(good)
+    assert errors == []
+    q = next(n for n in nodes if n["type"] == "question")
+    assert [nodes[c]["type"] for c in q["children"]] == ["success"]
+    assert nodes[q["children"][0]]["folded"] is True
+    # 真空行分开的两个合法 callout → 两个顶层节点、零错误
+    two = "> [!question] 自测\n> 一？\n\n> [!tip] 提示\n> 内容。\n"
+    nodes, errors = page_rules.parse_callouts(two)
+    assert errors == [] and len(nodes) == 2 and all(n["parent"] is None for n in nodes)
+    # 前导空格（≤3）与 CRLF 容忍
+    spaced = "  > [!question] 自测\r\n  > 一？\r\n  >\r\n  > [!success]- 答\r\n"
+    nodes, errors = page_rules.parse_callouts(spaced)
+    assert len(nodes) == 2 and [e["kind"] for e in errors] == ["same-depth-callout-inside-active-block"]
+    # fenced code 内的 callout 头不解析
+    fenced = "```\n> [!question] 假的\n```\n\n> [!note] 真的\n> 正文。\n"
+    nodes, errors = page_rules.parse_callouts(fenced)
+    assert [n["type"] for n in nodes] == ["note"] and errors == []
+    # success 深度跳级：仍算 question 的子节点，但记 depth-jump 错误
+    jump = "> [!question] 自测\n> 一？\n> > > [!success]- 答\n"
+    nodes, errors = page_rules.parse_callouts(jump)
+    assert [e["kind"] for e in errors] == ["callout-depth-jump"]
+    q = next(n for n in nodes if n["type"] == "question")
+    assert [nodes[c]["type"] for c in q["children"]] == ["success"]
+    # 空题干：无标题也无正文行 → empty-question-stem 错误
+    empty = "> [!question]\n"
+    _n, errors = page_rules.parse_callouts(empty)
+    assert [e["kind"] for e in errors] == ["empty-question-stem"]
+
+
+def test_unanswered_precise_resolution_kinds():
+    """有题必有解（软警告）判定收紧为三种明确解答形态；嵌套 [!tip] 不再被误认成答案。"""
+    tip_only = ("> [!question] 自测\n> 为什么？\n> > [!tip] 提示\n> > 想想边际。\n")
+    assert page_rules.unanswered_question_stems(tip_only) == ["为什么？"]
+    # 隔真空行的同级 success 仍算已解答（既有惯例）
+    sibling = "> [!question] 自测\n> 为什么？\n\n> [!success]- 答案\n> 因为。\n"
+    assert page_rules.unanswered_question_stems(sibling) == []
+    # 题干里的 wikilink 解答仍算已闭环
+    linked = "> [!question] 自测\n> 先猜？解答见 [[domains/x/concepts/y|y]]。\n"
+    assert page_rules.unanswered_question_stems(linked) == []
+
+
 def test_malformed_nested_callouts():
     # 块内同级 callout 头（前一行也是引用行）→ Obsidian 渲染成字面量、答案明文可见 → 命中
     bad = ("> [!question]\n"

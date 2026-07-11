@@ -142,51 +142,87 @@ def bare_pipe_wikilink_in_table(body: str) -> list[str]:
     return bad
 
 
-# 自测题 callout（`> [!question]`，可带折叠 `-` 与标题文本）。学习闭环要求有题必有解
-# （嵌套折叠答案 `> > [!success]-` / 块内 wikilink 指向解答），见 ingest write-pages 写作纪律。
-_QUESTION_HEAD = re.compile(r"^>\s*\[!question\]-?\s*(.*)$", re.IGNORECASE)
+# ── 统一 blockquote/callout 结构解析器（唯一实现）────────────────────────────
+# lint 的坏嵌套/类型检查、quiz 收割、有题必有解 全部消费同一份解析结果——三套正则各自
+# 为政曾让"被吞的第二题"在收割里静默消失。契约：**错误不吞节点**（同级 head 记结构错误的
+# 同时仍登记为可定位节点）；真空行（非引用行）结束整个块，单独一行 `>` 不结束；
+# 前导 ≤3 空格与 CRLF 容忍；fenced code 内不解析。纯函数、无 I/O。
+
+_QUOTE_PREFIX = re.compile(r"^ {0,3}((?:> ?)+)")
+_CALLOUT_HEAD = re.compile(r"\[!(\w+)\](-?)[ \t]*(.*)$")
 
 
-def _question_blocks(body: str) -> list[tuple[str, list[str], str]]:
-    """切出每个 [!question] callout：(标题文本, 块内行, 块后首个非空行)。
-    块 = 标题行之后连续以 > 开头的行（Obsidian callout 以空行结束）。纯函数、无 I/O。"""
-    out: list[tuple[str, list[str], str]] = []
-    lines = body.splitlines()
-    i = 0
-    while i < len(lines):
-        m = _QUESTION_HEAD.match(lines[i])
-        if not m:
-            i += 1
+def parse_callouts(body: str) -> tuple[list[dict], list[dict]]:
+    """返回 (nodes, errors)。node: {type, folded, title, depth, line, body[(depth,text)],
+    parent(节点下标|None), children[下标]}；error: {kind, line, text, type}，kind ∈
+    same-depth-callout-inside-active-block（渲染成字面量的同级 head）/
+    callout-depth-jump（嵌套跳级）/ empty-question-stem（无标题也无正文行的自测题）。"""
+    nodes: list[dict] = []
+    errors: list[dict] = []
+    open_stack: list[int] = []          # 尚未被真空行/浅层 head 关闭的节点下标（内层在后）
+    in_fence = False
+    for i, raw in enumerate(body.splitlines()):
+        line = raw.rstrip("\r")
+        m = _QUOTE_PREFIX.match(line)
+        stripped = line[m.end():].strip() if m else line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
             continue
-        block: list[str] = []
-        i += 1
-        while i < len(lines) and lines[i].lstrip().startswith(">"):
-            block.append(lines[i])
-            i += 1
-        following = ""
-        for ln in lines[i:]:
-            if ln.strip():
-                following = ln.strip()
-                break
-        out.append((m.group(1).strip(), block, following))
-    return out
+        if in_fence:
+            continue
+        if not m:
+            open_stack = []             # 真空行或普通正文行：整个引用块结束
+            continue
+        depth = m.group(1).count(">")
+        hm = _CALLOUT_HEAD.match(stripped)
+        if hm:
+            ctype, folded, title = hm.group(1).lower(), hm.group(2) == "-", hm.group(3).strip()
+            parent = None
+            if open_stack:
+                inner = nodes[open_stack[-1]]
+                if depth == inner["depth"] + 1:
+                    parent = open_stack[-1]
+                elif depth <= inner["depth"]:
+                    # 同级/更浅的 head 出现在未结束的块内 → Obsidian 渲染为字面量文本
+                    errors.append({"kind": "same-depth-callout-inside-active-block",
+                                   "line": i + 1, "text": stripped[:80], "type": ctype})
+                    while open_stack and nodes[open_stack[-1]]["depth"] >= depth:
+                        open_stack.pop()
+                    parent = open_stack[-1] if open_stack else None
+                else:
+                    errors.append({"kind": "callout-depth-jump",
+                                   "line": i + 1, "text": stripped[:80], "type": ctype})
+                    parent = open_stack[-1]
+            nodes.append({"type": ctype, "folded": folded, "title": title, "depth": depth,
+                          "line": i + 1, "body": [], "parent": parent, "children": []})
+            if parent is not None:
+                nodes[parent]["children"].append(len(nodes) - 1)
+            open_stack.append(len(nodes) - 1)
+        elif stripped:
+            for j in reversed(open_stack):  # 正文行归属栈内 depth ≤ 行深的最内层节点
+                if nodes[j]["depth"] <= depth:
+                    nodes[j]["body"].append((depth, stripped))
+                    break
+    for n in nodes:
+        if n["type"] == "question" and not _node_stem(n):
+            errors.append({"kind": "empty-question-stem", "line": n["line"],
+                           "text": n["title"][:80], "type": "question"})
+    return nodes, errors
 
 
-def _question_stem(title: str, block: list[str]) -> str:
-    """题干 = 块内首个非嵌套、非空的引用行；没有正文行时回退标题文本。"""
-    for ln in block:
-        s = ln.strip()
-        if s.startswith((">>", "> >")):
-            break  # 进入嵌套答案区，题干已结束
-        text = s.lstrip(">").strip()
-        if text:
-            return text
-    return title
+def _node_stem(node: dict) -> str:
+    """题干 = 节点自身深度上的首个正文行；无正文行时回退标题文本。"""
+    return next((t for d, t in node["body"] if d == node["depth"]), "") or node["title"]
+
+
+def _question_nodes(body: str) -> list[dict]:
+    return [n for n in parse_callouts(body)[0] if n["type"] == "question"]
 
 
 def extract_question_stems(body: str) -> list[str]:
-    """返回正文中每个 [!question] callout 的题干（quiz 索引原语）。纯函数、无 I/O。"""
-    return [_question_stem(t, b) for t, b, _f in _question_blocks(body)]
+    """返回正文中每个 [!question] callout 的题干（quiz 索引原语；空题干跳过——它由
+    empty-question-stem 结构错误另行处理，不进复习索引）。纯函数、无 I/O。"""
+    return [s for n in _question_nodes(body) if (s := _node_stem(n))]
 
 
 # 具名命题：库内承重结论的稳定锚点（`**命题（先发优势）**：一句话结论`）。名字即锚点、域内唯一，
@@ -199,19 +235,12 @@ def extract_propositions(body: str) -> list[tuple[str, str]]:
     return [(m.group(1).strip(), m.group(2).strip()) for m in _PROPOSITION.finditer(body)]
 
 
-_CALLOUT_HEAD_LINE = re.compile(r"^>\s*\[!\w+\]")
-
-
 def malformed_nested_callouts(body: str) -> list[str]:
-    """块内同级 callout 头：`> [!type]` 行的上一行也是引用行（块未结束），Obsidian 会把它
-    渲染成字面量文本而非嵌套 callout——折叠答案因此明文可见。嵌套必须写 `> > [!type]`，
-    或用真空行结束上一个块。返回命中行（去引用前缀，截 80 字）。纯函数、无 I/O。"""
-    out: list[str] = []
-    lines = body.splitlines()
-    for i, ln in enumerate(lines):
-        if i and _CALLOUT_HEAD_LINE.match(ln) and lines[i - 1].lstrip().startswith(">"):
-            out.append(ln.strip().lstrip(">").strip()[:80])
-    return out
+    """块内同级 callout 头（渲染安全硬伤原语）：Obsidian 会把它渲染成字面量文本而非嵌套
+    callout——折叠答案因此明文可见。嵌套必须写 `> > [!type]`，或用真空行结束上一个块。
+    消费统一解析器的 same-depth 结构错误。返回命中行文本（截 80 字）。纯函数、无 I/O。"""
+    return [e["text"] for e in parse_callouts(body)[1]
+            if e["kind"] == "same-depth-callout-inside-active-block"]
 
 
 _DERIVATION_FOLD = re.compile(r"^>\s*\[!abstract\]-", re.IGNORECASE | re.MULTILINE)
@@ -222,31 +251,43 @@ def device_usage(body: str) -> dict:
     单页各项为零都合法；整本书全部归零是"写作偏好未被执行"的强信号。纯函数、无 I/O。"""
     return {"propositions": len(extract_propositions(body)),
             "derivation_folds": len(_DERIVATION_FOLD.findall(body)),
-            "questions": len(_question_blocks(body))}
+            "questions": len(_question_nodes(body))}
 
 
 def misplaced_question_stems(body: str) -> list[str]:
     """题干疑似写进 callout 标题的 [!question]（软警告原语）：标题以问号结尾、块内又有
     正文行——quiz 收割取块内首行当题干，会把答案收进索引。标准写法：标题只放「自测」类
     短语，题干做块内首行，答案进嵌套折叠 `> > [!success]-`。纯函数、无 I/O。"""
-    out: list[str] = []
-    for title, block, _f in _question_blocks(body):
-        if title.rstrip().endswith(("？", "?")) and _question_stem(title, block) != title:
-            out.append(title)
-    return out
+    return [n["title"] for n in _question_nodes(body)
+            if n["title"].rstrip().endswith(("？", "?")) and _node_stem(n) != n["title"]]
+
+
+def question_resolution(nodes: list[dict], q_index: int) -> str:
+    """一道 question 的解答形态（软判断的确定性前置）：
+    `nested_success`（success 后代——含跳级）> `linked_resolution_candidate`（题干区 wikilink
+    指向解答）> `sibling_success`（紧随其后的同级 success 块，既有惯例）> `none`。
+    嵌套 [!tip]/[!info] 等提示不是解答。纯函数、无 I/O。"""
+    q = nodes[q_index]
+    stack = list(q["children"])
+    while stack:
+        c = nodes[stack.pop()]
+        if c["type"] == "success":
+            return "nested_success"
+        stack.extend(c["children"])
+    if any("[[" in t for _d, t in q["body"]):
+        return "linked_resolution_candidate"
+    for j in range(q_index + 1, len(nodes)):
+        if nodes[j]["parent"] is None:
+            if nodes[j]["type"] == "success":
+                return "sibling_success"
+            break  # 下一个顶层块不是 success → 不算紧随解答
+    return "none"
 
 
 def unanswered_question_stems(body: str) -> list[str]:
-    """有题无解的 [!question] 题干（软警告原语）：块内既无嵌套/相邻 callout 答案、
-    也无 wikilink 指向解答（"never questions with no resolution"）。纯函数、无 I/O。"""
-    out: list[str] = []
-    for title, block, following in _question_blocks(body):
-        text = "\n".join(block)
-        if "[[" in text:
-            continue  # 链接到解答所在页/小节
-        if any("[!" in ln for ln in block):
-            continue  # 块内嵌套（> > [!success]-）或紧贴的同级答案 callout
-        if following.startswith(">") and "[!" in following:
-            continue  # 隔一个空行的同级答案 callout
-        out.append(_question_stem(title, block))
-    return out
+    """有题无解的 [!question] 题干（软警告原语，"never questions with no resolution"）。
+    解答形态判定见 question_resolution——嵌套 [!tip] 不再被误认成答案。纯函数、无 I/O。"""
+    nodes, _errors = parse_callouts(body)
+    return [_node_stem(nodes[i]) for i, n in enumerate(nodes)
+            if n["type"] == "question" and question_resolution(nodes, i) == "none"
+            and _node_stem(nodes[i])]
