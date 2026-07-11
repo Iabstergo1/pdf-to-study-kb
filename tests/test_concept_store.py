@@ -196,6 +196,12 @@ def test_create_concept_body_follows_template(tmp_path):
     assert "> > [!success]-" in body  # 模板携带正确嵌套的自测示例（收割契约随种子进页）
 
 
+def test_concept_body_fallback_byte_equals_template():
+    # 双真值防漂移：磁盘模板与回退常量逐字节等价——下次改模板时常量不能成为漏网旧版
+    tpl_body = mdpage.read_page(ROOT / "templates" / "concept.md")[1]
+    assert concept_store.CONCEPT_BODY == tpl_body
+
+
 def test_create_concept_falls_back_when_template_missing(tmp_path):
     orig = concept_store._TEMPLATES_DIR
     concept_store._TEMPLATES_DIR = tmp_path / "no-such-dir"

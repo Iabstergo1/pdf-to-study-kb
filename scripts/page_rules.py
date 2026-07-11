@@ -243,6 +243,19 @@ def malformed_nested_callouts(body: str) -> list[str]:
             if e["kind"] == "same-depth-callout-inside-active-block"]
 
 
+# 旧强制小节骨架（2026-07-01 realignment 已废除）。模板/回退常量已散文化，但模型仍可能
+# 凭训练记忆整体重写出这套骨架——窄规则只拦"成套复活"（≥3 个），单个自然标题合法（D-4）。
+_LEGACY_HEADINGS = frozenset({"一句话", "直觉", "形式化", "各章如何处理", "与其他概念的关系"})
+_HEADING_LINE = re.compile(r"^#{2,3}\s*(\S[^\n]*?)\s*$", re.MULTILINE)
+
+
+def legacy_scaffold_headings(body: str) -> list[str]:
+    """检测已废除的概念页模板骨架成套复活：标题精确归一后命中旧骨架标题集 ≥3 个（去重）
+    才返回命中列表，否则空。调用方先剥代码块。纯函数、无 I/O。"""
+    found = {m.group(1).strip() for m in _HEADING_LINE.finditer(body)} & _LEGACY_HEADINGS
+    return sorted(found) if len(found) >= 3 else []
+
+
 _DERIVATION_FOLD = re.compile(r"^>\s*\[!abstract\]-", re.IGNORECASE | re.MULTILINE)
 
 

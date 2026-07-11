@@ -316,6 +316,24 @@ def test_lint_blocks_concepts_uncovered_by_topic(tmp_path):
     assert not any(v["rule"] == "concepts-uncovered" for v in vs2)
 
 
+def test_lint_blocks_legacy_concept_scaffold(tmp_path):
+    # 已废除的模板骨架成套复活（≥3 旧标题）→ 阻断；散文页与含个别自然标题的页不受影响
+    legacy_body = ("## 一句话\n\n" + "定义" * 30 + "\n\n## 直觉\n\n" + "直觉" * 30 +
+                   "\n\n## 形式化\n\n" + "推导" * 30 + "\n")
+    _page(tmp_path, "domains/d/concepts/旧骨架.md",
+          {"type": "concept", "status": "proposed", "canonical_id": "concept.d.legacy",
+           "canonical_name": "旧骨架", "domain": "d"}, legacy_body)
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert any(v["rule"] == "legacy-concept-scaffold" for v in vs)
+    # 散文正文 + 单个自然标题 → 不触发
+    _page(tmp_path, "domains/d/concepts/旧骨架.md",
+          {"type": "concept", "status": "proposed", "canonical_id": "concept.d.legacy",
+           "canonical_name": "旧骨架", "domain": "d"},
+          "散文定义开篇，随后自然展开。\n\n## 直觉\n\n" + "直觉散文" * 30 + "\n")
+    vs2 = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert not any(v["rule"] == "legacy-concept-scaffold" for v in vs2)
+
+
 def test_render_safety_violations_shared_rules():
     # 渲染安全唯一实现：proposed 批与 published preflight 共用
     # ① 非 Obsidian 数学分隔符（按行去重；`\\[4pt]` 的换行间距不误报；行内代码不误报）

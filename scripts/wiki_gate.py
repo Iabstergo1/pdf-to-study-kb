@@ -313,6 +313,13 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
                 hit(rel, "broken-link", f"[[{target}]] not found")
         # 渲染安全（callout 类型/嵌套/数学分隔符/空题干）：与 published preflight 同一实现
         vs += render_safety_violations(rel, body)
+        # 防复辟（窄规则，不重新引入强制小节）：已废除的概念页模板骨架成套复活 → 阻断
+        if ptype == "concept":
+            legacy = page_rules.legacy_scaffold_headings(page_rules.strip_code_blocks(body))
+            if legacy:
+                hit(rel, "legacy-concept-scaffold",
+                    f"已废除的模板骨架成套复活（命中旧标题：{'、'.join(legacy)}）——正文应按内容"
+                    "散文组织（D-4 无强制小节；单个自然标题合法，成套旧骨架阻断）")
     # 综合层缺失（阶段 E 是一等产物，spec §3）：本批产出 concept 却无任何综合层页 → fail-closed
     n_skip = concepts_without_synthesis(pages)
     if n_skip:

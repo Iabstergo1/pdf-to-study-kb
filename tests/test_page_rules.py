@@ -248,6 +248,19 @@ def test_malformed_nested_callouts():
     assert page_rules.malformed_nested_callouts("普通正文。\n") == []
 
 
+def test_legacy_scaffold_headings():
+    # 成套复活（≥3 个旧骨架标题）→ 命中；防废模板凭模型训练记忆回魂
+    full = ("## 一句话\n\nx\n\n## 直觉\n\nx\n\n## 形式化\n\nx\n\n## 自测\n\nx\n")
+    assert page_rules.legacy_scaffold_headings(full) == ["一句话", "形式化", "直觉"]
+    # 标题带多余空格仍归一命中；### 级也算
+    spaced = ("##  一句话 \n\nx\n\n### 直觉\n\nx\n\n## 各章如何处理\n\nx\n")
+    assert page_rules.legacy_scaffold_headings(spaced) == ["一句话", "各章如何处理", "直觉"]
+    # 只有 1-2 个自然标题 → 完全合法（D-4 不管形式）
+    assert page_rules.legacy_scaffold_headings("## 直觉\n\nx\n\n## 形式化\n\nx\n") == []
+    assert page_rules.legacy_scaffold_headings("## 直觉\n\n散文正文。\n") == []
+    assert page_rules.legacy_scaffold_headings("纯散文，无标题。\n") == []
+
+
 def test_device_usage_counts():
     body = ("正文。**命题（先发优势）**：领导者利润严格更高。\n\n"
             "结论：均衡唯一。\n\n"
