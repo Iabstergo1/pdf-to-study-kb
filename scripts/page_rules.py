@@ -199,6 +199,21 @@ def extract_propositions(body: str) -> list[tuple[str, str]]:
     return [(m.group(1).strip(), m.group(2).strip()) for m in _PROPOSITION.finditer(body)]
 
 
+_CALLOUT_HEAD_LINE = re.compile(r"^>\s*\[!\w+\]")
+
+
+def malformed_nested_callouts(body: str) -> list[str]:
+    """块内同级 callout 头：`> [!type]` 行的上一行也是引用行（块未结束），Obsidian 会把它
+    渲染成字面量文本而非嵌套 callout——折叠答案因此明文可见。嵌套必须写 `> > [!type]`，
+    或用真空行结束上一个块。返回命中行（去引用前缀，截 80 字）。纯函数、无 I/O。"""
+    out: list[str] = []
+    lines = body.splitlines()
+    for i, ln in enumerate(lines):
+        if i and _CALLOUT_HEAD_LINE.match(ln) and lines[i - 1].lstrip().startswith(">"):
+            out.append(ln.strip().lstrip(">").strip()[:80])
+    return out
+
+
 _DERIVATION_FOLD = re.compile(r"^>\s*\[!abstract\]-", re.IGNORECASE | re.MULTILINE)
 
 

@@ -75,9 +75,12 @@ Sub-unit command detail:
   resume say "continue" or run `scripts/resume-ingest.ps1`, both relocate via the RESUME block + `pipeline.py
   next` — a machine-readable anchor for Claude and Codex alike, no session hook). The block runs from
   `## RESUME` to the next `## `, stays terse, and contains at least: **progress** (done windows + next
-  window id and its `--hash`), **resume steps** (`ingest-start` is idempotent and reports resumed → per-window
-  loop), and a one-line **writing discipline** reminder (concepts via resolve-concept, full-path wikilinks,
-  interpreter + `PYTHONUTF8=1`). **Do not dump full window logs into RESUME.** When the whole source is done,
+  window id and its `--hash`), **resume steps** (`ingest-start` is idempotent and reports resumed →
+  **re-read THIS file (write-pages.md) before writing any page** — an interrupted session has lost the
+  writing contracts; the seed scaffold in a fresh page shows the right shape but never overrides this file →
+  per-window loop), and a one-line **writing discipline** reminder (concepts via resolve-concept, full-path
+  wikilinks, 自测题干在块内首行/答案只进嵌套折叠 `> > [!success]-`, interpreter + `PYTHONUTF8=1`).
+  **Do not dump full window logs into RESUME.** When the whole source is done,
   rename the heading to `## DONE` so resume is not misled.
   - **Rolling digest discipline (prevents context bloat; unattended resume depends on it):** keep only the
     **last 8 windows** in per-window detail; fold older windows into **chapter-level summaries** (one line per

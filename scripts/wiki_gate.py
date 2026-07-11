@@ -252,6 +252,11 @@ def lint_pages(vault, pages: list[dict]) -> list[dict]:
             if ct.lower() not in CALLOUT_WHITELIST:
                 hit(rel, "callout-unknown",
                     f"未知 callout 类型 [!{ct}]（白名单：{', '.join(sorted(CALLOUT_WHITELIST))}）")
+        # 块内同级 callout 头 → 渲染成字面量、折叠答案明文可见（嵌套须 `> > [!type]`）→ 阻断
+        for bad in page_rules.malformed_nested_callouts(page_rules.strip_code_blocks(body)):
+            hit(rel, "callout-nested-malformed",
+                f"callout 块内出现同级 `[!…]` 头，会被 Obsidian 渲染成字面量文本（答案不再折叠）；"
+                f"嵌套请写 `> > [!type]`，或用真空行结束上一个块：{bad}")
     # 综合层缺失（阶段 E 是一等产物，spec §3）：本批产出 concept 却无任何综合层页 → fail-closed
     n_skip = concepts_without_synthesis(pages)
     if n_skip:

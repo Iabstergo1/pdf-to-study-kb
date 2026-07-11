@@ -168,6 +168,26 @@ def test_extract_question_stems():
     assert page_rules.extract_question_stems("无题正文。\n") == []
 
 
+def test_malformed_nested_callouts():
+    # 块内同级 callout 头（前一行也是引用行）→ Obsidian 渲染成字面量、答案明文可见 → 命中
+    bad = ("> [!question]\n"
+           "> 为什么重新打包不会改写提交历史？\n"
+           ">\n"
+           "> [!success]- 答案\n"
+           "> pack 只改变对象的压缩和布局。\n")
+    assert page_rules.malformed_nested_callouts(bad) == ["[!success]- 答案"]
+    # 正确嵌套（> > 双层）→ 不命中
+    good = ("> [!question] 自测\n"
+            "> 为什么？\n"
+            "> > [!success]- 参考答案\n"
+            "> > 因为。\n")
+    assert page_rules.malformed_nested_callouts(good) == []
+    # 两个独立 callout 之间隔真空行（块已结束）→ 不命中
+    two = ("> [!question] 自测\n> 第一问？\n\n> [!tip] 提示\n> 内容。\n")
+    assert page_rules.malformed_nested_callouts(two) == []
+    assert page_rules.malformed_nested_callouts("普通正文。\n") == []
+
+
 def test_device_usage_counts():
     body = ("正文。**命题（先发优势）**：领导者利润严格更高。\n\n"
             "结论：均衡唯一。\n\n"

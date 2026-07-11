@@ -164,9 +164,10 @@ def test_resolve_or_create_creates_when_miss(tmp_path):
     meta, body = mdpage.read_page(path)
     assert meta["status"] == "proposed" and meta["managed_by"] == "pipeline"
     assert meta["scope"] == "domain" and meta["domain"] == "game-theory"
-    # §8 concept 最小结构小节齐全
-    for sec in ("## 一句话", "## 直觉", "## 形式化", "## 各章如何处理", "## 与其他概念的关系"):
-        assert sec in body
+    # 种子脚手架 = 散文占位 + 正确嵌套的自测示例（D-4 之后无强制小节；防会话恢复后照旧骨架填空）
+    assert "（待 /ingest 填写" in body            # placeholder-unfilled 门禁仍可兜住未填页
+    assert "> > [!success]-" in body              # 自测嵌套折叠示例随种子进页（收割契约）
+    assert "## 一句话" not in body                # 已废除的强制小节骨架不得再种进新页
 
 
 def test_same_name_different_domain_stays_separate(tmp_path):
@@ -192,7 +193,7 @@ def test_create_concept_body_follows_template(tmp_path):
     path = concept_store.create_concept(tmp_path, domain="d", name="纳什均衡")
     _, body = mdpage.read_page(path)
     assert body == tpl_body.replace("{name}", "纳什均衡")
-    assert "## 自测" in body  # 模板新增小节随之生效
+    assert "> > [!success]-" in body  # 模板携带正确嵌套的自测示例（收割契约随种子进页）
 
 
 def test_create_concept_falls_back_when_template_missing(tmp_path):
@@ -201,7 +202,7 @@ def test_create_concept_falls_back_when_template_missing(tmp_path):
     try:
         path = concept_store.create_concept(tmp_path, domain="d", name="回退概念")
         _, body = mdpage.read_page(path)
-        assert "## 直觉" in body  # 回退到内置 CONCEPT_BODY，骨架仍完整
+        assert "（待 /ingest 填写" in body and "> > [!success]-" in body  # 回退常量与模板同构（散文占位+嵌套自测示例）
     finally:
         concept_store._TEMPLATES_DIR = orig
 
