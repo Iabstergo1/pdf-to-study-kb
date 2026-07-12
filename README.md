@@ -117,7 +117,7 @@ Claude / Codex（ingest skill）：
   → 先读 chapters.json（全书章节图）建立全书理解，按章判断内容路由（理论/方法/案例/参考/观点，advisory，写进 digest 路由表）
   → 按章组织、读整源 / 难页图，写 concepts/lessons（难页源图只作阅读证据：公式原生 KaTeX、表 Markdown、图 mermaid/散文重建，绝不嵌入正文；status: proposed；正文按装置预算克制使用推导折叠/案例解剖/定位段/具名命题等阅读兴趣写法）
   → 经 resolve-concept 归一同名概念（命中即合并，绝不重复建页）
-  → 跑收尾 lint：通过则 promote 进 index；失败则回滚 + 写 Review-Queue 并告诉你怎么修（回滚会连同被还原的就地编辑清单一并列出，修复后需重新应用）
+  → 跑收尾 lint（两段隔离）：全库旧页渲染旧伤 → 阻断但不回滚当前批（修旧页直接重跑）；当前批违规 → 回滚 + 写 Review-Queue 并告诉你怎么修（回滚会连同被还原的就地编辑清单一并列出，修复后需重新应用）
   → 汇报：发布了哪些页 / 哪些进了复核队列
 ```
 
@@ -150,7 +150,9 @@ flowchart TD
     P --> W["② LLM 写库（同一会话）<br/>读 chapters.json 全书图 + 按章读整源 / 难页图 → 写 status:proposed 页（难页原生重建，源图不入正文）<br/>→ resolve-concept 归一 + 综合层"]
     W --> G{"③ lint 收尾门禁"}
     G -->|通过| Pub["promote → published<br/>重建 index / registry（aliases.md 已废弃）"]
-    G -->|不过| RQ["回滚就地改动 + 写 Review-Queue"]
+    G -->|旧页渲染旧伤| VH["vault preflight 阻断<br/>（当前批不回滚），修旧页重跑"]
+    G -->|当前批违规| RQ["回滚就地改动 + 写 Review-Queue"]
+    VH --> Stop
     Pub --> Stop["仅在需人工决策时停下问你<br/>lint 失败 / 覆盖冲突 / 跨域提升 / human 页"]
     RQ --> Stop
 ```
@@ -465,7 +467,8 @@ registered → profiled → converted → windowed → workorder_ready
 | 故障 | 现象 | 恢复 |
 |------|------|------|
 | **阶段崩溃** | 卡在 `running` | `pipeline.py fail --source X --stage <阶段> --error "原因"` → 重跑该阶段 |
-| **lint 失败** | source 进 `lint/failed` | 自动回滚就地 merge、违规写 `Review-Queue/`；修复后重跑 `lint`，或重走 ingest |
+| **lint 失败（当前批违规）** | source 进 `lint/failed` | 自动回滚就地 merge、违规写 `Review-Queue/`；修复后重跑 `lint`，或重走 ingest |
+| **lint 被 vault preflight 阻断（旧页渲染旧伤）** | 报 `vault-preflight`，source **不进** `lint/failed`、当前批不回滚 | 按 `Review-Queue/vault-health-*.md` 修旧页（人工小修或 reopen 其来源）后直接重跑 `lint` |
 | **孤儿 proposed 页** | 不归属任何 source | 阻断 lint（fail-closed）；按 Review-Queue 提示补归属后重跑 |
 | **ingest 崩溃残留锁** | `status` 显示 `[STALE]` | `next` 给建议，`unlock` 回收（默认 heartbeat 超 1800s 才允许） |
 

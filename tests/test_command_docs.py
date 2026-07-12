@@ -49,7 +49,7 @@ def test_docs_command_count_matches_cli():
     n = len(_cli_subcommands())
     for rel in ["docs/user-guide.md", "docs/developer-guide.md"]:
         text = (ROOT / rel).read_text(encoding="utf-8")
-        claims = [int(m) for m in re.findall(r"(\d+)\s*个\**子命令", text)]
+        claims = [int(m) for m in re.findall(r"(\d+)\s*个\**\s*(?:CLI\s*)?子命令", text)]
         assert claims, f"{rel} 未声明子命令数"
         assert all(c == n for c in claims), f"{rel} 声称的子命令数 {claims} ≠ CLI 真值 {n}"
         table_rows = [ln for ln in text.splitlines() if ln.lstrip().startswith("|")]
@@ -57,14 +57,15 @@ def test_docs_command_count_matches_cli():
         assert "--session" in text and "kb-save" in text, f"{rel} 缺 kb-save 会话发布路径说明"
 
 
-def test_docs_no_hardcoded_test_counts_outside_dev_guide():
-    # 文档守卫（复审教训：精确测试数写进五份文档，刚更新就再次过期）：
-    # 测试计数只允许开发指南保留一次快照，其余文档一律"以 pytest --collect-only 为准"。
+def test_docs_no_hardcoded_test_counts():
+    # 文档守卫（复审教训：精确测试数写进文档当场腐烂——连"只留一处快照"也在同一轮内过期）：
+    # 五份文档一律不写精确测试计数，"以 pytest --collect-only 为准"。
     import re
-    for rel in ["README.md", "docs/user-guide.md", "CLAUDE.md", "AGENTS.md"]:
+    for rel in ["README.md", "docs/user-guide.md", "docs/developer-guide.md",
+                "CLAUDE.md", "AGENTS.md"]:
         text = (ROOT / rel).read_text(encoding="utf-8")
         hits = re.findall(r"\d{3,}\s*(?:个测试|tests\b|测试\b)", text)
-        assert not hits, f"{rel} 仍硬编码测试数量 {hits}（会随提交漂移；只在开发指南留快照）"
+        assert not hits, f"{rel} 仍硬编码测试数量 {hits}（会随提交漂移；以 collect-only 为准）"
 
 
 def test_docs_no_stale_source_image_or_scaffold_claims():
