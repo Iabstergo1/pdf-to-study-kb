@@ -4,7 +4,7 @@
 # 所选 agent 的 headless 模式续跑。每次都是无记忆新会话，但 ingest 进度落在磁盘上
 # （ingest_progress + proposed 页 + digest），新会话不再自己东拼西找：本脚本先取
 # `pipeline.py next --source <src> --resume-packet`（结构化 RESUME_PACKET，含账本判定的下一窗/
-# 写入边界/digest RESUME/恢复关键契约），原样注入 prompt；packet fail-closed（状态或产物矛盾）
+# 写入边界/digest RESUME/恢复关键契约），原样落盘并由单行 prompt 引用；packet fail-closed（状态或产物矛盾）
 # 时记日志退出、不唤起 agent——绝不注入"看起来能继续"的残缺信息。这是恢复体验加固，不是新安全
 # 边界：末端 lint 仍是唯一安全保障。落在冻结期的那次空转/失败退出，下一次（已复位）成功，单调收敛。
 # 第三方 API key（按 token 计费、无 5h 窗口）同样适用，只是不遇冻结。

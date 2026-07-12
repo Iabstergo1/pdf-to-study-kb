@@ -18,6 +18,8 @@ import re
 import sys
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import locks
 import state_store
@@ -75,24 +77,56 @@ def build_resume_packet(*, db_path, staging_dir, repo_root, source_id,
     windows_file = staging / "windows.jsonl"
     source_md = staging / "source.md"
     digest_file = staging / "digest.md"
-    wo_file = staging / "workorder.yaml"
     for p, label in ((windows_file, "windows.jsonl"), (source_md, "source.md")):
         if not p.exists():
             problems.append(f"staging 缺 {label}（{p}）")
     if not digest_file.exists():
         problems.append(f"ingesting 状态但找不到 digest（{digest_file}）——外部记忆缺失，需人工核对")
     wo_row = state_store.get_work_order(db_path, source_id)
+    wo_file = Path(wo_row["path"]) if wo_row is not None else staging / "workorder.yaml"
     if wo_row is None:
         problems.append("workorder 记录缺失（work_orders 表无此 source；先跑 pipeline.py workorder）")
     if not wo_file.exists():
-        problems.append(f"workorder.yaml 缺失（{wo_file}）")
+        problems.append(f"workorder 记录指向的 YAML 缺失（{wo_file}）")
+
+    wo_data = None
+    wo_scope = None
+    if wo_row is not None and wo_file.exists():
+        try:
+            wo_data = yaml.safe_load(wo_file.read_text(encoding="utf-8")) or {}
+        except (OSError, UnicodeError, yaml.YAMLError) as e:
+            problems.append(f"workorder YAML 无法读取：{e}")
+        if isinstance(wo_data, dict):
+            try:
+                db_scope = json.loads(wo_row["write_scope_json"] or "[]")
+            except (TypeError, ValueError) as e:
+                problems.append(f"work_orders.write_scope_json 损坏：{e}")
+                db_scope = None
+            wo_scope = wo_data.get("write_scope")
+            if not isinstance(wo_scope, list):
+                problems.append("workorder YAML 缺合法 write_scope 列表")
+            elif db_scope is not None and wo_scope != db_scope:
+                problems.append("workorder YAML write_scope 与 SQLite 镜像不一致——写入边界真值冲突，需重建 workorder")
+            yaml_registry = wo_data.get("registry")
+            yaml_registry_hash = yaml_registry.get("hash") if isinstance(yaml_registry, dict) else None
+            if yaml_registry_hash != wo_row["registry_hash"]:
+                problems.append("workorder YAML registry.hash 与 SQLite 镜像不一致——需重建 workorder")
+        elif wo_data is not None:
+            problems.append("workorder YAML 根节点不是 mapping")
 
     contract_claude = repo_root / ".claude" / CONTRACT_REL
     contract_codex = repo_root / ".agents" / CONTRACT_REL
     critical = None
     if not contract_claude.exists():
         problems.append(f"写作契约缺失（{contract_claude}）")
-    else:
+    if not contract_codex.exists():
+        problems.append(f"写作契约缺失（{contract_codex}）")
+    if contract_claude.exists() and contract_codex.exists():
+        claude_bytes = contract_claude.read_bytes()
+        codex_bytes = contract_codex.read_bytes()
+        if claude_bytes != codex_bytes:
+            problems.append("双树 write-pages.md 字节不对等——恢复契约真值冲突，先修复 parity")
+    if contract_claude.exists():
         text = contract_claude.read_text(encoding="utf-8")
         if MARK_START not in text or MARK_END not in text:
             problems.append(f"写作契约缺 resume-critical 标记块（需含 {MARK_START} … {MARK_END}）")
@@ -114,6 +148,8 @@ def build_resume_packet(*, db_path, staging_dir, repo_root, source_id,
     finished = [w for w in win_ids if status_by_id.get(w) == "finished"]
     running = [w for w in win_ids if status_by_id.get(w) == "running"]
     failed = [w for w in win_ids if status_by_id.get(w) == "failed"]
+    if len(running) > 1:
+        problems.append(f"账本同时存在多个 running 窗口：{', '.join(running)}——恢复目标不唯一，需人工核对")
     next_win = next((w for w in wins if status_by_id.get(w["window_id"]) != "finished"), None)
 
     resume_block = _extract_resume_block(digest_file.read_text(encoding="utf-8"))
@@ -146,9 +182,6 @@ def build_resume_packet(*, db_path, staging_dir, repo_root, source_id,
                      f"heartbeat={lock_row['heartbeat_at']} stale={'yes' if stale else 'no'}")
     contract_bytes = contract_claude.read_bytes()
     contract_hash = hashlib.sha256(contract_bytes).hexdigest()[:12]
-    parity_note = "（双树字节对等）"
-    if contract_codex.exists() and contract_codex.read_bytes() != contract_bytes:
-        parity_note = "（warning：双树不对等——以 .claude 为准，尽快修复 parity）"
 
     out: list[str] = []
     a = out.append
@@ -186,13 +219,13 @@ def build_resume_packet(*, db_path, staging_dir, repo_root, source_id,
     a(f"sha256={hashlib.sha256(wo_file.read_bytes()).hexdigest()[:12]}")
     a(f"registry_hash={wo_row['registry_hash']}")
     a("write_scope:")
-    for s in json.loads(wo_row["write_scope_json"] or "[]"):
+    for s in wo_scope:
         a(f"- {s}")
     a("")
     a("[writing-contract]")
     a(f"claude={contract_claude}")
     a(f"codex={contract_codex}")
-    a(f"sha256={contract_hash} {parity_note}——动笔前必须完整重读全文，[resume-critical] 只是恢复摘要")
+    a(f"sha256={contract_hash} （双树字节对等）——动笔前必须完整重读全文，[resume-critical] 只是恢复摘要")
     a("")
     a("[resume-critical]")
     a(critical)

@@ -61,7 +61,11 @@ def _mk_env(tmp_path, *, stage="ingesting", digest="- done: 无\n- next: w0000",
         (staging / "digest.md").write_text(
             f"{resume_heading}\n{digest}\n\n## 路由表\n略\n", encoding="utf-8")
     if workorder_yaml:
-        (staging / "workorder.yaml").write_text("source_id: src1\n", encoding="utf-8")
+        (staging / "workorder.yaml").write_text(
+            "source_id: src1\n"
+            "registry:\n  hash: regh\n"
+            "write_scope:\n- domains/misc/**\n- concepts/**\n",
+            encoding="utf-8")
 
     db = tmp_path / "pipeline-workspace/state/study-kb.sqlite"
     state_store.init_db(db)
@@ -209,6 +213,28 @@ def test_running_ledger_window_missing_from_windows_jsonl_fail_closed(tmp_path):
     env = _mk_env(tmp_path)
     state_store.start_window(env["db"], "src1", "w9999", input_hash="h")
     assert "w9999" in _err(env)
+
+
+def test_multiple_running_windows_fail_closed(tmp_path):
+    env = _mk_env(tmp_path, digest="- next: w0000 w0001")
+    state_store.start_window(env["db"], "src1", "w0000", input_hash="h0")
+    state_store.start_window(env["db"], "src1", "w0001", input_hash="h1")
+    assert "多个 running" in _err(env)
+
+
+def test_workorder_yaml_and_db_must_agree(tmp_path):
+    env = _mk_env(tmp_path)
+    (env["staging"] / "workorder.yaml").write_text(
+        "source_id: src1\nregistry:\n  hash: regh\nwrite_scope:\n- other/**\n",
+        encoding="utf-8")
+    assert "write_scope" in _err(env)
+
+
+def test_contract_trees_must_be_byte_equivalent(tmp_path):
+    env = _mk_env(tmp_path)
+    p = env["repo"] / ".agents/skills/ingest/references/write-pages.md"
+    p.write_text(p.read_text(encoding="utf-8") + "\nchanged\n", encoding="utf-8")
+    assert "字节不对等" in _err(env)
 
 
 def test_missing_resume_critical_markers_fail_closed(tmp_path):
