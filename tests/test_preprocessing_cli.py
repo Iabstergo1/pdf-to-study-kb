@@ -114,8 +114,11 @@ def test_show_window_prints_assets_header_by_default(tmp_path):
     assert "page=2" in r.stdout
     assert "formula-borderline" in r.stdout
     assert "pipeline-workspace/staging/book/assets/p0002.png" in r.stdout
-    assert "![[assets/book/p0002.png]]" in r.stdout
     assert "formula text page two" in r.stdout
+    # D-1 回归：运行时提示绝不输出可复制的源图嵌入串或"嵌原图"措辞——每窗都被写作 LLM
+    # 看到的文本曾直接教嵌图，抵消 write-pages 的 D-1 规则（复审抓获）
+    assert "![[assets/" not in r.stdout
+    assert "嵌原图" not in r.stdout and "图嵌" not in r.stdout
 
 
 def test_next_prints_writing_contract_reminder_when_ingesting(tmp_path):

@@ -990,11 +990,13 @@ def cmd_show_window(args):
             png = staging / "assets" / f"p{page:04d}.png"
             tier = meta.get("vision_tier", "?")
             reasons = ",".join(meta.get("needs_vision_reason") or [])
+            # 只给 staging 读取路径——绝不输出可复制的 ![[assets/…]] 嵌入串（D-1：源图是
+            # 阅读证据不是发布产物；这里的提示每窗都被写作 LLM 看到，措辞必须与 write-pages 一致）
             asset_lines.append(
-                f"- page={page} tier={tier} reason={reasons} "
-                f"staging={png.as_posix()} vault=![[assets/{args.source}/p{page:04d}.png]]")
+                f"- page={page} tier={tier} reason={reasons} staging={png.as_posix()}")
         if asset_lines:
-            print("<!-- route-b-assets：本窗难页，读图保真（must 必读；nice 至少快速查看；公式写 KaTeX、图嵌原图、表 markdown+源图） -->")
+            print("<!-- route-b-assets：本窗难页源图（must 必读；nice 至少快速查看）。源图只是阅读证据："
+                  "公式原生 KaTeX、表 Markdown/散文、图 mermaid/散文重建——绝不在发布正文嵌入源图（D-1 硬禁） -->")
             for ln in asset_lines:
                 print(ln)
             print("<!-- /route-b-assets -->")

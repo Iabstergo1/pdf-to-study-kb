@@ -91,7 +91,8 @@ def convert(src_path, *, out_dir, input_hash: str):
 
     if needs_vision_pages:
         print(f"[info] source-convert(pymupdf)：{len(needs_vision_pages)} 个难页已渲染整页 PNG"
-              f"（route B 读图保真：公式写 KaTeX、图嵌原图、表 markdown+源图）。", file=sys.stderr)
+              f"（route B：源图仅供 LLM 读取——公式原生 KaTeX、表 Markdown/散文、图 mermaid/散文重建，"
+              f"发布正文绝不嵌入源图，D-1）。", file=sys.stderr)
 
     report = sa.build_parse_report(
         "pymupdf", input_hash=input_hash, routing_advice=_routing_advice(pages),
