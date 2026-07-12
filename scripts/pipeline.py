@@ -637,11 +637,12 @@ def cmd_init_vault(args):
     print(f"[OK] vault skeleton at {vault}")
 
 
-# 学习库观感 CSS snippet（零内容改动，纯 .obsidian 配置层）：给概念页六段式标题加色条/卡片感。
+# 学习库观感 CSS snippet（零内容改动，纯 .obsidian 配置层）：给正文标题/callout 加色条与卡片感。
 # 不碰任何 md 内容，对现有页面立即生效。社区共识：好看 = 主题 + snippet + Style Settings + cssclasses。
+# （注：正文结构是散文式、无固定小节——D-4；样式按通用标题/callout 生效，不假设任何骨架。）
 _STUDY_KB_SNIPPET = """\
 /* study-kb：知识库观感增强（由 `pipeline.py apply-obsidian-style` 落地，幂等可重跑）。
-   设计目标：把概念页六段式（一句话/直觉/形式化/各章如何处理/与其他概念的关系/自测）渲染成卡片感，
+   设计目标：给正文标题与 callout 卡片感（正文为散文式组织、无固定小节，样式按通用元素生效），
    不改任何 md 内容、对全部已发布页立即生效。可在 Obsidian 设置→外观→CSS 片段里开关。 */
 
 /* 阅读视图：H2 小节加左色条 + 轻微背景，形成「卡片分段」观感 */
@@ -1877,7 +1878,7 @@ def main():
     subparsers.add_parser("init-vault", help="建 wiki/ 脚手架 + overview/log/purpose 种子（幂等）")
     subparsers.add_parser("apply-obsidian-style",
                           help="落地学习库观感 CSS snippet + merge appearance.json（幂等，纯配置层零内容改动）")
-    subparsers.add_parser("rebuild-registry", help="从概念页 frontmatter 重建 _registry.yaml + aliases.md")
+    subparsers.add_parser("rebuild-registry", help="从概念页 frontmatter 重建 _registry.yaml（aliases.md 已废弃，别名只在概念页 frontmatter）")
     subparsers.add_parser("rebuild-graph",
                           help="重建知识图谱：graph-data + 力导向交互 HTML（零 LLM，手动 fail-hard；点击节点跳 Obsidian）")
     subparsers.add_parser("graph-lint",

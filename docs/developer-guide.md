@@ -3,7 +3,12 @@
 > 本文面向开发者，描述仓库 `D:\pdf-to-study-kb` 的架构、模块职责、数据契约、命令层与测试。
 > 所有结论以**源码为准**。
 > 面向使用者的操作说明见 [用户使用说明](user-guide.md)。
-> 版本锚点：`main` 分支 `8cd4db0`（2026-07-10 全量核对）；fast 层 517 测试 / 全量 584 测试 / 44 个 CLI 子命令 / 11 个技能 / 46 个测试文件。
+> 版本锚点：`main` 分支 `933a042`（2026-07-12 增量核对）；fast 层 533 测试 / 全量 608 测试 / **45 个 CLI 子命令**（新增 `vault-lint`）/ 11 个技能 / 46 个测试文件。
+> 2026-07-11 六阶段重构后的新机制（§7 已更新，其余章节以源码为准）：统一 callout 解析器
+> `page_rules.parse_callouts`（唯一语法入口，错误不吞节点）、渲染安全唯一实现 + **vault preflight
+> 事务隔离**（published 旧伤阻断 promote 但不回滚当前批）、`vault-lint` 全库健康门禁、归属≠记账
+> （`unaccounted-write`，frontmatter 归属优先/write_set 只回退认领无归属页）、`legacy-concept-scaffold`
+> 防旧模板复辟、kb-save 会话发布路径（`lint --source kb-save --session <run_id>` + `save_session` 内容身份）。
 
 ---
 
@@ -25,7 +30,7 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 
 | 入口 | 文件 | 说明 |
 |------|------|------|
-| 唯一 CLI 入口 | `scripts/pipeline.py` → `main()` | argparse 分发 **44 个**子命令（见 §3）。 |
+| 唯一 CLI 入口 | `scripts/pipeline.py` → `main()` | argparse 分发 **45 个**子命令（见 §3；2026-07-11 新增 `vault-lint`）。 |
 | LLM 编排入口 | `.claude/skills/ingest/SKILL.md`（+ `references/*`） | 端到端入库 skill，唯一的 LLM 写库步骤。 |
 | 无人值守续跑 | `scripts/resume-ingest.ps1` | OS 调度触发的有界续跑脚本（PowerShell）。 |
 | 可选后端安装 | `scripts/install_mineru.py` → `main()` | 按机型自动安装 MinerU + 匹配 CUDA torch。 |
@@ -35,7 +40,7 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 
 | 模块 | 职责 | 关键符号 |
 |------|------|----------|
-| `pipeline.py` | CLI 分发 + 各阶段编排（每个 `cmd_*` 一个子命令，共 44 个） | `main()`、`cmd_*` 函数族、`_workspace_root()`、`_vault_dir()`、`_staging_dir()` |
+| `pipeline.py` | CLI 分发 + 各阶段编排（每个 `cmd_*` 一个子命令，共 45 个） | `main()`、`cmd_*` 函数族、`_workspace_root()`、`_vault_dir()`、`_staging_dir()` |
 | `state_store.py` | 单一业务 SQLite 状态机（**7 张表**）+ 原子阶段 API | `STAGES`、`NEXT`、`start_stage/complete_stage/fail_stage`、`should_run_stage`、`reopen_source`、`reset_source`、`RESETTABLE_TARGETS`、`resolve_review_proposals`、`source_stats`、`*_window` |
 | `locks.py` | 单 vault 写锁（scope 固定 `"vault"`） | `acquire/release/heartbeat/is_stale/break_stale` |
 | `source_profile.py` | L1 逐页 profile + `needs_vision` 判定（公式/图/表/扫描信号） | `profile_source`、`profile_page`、`needs_vision_reasons`、`vision_tier`、`is_scanned_source`、`render_pages_png`、`PROFILER_VERSION="5"` |
@@ -518,14 +523,14 @@ ingest_waiting → ingesting → ingested → lint`。完成 `ingested` 置 `pro
 | `windows.jsonl` | `windows` | 见 §4.6 字段 | ingest（show-window）/preflight | 稳定产物（`WINDOWING_VERSION=5`） |
 | `workorder.yaml` | `workorder` | `write_scope[],registry{hash},concept_pages_snapshot[],other_pages_snapshot[],source{...}` | ingest-start/check-write | 稳定产物（事务契约） |
 | `preflight_eval.json` | `preflight-eval` | `{checks[],summary{ok,warn,fail}}` | CI / 人工 | 建议性报告 |
-| `digest.md` | **ingest skill（LLM）写** | 顶部含 `## ⏩ RESUME` 块 + 一张「路由表」（内容路由，advisory）+ `[routing-deviation]` 偏离标记 + 跨窗滚动摘要 | 续跑定位；`kb-postmortem` 读取偏离标记 | 外部记忆（非 CLI 产物） |
+| `digest.md` | **ingest skill（LLM）写** | 顶部含 `## RESUME` 块（完成后改名 `## DONE`）+ 一张「路由表」（内容路由，advisory；"弱化"行禁裸"跳过"须附理由）+ `[routing-deviation]` / `[window-skip]` 标记 + 跨窗滚动摘要 | 续跑定位（恢复三读=chapters.json+RESUME+write-pages.md）；`kb-postmortem` 读取偏离标记 | 外部记忆（非 CLI 产物） |
 
 ### 5.3 Vault 产物（`wiki/`，用户可见输出）
 
 | 页/文件 | 创建者 | type/frontmatter | 备注 |
 |---------|--------|------------------|-------------|
 | `domains/<d>/lessons/*.md` | ingest（LLM） | `lesson` | 降级可选层；主题命名，非章节复述；须干净散文（无裸 E-ID、脚注配对） |
-| `domains/<d>/concepts/*.md` | ingest 经 resolve-concept | `concept` | `templates/concept.md` 有建议小节（一句话/直觉/形式化/…），但非门禁 |
+| `domains/<d>/concepts/*.md` | ingest 经 resolve-concept | `concept` | `templates/concept.md` 是散文式种子（占位指引+正确嵌套的自测示例；2026-07-11 起旧固定小节骨架已废除，成套复活会被 `legacy-concept-scaffold` 阻断） |
 | `concepts/*.md`（shared） | promote-concept | `concept`(scope=shared) | 同上 |
 | `concepts/_registry.yaml` | 收尾 CLI 派生 | — | `canonical_id → {canonical_name,aliases,scope,domain,page_path}` |
 | `topics/*.md` | ingest（LLM） | `topic` | 概念之上的导航分类层；无运行时模板（已删），结构由 purpose.md + 内容决定 |
@@ -633,12 +638,12 @@ lint 违规 `frontmatter-incomplete`）。
 
 ```powershell
 $env:PYTHONUTF8=1; $bt="$PWD\tmp\pt-$(Get-Random)"
-python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt   # 日常层（当前 517 测试）
-python -m pytest tests -q --basetemp=$bt                                  # 全量门禁（当前 584 测试）
+python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt   # 日常层（当前 533 测试）
+python -m pytest tests -q --basetemp=$bt                                  # 全量门禁（当前 608 测试）
 python -m pytest tests --collect-only -q --basetemp=$bt                   # 只看分层收集
 ```
 
-> 测试计数：fast 层 517 / 全量 584（2026-07-10 `pytest --collect-only` 实测，46 个测试文件）。
+> 测试计数：fast 层 533 / 全量 608（2026-07-12 实测，46 个测试文件）。
 
 `tests/conftest.py` 的 `_FILE_MARKERS` 字典（13 项，其余测试文件不带 tier marker、走日常层）：
 
@@ -699,17 +704,32 @@ _FILE_MARKERS = {
 `check_risk_signals`（扫描·OCR） / `check_orphan_blocks`（孤儿块） / `check_source_ref_integrity` /
 `check_detection_distribution`。`--strict` 遇 high/fail → exit 2。
 
-**lint 发布门禁规则集 = 精确 20 种违规类型**（`wiki_gate.lint_pages`/`lint_risk_traceability` + `pipeline.
-cmd_lint` 自身两条，order/safety/provenance，已穷举）：
+**lint 发布门禁规则集 = 27 个违规标识**（`wiki_gate.lint_pages`/`render_safety_violations`/
+`lint_risk_traceability` + `pipeline.cmd_lint` 自身，order/safety/provenance；2026-07-12 静态提取核对）：
 `L1`（裸 evidence id）/ `evidence-footnote` / `source-image-embed`（D-1/G1 正文禁嵌源图）/
 `frontmatter-incomplete`（G2，非 source 内容页必带 `source_refs`）/ `title-duplicate-h1` /
 `formula-table-pipe` / **`table-wikilink-pipe`**（表格行内 wikilink 别名竖线必须转义为 `[[path\|alias]]`，
-2026-07-08 新增） / `L6-empty-lesson` / `content-too-short` / `broken-link` / `callout-unknown` /
-`L7-synthesis-missing` / `topics-missing` / `placeholder-unfilled`（本轮 proposed 与已 published 页两处
-判定） / **`overview-seed`**（本批产出 concept 时 overview.md 仍是未填充种子 → 阻断，2026-07-08 新增，
-防"lint 失败回滚吃掉 overview 就地编辑、重跑无人复查"） / `concepts-uncovered` / `duplicate-canonical` /
-`risk-traceability`（仅 MinerU 风险源触发） / `unattributed-proposed`（孤儿 proposed 页） /
-**`source-page-missing`**（本批产出 concept 但 `sources/<src>.md` 台账页不存在 → 阻断，2026-07-08 新增）。
+2026-07-08 新增） / `L6-empty-lesson` / `content-too-short` / `broken-link` /
+**渲染安全四条（2026-07-11 六阶段重构，`render_safety_violations` 唯一实现，同一扫描作为
+vault preflight 复检全库 published 页、`vault-lint` CLI 可独立跑）**：`callout-unknown`（类型白名单，
+消费统一 callout 解析器 `page_rules.parse_callouts` 的节点+错误头）/ `callout-nested-malformed`
+（块内同级 `[!type]` 头渲染成字面量、折叠答案泄漏；嵌套须 `> > [!type]`）/
+`math-delimiter-nonobsidian`（`\(…\)`/`\[…\]` Obsidian 不渲染）/ `question-stem-empty`（空题干） /
+`L7-synthesis-missing` / `topics-missing`（两者与 `overview-seed` 同属 ingest 阶段 E 义务，kb-save 会话
+批豁免） / `placeholder-unfilled`（本轮 proposed 与已 published 页两处判定） / **`overview-seed`**
+（2026-07-08 新增，防"lint 失败回滚吃掉 overview 就地编辑、重跑无人复查"） / `concepts-uncovered` /
+`duplicate-canonical` / `risk-traceability`（仅 MinerU 风险源触发） / `unattributed-proposed`（孤儿
+proposed 页：既无 frontmatter 归属也不在任何 write_set） / **`unaccounted-write`**（2026-07-11：归属≠记账
+——本轮 proposed 的 topic/comparison/synthesis/overview 必须入台账：ingest 的窗口 `--writes` 或 kb-save 的
+会话 `candidate_write_set.json`） / **`legacy-concept-scaffold`**（2026-07-11：概念页旧模板骨架标题共现
+≥3 成套复活即阻断，单个自然标题合法） / **`session-candidate-missing`** / **`session-identity-mismatch`**
+（2026-07-12：kb-save 会话完整性——candidate 路径缺失或页面 `save_session` 身份不符即整体 fail-closed） /
+**`source-page-missing`**（本批产出 concept 但 `sources/<src>.md` 台账页不存在 → 阻断，2026-07-08 新增；
+kb-save 会话批豁免）。
+**发布门分两段事务隔离（2026-07-11）**：vault preflight（published 渲染旧伤 → 阻断 promote + 按
+rule+path+content_hash 去重进 `Review-Queue/vault-health-*.md`，**不回滚当前批、不写 lint 阶段状态**）→
+batch lint（当前批违规才回滚快照）。kb-save 发布走会话作用域：`lint --source kb-save --session <run_id>`
+（先过 saved 模式 Q1 契约，candidate 集同时决定 membership 与 accounting）。
 **正文小节标题不是门禁**（D-4：`page_rules.REQUIRED_SECTIONS` 七个页型键仍在，但值已清空为 `[]`，结构
 交写作 LLM + `purpose.md` 决定）。
 

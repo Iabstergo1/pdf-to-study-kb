@@ -23,6 +23,44 @@ def _skill_all(name: str) -> str:
     return "\n".join(parts)
 
 
+def _cli_subcommands() -> list[str]:
+    """从 argparse --help 提取真实子命令清单（文档计数守卫的机器真值）。"""
+    import re
+    import sys
+    out = subprocess.run([sys.executable, str(ROOT / "scripts/pipeline.py"), "--help"],
+                         capture_output=True, text=True, encoding="utf-8").stdout
+    m = re.search(r"\{([a-z0-9,-]+)\}", out)
+    assert m, "cannot extract subcommand list from pipeline.py --help"
+    return m.group(1).split(",")
+
+
+def test_docs_command_count_matches_cli():
+    # 文档守卫（复审教训：README/指南的命令数与 CLI 真值脱节无人发现）：
+    # 用户/开发指南声称的子命令数必须等于 argparse 真实数量，且提及 vault-lint。
+    n = len(_cli_subcommands())
+    for rel in ["docs/user-guide.md", "docs/developer-guide.md"]:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        assert f"{n} 个" in text, f"{rel} 声称的子命令数 ≠ CLI 真值 {n}（更新文档计数）"
+        assert "vault-lint" in text, f"{rel} 缺 vault-lint 命令说明"
+
+
+def test_docs_no_stale_source_image_or_scaffold_claims():
+    # 文档守卫：任何面向模型/用户的文本不得再教"嵌原图"（D-1），脚本不得输出可复制的
+    # 源图嵌入串；开发指南不得再把旧固定小节骨架当作现行模板描述。
+    doc_files = [ROOT / "README.md", ROOT / "docs/user-guide.md", ROOT / "docs/developer-guide.md",
+                 ROOT / "CLAUDE.md", ROOT / "AGENTS.md"]
+    for tree in (ROOT / ".claude/skills", ROOT / ".agents/skills"):
+        doc_files += sorted(tree.rglob("*.md"))
+    for f in doc_files:
+        text = f.read_text(encoding="utf-8")
+        assert "嵌原图" not in text, f"{f.relative_to(ROOT)} 仍在教嵌入源图（D-1 违背）"
+    for py in sorted((ROOT / "scripts").rglob("*.py")):
+        src = py.read_text(encoding="utf-8")
+        assert "vault=![[" not in src, f"{py.relative_to(ROOT)} 仍输出可复制的源图嵌入串"
+    dev = (ROOT / "docs/developer-guide.md").read_text(encoding="utf-8")
+    assert "建议小节（一句话" not in dev, "开发指南仍把已废除的旧模板骨架当现行契约描述"
+
+
 def test_legacy_commands_dir_migrated_to_skills():
     # The command layer migrated to .claude/skills/; the old .claude/commands/ is gone.
     assert not (ROOT / ".claude/commands").exists(), "legacy .claude/commands/ should be deleted"

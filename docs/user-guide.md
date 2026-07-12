@@ -138,7 +138,9 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
      案例解剖/定位段/具名命题等阅读兴趣写法，默认零装置、除自测外一页至多再用一种）；
   4. 经 `resolve-concept` 归一同名概念；
   5. 阶段 E 写综合层（overview/topic/comparison/synthesis）；
-  6. 跑收尾 `lint`：通过则 promote 进 index；失败则回滚（**回滚会连同被就地修改的页一起还原**，
+  6. 跑收尾 `lint`（两段事务隔离）：先 vault preflight 复检全库已发布页的渲染安全旧伤——发现即阻断
+     发布并登记 `Review-Queue/vault-health-*.md`，但**不回滚当前批**（修旧页后直接重跑）；随后检查
+     当前批，通过则 promote 进 index；**当前批违规**才回滚（**回滚会连同被就地修改的页一起还原**，
      报告会列出被还原的文件清单，修复违规后须重新应用这些页的改动）+ 写 Review-Queue 并告诉你怎么修；
   7. 汇报：发布了哪些页 / 哪些进了复核队列。
 - **生成文件**：`pipeline-workspace/staging/<src>/` 全套预处理产物 + `wiki/` 下各类页 + `wiki/assets/<src>/` 难页图。
@@ -188,7 +190,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 ### 5.3 底层 CLI 操作（高级排障 / 手动重跑）
 
 > 所有 skill 背后都是 `python scripts/pipeline.py <command>`。下面按生命周期分组，标注**必填/可选参数**。
-> 共 **44 个**子命令（完整实现映射见开发文档 §3）。
+> 共 **45 个**子命令（完整实现映射见开发文档 §3；含 `vault-lint` 全库渲染安全健康门禁与 `lint --source kb-save --session <run_id>` 会话发布路径）。
 
 **状态与维护：**
 
@@ -520,8 +522,8 @@ python scripts/pipeline.py staging-clean --source game-theory --apply   # 确认
 
 # ── 10. 测试（开发者） ──
 $bt="$PWD\tmp\pt-$(Get-Random)"
-python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt   # 日常层（约 517 测试）
-python -m pytest tests -q --basetemp=$bt                                  # 全量门禁（约 584 测试）
+python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt   # 日常层（约 533 测试）
+python -m pytest tests -q --basetemp=$bt                                  # 全量门禁（约 608 测试）
 
 # ── 11. 在 Obsidian 阅读 ──
 #   Obsidian → Open folder as vault → 选项目里的 wiki/ 目录 → 从 overview.md 读起

@@ -35,7 +35,8 @@ add worked examples to key concepts, trim redundant wikilinks to strong relation
 ## Acceptance
 
 - Pass: `pipeline status` shows the source `lint / published`; `index.generated.md` includes the new pages (published only); **synthesis exists (no `L7-synthesis-missing`)**.
-- Fail: rolled back to pre-ingest, violations in Review-Queue, the source sits at `lint/failed` (the state machine allows a return to `ingest_waiting` to re-run after fixes).
+- Fail (current-batch violations): rolled back to pre-ingest, violations in Review-Queue, the source sits at `lint/failed` (the state machine allows a return to `ingest_waiting` to re-run after fixes).
+- Blocked by vault preflight (old published pages' render-safety): **no rollback and no `lint/failed` state** — the batch stays proposed intact; fix the old page(s) listed in `Review-Queue/vault-health-*.md`, then simply re-run `lint`.
 
 After publish, optionally run the `kb-postmortem` skill: proxy metrics + digest deviations + backlog delta
 into one retrospective report, so this book's lessons feed the skill-evolution loop instead of evaporating.

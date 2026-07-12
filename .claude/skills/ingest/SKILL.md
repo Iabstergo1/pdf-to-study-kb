@@ -78,12 +78,13 @@ incremental reopen        reopen → ingest-start →[ per-window backfill ]→ 
 > block_ids / risk_flags / assets); **do not guess ranges from `source.md` char offsets.** Block-mode
 > (MinerU / structured) pages keep traceable `block_ids` / `source_refs` / `assets`.
 
-> **reopen (incremental backfill of a published source):** to add synthesis / formula source images /
-> worked examples to an already-finished source, first `python scripts/pipeline.py reopen --source <src>` —
-> it rebuilds the work order against the current vault and resets the state machine to `workorder_ready`;
-> then `ingest-start` as usual. lint only promotes this round's new/edited `proposed` pages; existing
-> `published` pages stay. New synthesis pages have no `source:` owner, so **account for them in some
-> window's `--writes`** or they are flagged orphan and blocked.
+> **reopen (incremental backfill of a published source):** to add synthesis / native KaTeX re-expressions
+> of formula pages / worked examples to an already-finished source, first
+> `python scripts/pipeline.py reopen --source <src>` — it rebuilds the work order against the current vault
+> and resets the state machine to `workorder_ready`; then `ingest-start` as usual. lint only promotes this
+> round's new/edited `proposed` pages; existing `published` pages stay. New topic/comparison/synthesis/
+> overview pages carry `source_refs` for **ownership**, but ownership never substitutes for **accounting**
+> — put them in some window's `--writes` or lint blocks them as `unaccounted-write`.
 
 ## 7. Workflow (load references on demand)
 
