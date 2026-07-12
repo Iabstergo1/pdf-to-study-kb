@@ -81,15 +81,20 @@ def is_accounted_write(rel_path: str, accounted: set[str]) -> bool:
 
 
 def belongs_to_source(rel_path: str, meta: dict, source_id: str, written: set[str]) -> bool:
-    """页面**归属**判定（lint/promote 范围隔离，只回答"哪个来源负责这页"）：本 source 的
-    window write_set 优先（覆盖无归属字段的页），其次 frontmatter 归属。
+    """页面**归属**判定（lint/promote 范围隔离，只回答"哪个来源负责这页"）：
+    **frontmatter 归属（source/source_id/source_refs）是最高依据**——归属他源的页即使被
+    本源 write_set 记账也不属于本源（曾复现：source_refs=B 的页被 A 的写集认领后 A/B 双真，
+    A 可代发 B 的页）。仅当页面没有任何 frontmatter 归属字段时，才回退用本源 window
+    write_set 认领（遗留 lesson 等无归属字段页）。`sources/<src>.md` 恒属本源。
     记账检查另走 is_accounted_write——归属命中不等于本轮动作已入台账。"""
-    if rel_path in written or rel_path == f"sources/{source_id}.md":
+    if rel_path == f"sources/{source_id}.md":
         return True
-    if meta.get("source") == source_id or meta.get("source_id") == source_id:
-        return True
-    return any(isinstance(r, dict) and r.get("source") == source_id
-               for r in (meta.get("source_refs") or []))
+    fm_sources = {s for s in (meta.get("source"), meta.get("source_id")) if s}
+    fm_sources |= {r.get("source") for r in (meta.get("source_refs") or [])
+                   if isinstance(r, dict) and r.get("source")}
+    if fm_sources:
+        return source_id in fm_sources
+    return rel_path in written
 
 
 def _link_exists(vault: Path, target: str) -> bool:

@@ -163,6 +163,30 @@ def _mk_saved_session(tmp_path, run_id, writes):
     return sess
 
 
+def test_foreign_source_refs_page_not_published_by_accounting_source(tmp_path):
+    """P0-2 回归（复审复现）：frontmatter 归属他源（source_refs=B）的页，即使被 A 的
+    write_set 记账，也**不得被 A 发布**——归属以 frontmatter 为最高依据，write_set 只在
+    页面没有任何归属字段时回退认领；记账错误由 B 侧 unaccounted-write 暴露。"""
+    _ingest_ready(tmp_path, sid="b")
+    assert _run(["ingest-done", "--source", "b"], tmp_path).returncode == 0
+    _ingest_ready(tmp_path, sid="a")
+    topic = tmp_path / "wiki/topics/他源归属主题.md"
+    mdpage.write_page(topic, {"type": "topic", "status": "proposed", "managed_by": "pipeline",
+                              "title": "他源归属主题", "source_refs": [{"source": "b"}]}, _TOPIC_BODY)
+    # A 把它错误地记进自己的 write_set
+    assert _run(["window-start", "--source", "a", "--window", "w0000", "--hash", "h1"],
+                tmp_path).returncode == 0
+    assert _run(["window-done", "--source", "a", "--window", "w0000",
+                 "--writes", '["topics/他源归属主题.md"]'], tmp_path).returncode == 0
+    assert _run(["ingest-done", "--source", "a"], tmp_path).returncode == 0
+    r = _run(["lint", "--source", "a"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "他源归属主题" not in [l for l in r.stdout.splitlines() if "[lint]" in l]
+    # A 的收尾不发布它：留给 b（跳过），页面保持 proposed
+    assert "归属其他 source" in r.stdout
+    assert mdpage.read_page(topic)[0]["status"] == "proposed"
+
+
 def test_kb_save_session_scoped_membership_and_accounting(tmp_path):
     """P1b：ingest 不再读 query-session 台账（历史会话不得代记账）；kb-save 走
     `lint --source kb-save --session <run_id>`——该会话的 candidate 集同时决定
