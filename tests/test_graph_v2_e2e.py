@@ -56,3 +56,9 @@ def test_rebuild_graph_clusters_and_links_obsidian_single_domain(tmp_path):
     # graph-lint 只校验 graph-data.generated.json，不依赖业务状态机，可在合成 vault 上跑
     linted = _run(["graph-lint"], tmp_path)
     assert linted.returncode == 0, linted.stdout + linted.stderr
+
+
+def test_rebuild_graph_no_vault_fail_hard(tmp_path):
+    # 迁自 test_conversion_backend_cli：无 wiki/ 时 rebuild-graph fail-hard（非静默空产物）。
+    r = _run(["rebuild-graph"], tmp_path)
+    assert r.returncode != 0

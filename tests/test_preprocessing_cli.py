@@ -29,59 +29,41 @@ def test_add_source_then_status(tmp_path):
     assert "note" in r2.stdout and "registered" in r2.stdout
 
 
-def test_source_convert_and_windows_advance_state(tmp_path):
-    note = tmp_path / "raw" / "note.md"
-    note.parent.mkdir(parents=True)
-    note.write_text("# A\n\naaa\n\n# B\n\nbbb\n", encoding="utf-8")
-    _run(["add-source", "--source", "note", "--domain", "misc", "--path", str(note), "--fmt", "md"], tmp_path)
-    assert _run(["profile", "--source", "note"], tmp_path).returncode == 0
-    assert (tmp_path / "pipeline-workspace/staging/note/pages.jsonl").exists()  # profile 真实产出
-    assert _run(["source-convert", "--source", "note"], tmp_path).returncode == 0
-    assert _run(["windows", "--source", "note"], tmp_path).returncode == 0
-    # 产物存在
-    assert (tmp_path / "pipeline-workspace/staging/note/source.md").exists()
-    assert (tmp_path / "pipeline-workspace/staging/note/windows.jsonl").exists()
-    # 状态推进到 windowed/done
-    r = _run(["status"], tmp_path)
-    assert "windowed" in r.stdout
-
-
-def test_windows_artifact_records_windows_jsonl_hash(tmp_path):
-    # P2 回归（2026-06-11 P9 code review）：windows artifact 的 sha256
-    # 必须是 windows.jsonl 本体的 hash，而不是输入 source.md 的 hash。
-    note = tmp_path / "raw" / "note.md"
-    note.parent.mkdir(parents=True)
-    note.write_text("# A\n\naaa\n\n# B\n\nbbb\n", encoding="utf-8")
-    _run(["add-source", "--source", "note", "--domain", "misc", "--path", str(note), "--fmt", "md"], tmp_path)
-    assert _run(["profile", "--source", "note"], tmp_path).returncode == 0
-    assert _run(["source-convert", "--source", "note"], tmp_path).returncode == 0
-    assert _run(["windows", "--source", "note"], tmp_path).returncode == 0
-    wj = tmp_path / "pipeline-workspace/staging/note/windows.jsonl"
-    expected = hashlib.sha256(wj.read_bytes()).hexdigest()
-    db = tmp_path / "pipeline-workspace/state/study-kb.sqlite"
-    rows = [r for r in state_store.list_artifacts(db, "note") if r["kind"] == "windows"]
-    assert rows and rows[0]["sha256"] == expected
-
-
-def test_windows_carry_source_id_and_chapter_fields(tmp_path):
-    # L3：cmd_windows 读 chapters.json，windows.jsonl 每窗带 source_id/chapter_title/
-    # chapter_ids/source_refs（block 窗）。用 markdown 源（单章 ch00-full）端到端验证。
+def test_preprocess_chain_state_artifacts_and_l3_fields(tmp_path):
+    # 同一成功预处理链（add→profile→convert→windows）上的三组追加断言（合并自
+    # advance-state / windows-jsonl-hash 回归 / L3 字段三条，断言全保留）。
     import json
     note = tmp_path / "raw" / "note.md"
     note.parent.mkdir(parents=True)
     note.write_text("# A\n\naaa body text\n\n## B\n\nbbb body text\n", encoding="utf-8")
     _run(["add-source", "--source", "note", "--domain", "misc", "--path", str(note), "--fmt", "md"], tmp_path)
     assert _run(["profile", "--source", "note"], tmp_path).returncode == 0
+    assert (tmp_path / "pipeline-workspace/staging/note/pages.jsonl").exists()  # profile 真实产出
     assert _run(["source-convert", "--source", "note"], tmp_path).returncode == 0
     assert _run(["windows", "--source", "note"], tmp_path).returncode == 0
+
+    # ① 产物存在 + 状态推进到 windowed/done。
+    assert (tmp_path / "pipeline-workspace/staging/note/source.md").exists()
     wj = tmp_path / "pipeline-workspace/staging/note/windows.jsonl"
+    assert wj.exists()
+    r = _run(["status"], tmp_path)
+    assert "windowed" in r.stdout
+
+    # ② P2 回归（2026-06-11 P9 code review）：windows artifact 的 sha256 必须是
+    # windows.jsonl 本体的 hash，而不是输入 source.md 的 hash。
+    expected = hashlib.sha256(wj.read_bytes()).hexdigest()
+    db = tmp_path / "pipeline-workspace/state/study-kb.sqlite"
+    rows = [r for r in state_store.list_artifacts(db, "note") if r["kind"] == "windows"]
+    assert rows and rows[0]["sha256"] == expected
+
+    # ③ L3：cmd_windows 读 chapters.json，windows.jsonl 每窗带 source_id/chapter_title/
+    # chapter_ids/source_refs（block 窗；markdown 单章 ch00-full）。
     ws = [json.loads(l) for l in wj.read_text(encoding="utf-8").splitlines() if l.strip()]
     assert ws
     for w in ws:
         assert w["source_id"] == "note"
         assert w["mode"] == "blocks"
         assert "chapter_title" in w and "chapter_ids" in w and "source_refs" in w
-        # markdown 单章 ch00-full → 窗内 blocks 的 chapter_id 应含之
         assert w["chapter_ids"] == ["ch00-full"]
         # source_refs 与 block_ids 等长对齐
         assert len(w["source_refs"]) == len(w["block_ids"])
@@ -106,8 +88,13 @@ def _make_show_window_staging(tmp_path):
     return staging
 
 
-def test_show_window_prints_assets_header_by_default(tmp_path):
+def test_show_window_header_plain_and_read_ledger(tmp_path):
+    # 同一 staging 上的 show-window 顺序场景（合并自 默认资产头 / --plain 抑制 / 读窗记账
+    # 三条，断言全保留；记账断言改为渐进式，额外覆盖跨窗累积）。
     _make_show_window_staging(tmp_path)
+    db = tmp_path / "pipeline-workspace" / "state" / "study-kb.sqlite"
+
+    # ① 默认输出：难页资产头 + 窗文本。
     r = _run(["show-window", "--source", "book", "--window", "w0001"], tmp_path)
     assert r.returncode == 0, r.stderr
     assert "<!-- route-b-assets" in r.stdout
@@ -119,6 +106,20 @@ def test_show_window_prints_assets_header_by_default(tmp_path):
     # 看到的文本曾直接教嵌图，抵消 write-pages 的 D-1 规则（复审抓获）
     assert "![[assets/" not in r.stdout
     assert "嵌原图" not in r.stdout and "图嵌" not in r.stdout
+    # 读窗即记账。
+    assert state_store.window_read_ids(db, "book") == {"w0001"}
+
+    # ② --plain 抑制资产头（正文仍在）；重复读同窗不炸、不重复记账（幂等）。
+    r = _run(["show-window", "--source", "book", "--window", "w0001", "--plain"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "<!-- route-b-assets" not in r.stdout
+    assert "formula text page two" in r.stdout
+    assert state_store.window_read_ids(db, "book") == {"w0001"}
+
+    # ③ 读另一窗：记账跨窗累积（空写集跳窗是否真读过窗内容，事后可审计）。
+    r = _run(["show-window", "--source", "book", "--window", "w0000"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert state_store.window_read_ids(db, "book") == {"w0000", "w0001"}
 
 
 def test_next_prints_writing_contract_reminder_when_ingesting(tmp_path):
@@ -138,19 +139,6 @@ def test_next_prints_writing_contract_reminder_when_ingesting(tmp_path):
     assert "[contract] write-pages.md sha256=" in r2.stdout
 
 
-def test_show_window_records_window_read(tmp_path):
-    """show-window 留痕：读窗即在状态库记账（空写集跳窗是否真读过窗内容，事后可审计）。"""
-    _make_show_window_staging(tmp_path)
-    r = _run(["show-window", "--source", "book", "--window", "w0000"], tmp_path)
-    assert r.returncode == 0, r.stderr
-    db = tmp_path / "pipeline-workspace" / "state" / "study-kb.sqlite"
-    assert state_store.window_read_ids(db, "book") == {"w0000"}
-    # 幂等：重复读同窗不炸、不重复记账
-    r2 = _run(["show-window", "--source", "book", "--window", "w0000"], tmp_path)
-    assert r2.returncode == 0, r2.stderr
-    assert state_store.window_read_ids(db, "book") == {"w0000"}
-
-
 def test_show_window_no_header_when_no_needs_vision_page(tmp_path):
     _make_show_window_staging(tmp_path)
     # w0000 只覆盖 page 1（needs_vision=false）→ 无资产头，纯文本
@@ -158,14 +146,6 @@ def test_show_window_no_header_when_no_needs_vision_page(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "<!-- route-b-assets" not in r.stdout
     assert "plain text page one" in r.stdout
-
-
-def test_show_window_plain_suppresses_assets_header(tmp_path):
-    _make_show_window_staging(tmp_path)
-    r = _run(["show-window", "--source", "book", "--window", "w0001", "--plain"], tmp_path)
-    assert r.returncode == 0, r.stderr
-    assert "<!-- route-b-assets" not in r.stdout
-    assert "formula text page two" in r.stdout
 
 
 def test_source_convert_fail_closed_on_scanned_source(tmp_path):

@@ -34,13 +34,19 @@ def _seed_db(cwd):
     return db
 
 
-def test_skill_mine_clusters_review_proposals_by_kind_with_counts(tmp_path):
+def test_skill_mine_backlog_clusters_counts_sources_and_sample_reason(tmp_path):
+    # 一次挖掘验证 backlog 全部内容契约（合并自 按 kind 聚类计数 / 跨源 entry 两条，断言全保留）：
+    # 同一规则反复失败 = 值得沉淀的信号，一次性失败 = 噪声；同一签名跨多个来源更值得沉淀，
+    # entry 要带上是谁、给个样例原因供人 triage。
     db = _seed_db(tmp_path)
-    # 同一规则反复失败 = 值得沉淀的信号；一次性失败 = 噪声。
+    state_store.register_source(db, "s2", domain="economics", fmt="pdf")
     for i in range(3):
         state_store.add_review_proposal(
             db, "s1", target_path=f"domains/algorithms/lessons/p{i}.md",
             kind="broken-link", reason="dangling wikilink")
+    state_store.add_review_proposal(
+        db, "s2", target_path="domains/economics/lessons/b.md",
+        kind="broken-link", reason="dangling wikilink to baz.md")
     state_store.add_review_proposal(
         db, "s1", target_path="domains/algorithms/lessons/q.md",
         kind="missing-section", reason="lesson missing evidence section")
@@ -50,29 +56,10 @@ def test_skill_mine_clusters_review_proposals_by_kind_with_counts(tmp_path):
 
     backlog = tmp_path / "pipeline-workspace" / "skill-evolution" / "backlog.yaml"
     assert backlog.exists(), "skill-mine 应产出 backlog.yaml"
-
     data = yaml.safe_load(backlog.read_text(encoding="utf-8"))
     counts = {e["signature"]: e["count"] for e in data["backlog"]}
-    assert counts["broken-link"] == 3
+    assert counts["broken-link"] == 4
     assert counts["missing-section"] == 1
-
-
-def test_skill_mine_backlog_entry_records_sources_and_sample_reason(tmp_path):
-    db = _seed_db(tmp_path)
-    state_store.register_source(db, "s2", domain="economics", fmt="pdf")
-    # 同一签名跨多个来源出现 → 更值得沉淀；entry 要带上是谁、给个样例原因供人 triage。
-    state_store.add_review_proposal(
-        db, "s1", target_path="domains/algorithms/lessons/a.md",
-        kind="broken-link", reason="dangling wikilink to bar.md")
-    state_store.add_review_proposal(
-        db, "s2", target_path="domains/economics/lessons/b.md",
-        kind="broken-link", reason="dangling wikilink to baz.md")
-
-    r = _run(tmp_path, "skill-mine")
-    assert r.returncode == 0, r.stderr
-
-    backlog = tmp_path / "pipeline-workspace" / "skill-evolution" / "backlog.yaml"
-    data = yaml.safe_load(backlog.read_text(encoding="utf-8"))
     entry = next(e for e in data["backlog"] if e["signature"] == "broken-link")
     assert sorted(entry["sources"]) == ["s1", "s2"]
     assert entry["sample_reason"]  # 非空，给人 triage 用
@@ -113,56 +100,15 @@ def test_skill_gate_rejects_candidate_touching_tests(tmp_path):
     assert "gate-integrity" in out and "tests/test_ok.py" in out
 
 
-def test_skill_gate_passes_skill_only_candidate(tmp_path):
-    _init_repo(tmp_path)
-    # 候选只动 skill 两树（合法范围），仓内 tests 通过 → gate 应放行（exit 0）。
-    for tree in (".claude/skills/foo", ".agents/skills/foo"):
-        (tmp_path / tree / "SKILL.md").write_text("# foo\nv2 improved\n", encoding="utf-8")
-
-    r = _run(tmp_path, "skill-gate", "--candidate", "c2")
-    out = r.stdout + r.stderr
-    assert r.returncode == 0, out
-    assert "PASS" in out
-
-
 # ---- skill-stage / skill-adopt：登记提案 → 人采纳进双树 ----
+# happy-path（gate PASS / stage 落 proposal+audit / adopt 提交双树）收拢进
+# test_skill_evolution_end_to_end_loop；这里保留的是两道不同的安全边界拒绝。
 
 def _audit_rows(cwd):
     audit = cwd / "pipeline-workspace/skill-evolution/audit.jsonl"
     if not audit.exists():
         return []
     return [json.loads(l) for l in audit.read_text(encoding="utf-8").splitlines() if l.strip()]
-
-
-def test_skill_stage_records_proposal_and_audit(tmp_path):
-    _init_repo(tmp_path)
-    for tree in (".claude/skills/foo", ".agents/skills/foo"):
-        (tmp_path / tree / "SKILL.md").write_text("# foo\nv2\n", encoding="utf-8")
-
-    r = _run(tmp_path, "skill-stage", "--candidate", "c1")
-    assert r.returncode == 0, r.stdout + r.stderr
-
-    diff = tmp_path / "pipeline-workspace/skill-evolution/candidates/c1/proposal.diff"
-    assert diff.exists() and diff.read_text(encoding="utf-8").strip(), "应落 proposal.diff 供人审"
-    assert any(x["candidate"] == "c1" and x["event"] == "staged" for x in _audit_rows(tmp_path))
-    # 线上不动：proposal 已登记，但未提交（working tree 仍 dirty）。
-    assert _git(tmp_path, "status", "--porcelain").stdout.strip()
-
-
-def test_skill_adopt_commits_candidate_to_both_trees(tmp_path):
-    _init_repo(tmp_path)
-    for tree in (".claude/skills/foo", ".agents/skills/foo"):
-        (tmp_path / tree / "SKILL.md").write_text("# foo\nv2 adopted\n", encoding="utf-8")
-
-    r = _run(tmp_path, "skill-adopt", "--candidate", "c1")
-    out = r.stdout + r.stderr
-    assert r.returncode == 0, out
-
-    # 已采纳：HEAD 含双树改动，working tree 干净（pipeline-workspace 已 gitignore）。
-    show = _git(tmp_path, "show", "--stat", "HEAD").stdout
-    assert ".claude/skills/foo/SKILL.md" in show and ".agents/skills/foo/SKILL.md" in show
-    assert not _git(tmp_path, "status", "--porcelain").stdout.strip()
-    assert any(x["candidate"] == "c1" and x["event"] == "adopted" for x in _audit_rows(tmp_path))
 
 
 def test_skill_adopt_refuses_candidate_that_fails_gate(tmp_path):
@@ -201,12 +147,24 @@ def test_skill_evolution_end_to_end_loop(tmp_path):
         (tmp_path / tree / "SKILL.md").write_text(
             "# foo\nv2：写 wikilink 前先确认目标页存在\n", encoding="utf-8")
 
-    # gate → stage → adopt
-    assert _run(tmp_path, "skill-gate", "--candidate", "fix-links").returncode == 0
-    assert _run(tmp_path, "skill-stage", "--candidate", "fix-links").returncode == 0
-    assert _run(tmp_path, "skill-adopt", "--candidate", "fix-links").returncode == 0
+    # gate：skill-only 候选放行（exit 0 + PASS）。
+    rg = _run(tmp_path, "skill-gate", "--candidate", "fix-links")
+    assert rg.returncode == 0, rg.stdout + rg.stderr
+    assert "PASS" in (rg.stdout + rg.stderr)
 
+    # stage：落 proposal.diff 供人审 + audit staged；线上不动（working tree 仍 dirty）。
+    rs = _run(tmp_path, "skill-stage", "--candidate", "fix-links")
+    assert rs.returncode == 0, rs.stdout + rs.stderr
+    diff = tmp_path / "pipeline-workspace/skill-evolution/candidates/fix-links/proposal.diff"
+    assert diff.exists() and diff.read_text(encoding="utf-8").strip(), "应落 proposal.diff 供人审"
+    assert any(x["candidate"] == "fix-links" and x["event"] == "staged" for x in _audit_rows(tmp_path))
+    assert _git(tmp_path, "status", "--porcelain").stdout.strip()
+
+    # adopt：提交双树改动，working tree 干净（pipeline-workspace 已 gitignore）+ audit adopted。
+    ra = _run(tmp_path, "skill-adopt", "--candidate", "fix-links")
+    assert ra.returncode == 0, ra.stdout + ra.stderr
     events = {x["event"] for x in _audit_rows(tmp_path)}
     assert {"staged", "adopted"} <= events  # 全程留痕
     show = _git(tmp_path, "show", "--stat", "HEAD").stdout
     assert ".claude/skills/foo/SKILL.md" in show and ".agents/skills/foo/SKILL.md" in show
+    assert not _git(tmp_path, "status", "--porcelain").stdout.strip()

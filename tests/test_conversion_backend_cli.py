@@ -79,36 +79,36 @@ def test_rebuild_registry_no_vault_yet(tmp_path):
 
 # --- Spec 1：pipeline 升级（Task 8/9/10） ---
 
-def test_source_convert_records_blocks_and_parse_report(tmp_path):
-    sid = "p2blk"
-    staging = _preprocess_md(tmp_path, sid, "# A\n\nbody\n")
+def test_markdown_convert_windows_show_window_scenario(tmp_path):
+    # 一条真实 markdown 预处理链上的四组断言（合并自 records-blocks/parse-report、
+    # windows block 模式、show-window 块头、auto 路由保持 markdown 四条，断言全保留）。
+    import json
+    sid = "p2md"
+    staging = _preprocess_md(tmp_path, sid, "# A\n\naaa\n\n# B\n\nbbb\n")
+
+    # ① source-convert 落库 blocks + parse_report artifacts（磁盘产物同在）。
     db = tmp_path / "pipeline-workspace" / "state" / "study-kb.sqlite"
     kinds = {a["kind"] for a in state_store.list_artifacts(db, sid)}
     assert "blocks" in kinds and "parse_report" in kinds
     assert (staging / "blocks.jsonl").exists()
     assert (staging / "parse_report.json").exists()
 
+    # ② 默认 auto 路由：markdown 源保持 markdown 后端。
+    rep = json.loads((staging / "parse_report.json").read_text(encoding="utf-8"))
+    assert rep["selected_backend"] == "markdown"
 
-def test_windows_block_mode_when_blocks_present(tmp_path):
-    import json
-    sid = "p2win"
-    _preprocess_md(tmp_path, sid, "# A\n\naaa\n\n# B\n\nbbb\n")
+    # ③ 有 blocks.jsonl → windows 走 block-aware 模式。
     assert _run(["windows", "--source", sid], tmp_path).returncode == 0
-    staging = tmp_path / "pipeline-workspace" / "staging" / sid
     ws = [json.loads(l) for l in
           (staging / "windows.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
     assert ws and all(w["mode"] == "blocks" for w in ws)
     assert all("block_ids" in w for w in ws)
 
-
-def test_show_window_block_header(tmp_path):
-    sid = "p2show"
-    _preprocess_md(tmp_path, sid, "# A\n\naaa\n")
-    assert _run(["windows", "--source", sid], tmp_path).returncode == 0
+    # ④ show-window：块头（window-meta/heading_path/block_ids）+ 原窗正文都在。
     r = _run(["show-window", "--source", sid, "--window", "w0000"], tmp_path)
     assert r.returncode == 0, r.stderr
     assert "window-meta" in r.stdout and "heading_path=A" in r.stdout
-    assert "block_ids=" in r.stdout and "aaa" in r.stdout      # 块头 + 原窗正文都在
+    assert "block_ids=" in r.stdout and "aaa" in r.stdout
 
 
 # --- Spec 2 C5：pipeline CLI auto 路由（MinerU 本机未装 → 天然 fail-closed） ---
@@ -147,15 +147,6 @@ def test_source_convert_backend_mineru_unavailable_fail_closed(tmp_path, monkeyp
     r = _run(["source-convert", "--source", sid, "--backend", "mineru"], tmp_path)
     assert r.returncode != 0
     assert "install_mineru" in (r.stdout + r.stderr)
-
-
-def test_source_convert_default_auto_md_stays_markdown(tmp_path):
-    import json
-    sid = "p2am"
-    _preprocess_md(tmp_path, sid, "# A\n\nbody\n")   # _preprocess_md 已跑 source-convert（默认 auto）
-    rep = json.loads((tmp_path / "pipeline-workspace" / "staging" / sid / "parse_report.json"
-                      ).read_text(encoding="utf-8"))
-    assert rep["selected_backend"] == "markdown"
 
 
 def test_source_convert_docx_auto_mineru_unavailable_fail_closed(tmp_path, monkeypatch):
@@ -204,27 +195,24 @@ def test_sync_assets_copies_jpg(tmp_path):
 
 # --- dual-audit：source-audit CLI（PyMuPDF + MinerU 双审；MinerU 禁用 → strict fail-closed / dev 降级） ---
 
-def test_source_audit_strict_fail_closed_when_mineru_unavailable(tmp_path, monkeypatch):
-    # strict/生产验收：每个 PDF 都要 MinerU structural review；禁用 → 非零退出（不静默回退 PyMuPDF）。
+def test_source_audit_strict_fail_then_nonstrict_degraded(tmp_path, monkeypatch):
+    # 同一 PDF 源上验证双审的重试语义（合并自 strict fail-closed / non-strict degraded 两条，
+    # 断言全保留）：strict 拒绝不留半成品 → 同源改跑 non-strict 产出显式降级的 reconciliation。
+    import json
     monkeypatch.setenv("MINERU_DISABLE", "1")
-    sid = "p2audit_strict"
+    sid = "p2audit"
     _preprocess_pdf(tmp_path, sid)
     assert _run(["source-convert", "--source", sid, "--backend", "pymupdf"], tmp_path).returncode == 0
+
+    # ① strict/生产验收：每个 PDF 都要 MinerU structural review；禁用 → 非零退出（不静默回退 PyMuPDF）。
     r = _run(["source-audit", "--source", sid, "--strict"], tmp_path)
     assert r.returncode != 0
     blob = (r.stdout + r.stderr)
     assert "dual-audit" in blob.lower() or "install_mineru" in blob
 
-
-def test_source_audit_nonstrict_marks_degraded(tmp_path, monkeypatch):
-    # dev/non-strict：PyMuPDF-only 可产出，但 reconciliation 显式标 degraded / not dual-audited。
-    import json
-    monkeypatch.setenv("MINERU_DISABLE", "1")
-    sid = "p2audit_dev"
-    _preprocess_pdf(tmp_path, sid)
-    assert _run(["source-convert", "--source", sid, "--backend", "pymupdf"], tmp_path).returncode == 0
+    # ② dev/non-strict：同源重试可产出，但 reconciliation 显式标 degraded / not dual-audited。
     r = _run(["source-audit", "--source", sid], tmp_path)
-    assert r.returncode == 0, r.stderr
+    assert r.returncode == 0, r.stdout + r.stderr
     recon = json.loads((tmp_path / "pipeline-workspace" / "staging" / sid
                         / "reconciliation.json").read_text(encoding="utf-8"))
     assert recon["degraded"] is True and recon["dual_audited"] is False
@@ -239,7 +227,9 @@ def test_source_audit_help(tmp_path):
 
 # --- evidence-assembly: arbitration-apply materializes a render decision into route-B assets ---
 
-def test_arbitration_apply_cli_materializes_render(tmp_path):
+def test_arbitration_apply_cli_materializes_render_without_touching_source_md(tmp_path):
+    # 同一 render 决策物化场景（合并自 materializes-render / 不改 source.md 两条，断言全保留）：
+    # arbitration-apply 只动 blocks/pages/assets/evidence，绝不重写主抽取文本。
     import importlib.util as u
     if u.find_spec("fitz") is None:
         import pytest; pytest.skip("pymupdf not installed")
@@ -255,6 +245,8 @@ def test_arbitration_apply_cli_materializes_render(tmp_path):
                 tmp_path).returncode == 0
     staging = tmp_path / "pipeline-workspace" / "staging" / sid
     staging.mkdir(parents=True)
+    (staging / "source.md").write_text(
+        "<!-- page 1 -->\nintro\n<!-- page 2 -->\nMPL w = MPK r\n", encoding="utf-8")
     blocks = [{"block_id": "b1", "type": "text", "text": "t", "page": 1, "char_start": 0, "char_end": 10,
                "heading_path": "", "asset_path": None, "risk_flags": [], "chapter_id": "", "source_ref": "p0001#b1"},
               {"block_id": "b2", "type": "text", "text": "MPL w = MPK r", "page": 2, "char_start": 10,
@@ -270,6 +262,7 @@ def test_arbitration_apply_cli_materializes_render(tmp_path):
     (staging / "arbitration" / "decisions.json").write_text(json.dumps({"decisions": [
         {"page": 2, "decision": "render", "risk_flags": ["formula"], "reason": "flattened fraction"}]}),
         encoding="utf-8")
+    before = (staging / "source.md").read_bytes()
     r = _run(["arbitration-apply", "--source", sid], tmp_path)
     assert r.returncode == 0, r.stderr
     blks = [json.loads(l) for l in (staging / "blocks.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
@@ -278,6 +271,7 @@ def test_arbitration_apply_cli_materializes_render(tmp_path):
     assert (staging / "assets" / "p0002.png").exists()              # the page was actually rendered
     ev = json.loads((staging / "evidence.json").read_text(encoding="utf-8"))
     assert ev["pages"]["2"]["resolution"] == "materialized" and 2 in ev["final_hard_pages"]
+    assert (staging / "source.md").read_bytes() == before           # source.md 字节不变
 
 
 def test_arbitration_cli_help(tmp_path):
@@ -336,43 +330,6 @@ def test_arbitration_resolve_closes_needs_human(tmp_path):
     assert (staging / "assets" / "p0002.png").exists()
 
 
-def test_arbitration_apply_does_not_modify_source_md(tmp_path):
-    # ② arbitration-apply 只动 blocks/pages/assets/evidence，绝不改 source.md（不重写主抽取文本）。
-    import importlib.util as u
-    if u.find_spec("fitz") is None:
-        import pytest; pytest.skip("pymupdf not installed")
-    import fitz
-    import json
-    sid = "arbsrcmd"
-    raw = tmp_path / f"{sid}.pdf"
-    doc = fitz.open()
-    for _ in range(2):
-        doc.new_page().insert_text((72, 72), "page body text here")
-    doc.save(str(raw)); doc.close()
-    assert _run(["add-source", "--source", sid, "--domain", "d", "--path", str(raw), "--fmt", "pdf"],
-                tmp_path).returncode == 0
-    staging = tmp_path / "pipeline-workspace" / "staging" / sid
-    staging.mkdir(parents=True)
-    (staging / "source.md").write_text(
-        "<!-- page 1 -->\nintro\n<!-- page 2 -->\nMPL w = MPK r\n", encoding="utf-8")
-    (staging / "blocks.jsonl").write_text(json.dumps(
-        {"block_id": "b2", "type": "text", "text": "MPL w = MPK r", "page": 2, "char_start": 0,
-         "char_end": 13, "heading_path": "", "asset_path": None, "risk_flags": [], "chapter_id": "",
-         "source_ref": "p0002#b2"}), encoding="utf-8")
-    (staging / "pages.jsonl").write_text(json.dumps(
-        {"page": 2, "needs_vision": False, "needs_vision_reason": []}), encoding="utf-8")
-    (staging / "evidence.json").write_text(json.dumps(
-        {"pages": {"2": {}}, "candidates": [2], "initial_needs_vision": [], "reviewer_structural": [2],
-         "final_hard_pages": []}), encoding="utf-8")
-    (staging / "arbitration").mkdir()
-    (staging / "arbitration" / "decisions.json").write_text(json.dumps({"decisions": [
-        {"page": 2, "decision": "render", "risk_flags": ["formula_text_loss"], "reason": "flattened"}]}),
-        encoding="utf-8")
-    before = (staging / "source.md").read_bytes()
-    assert _run(["arbitration-apply", "--source", sid], tmp_path).returncode == 0
-    assert (staging / "source.md").read_bytes() == before    # source.md 字节不变
-
-
 # --- windows 闸门：未闭环双审分歧时 fail-closed（除非显式 --dev-bypass） ---
 
 def _stage_pending_arbitration(tmp_path, sid):
@@ -386,18 +343,15 @@ def _stage_pending_arbitration(tmp_path, sid):
     return staging
 
 
-def test_windows_fail_closed_on_pending_arbitration(tmp_path):
+def test_windows_pending_arbitration_fail_closed_then_dev_bypass(tmp_path):
+    # 同一未闭环 staging 上的前后两步（合并自 fail-closed / dev-bypass 两条，断言全保留）：
+    # 默认拒绝构窗（失败无副作用），显式 --dev-bypass 才放行（产物降级）。
     sid = "winpend"
     staging = _stage_pending_arbitration(tmp_path, sid)
     r = _run(["windows", "--source", sid], tmp_path)
     assert r.returncode != 0
     assert "未闭环" in (r.stdout + r.stderr) or "un_arbitrated" in (r.stdout + r.stderr)
     assert not (staging / "windows.jsonl").exists()       # 未闭环分歧 → 不产窗
-
-
-def test_windows_dev_bypass_allows_pending_arbitration(tmp_path):
-    sid = "winbypass"
-    staging = _stage_pending_arbitration(tmp_path, sid)
     r = _run(["windows", "--source", sid, "--dev-bypass"], tmp_path)
     assert r.returncode == 0, r.stderr
     assert (staging / "windows.jsonl").exists()           # 显式 dev bypass → 放行（产物降级）
@@ -493,26 +447,5 @@ def test_show_window_default_excludes_arbitration_reason(tmp_path):
     assert "SECRET_REASON_TEXT" in rv.stdout          # --verbose 才显示仲裁详情
 
 
-# --- rebuild-graph / graph-lint CLI (Knowledge Graph v2.0) ---
-
-def test_rebuild_graph_and_graph_lint(tmp_path):
-    import json
-    vault = tmp_path / "wiki"
-    _mk_concept(vault, domain="d", name="A")          # existing helper writes a concept page (proposed)
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("mdpage", ROOT / "scripts" / "mdpage.py")
-    mp = importlib.util.module_from_spec(spec); spec.loader.exec_module(mp)
-    cpath = next((vault / "domains" / "d" / "concepts").glob("*.md"))
-    meta, body = mp.read_page(cpath); meta["status"] = "published"; mp.write_page(cpath, meta, body)
-    r = _run(["rebuild-graph"], tmp_path)
-    assert r.returncode == 0, r.stderr
-    data = json.loads((vault / "graph-data.generated.json").read_text(encoding="utf-8"))
-    assert data["version"] == 2 and data["scope"] == "v2.0"
-    assert (vault / "knowledge-graph.generated.html").exists()
-    assert not (vault / "knowledge-map.generated.canvas").exists()   # canvas 已移除
-    assert _run(["graph-lint"], tmp_path).returncode == 0
-
-
-def test_rebuild_graph_no_vault_fail_hard(tmp_path):
-    r = _run(["rebuild-graph"], tmp_path)
-    assert r.returncode != 0                            # fail-hard when no wiki/
+# rebuild-graph / graph-lint 的 CLI 覆盖收拢到 test_graph_v2_e2e.py（正向断言在
+# 单域社区 e2e 里更强；no-vault fail-hard 负分支随迁）。

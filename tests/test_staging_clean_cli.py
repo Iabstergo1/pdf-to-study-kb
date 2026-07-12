@@ -85,20 +85,39 @@ def _fabricate_junk(tmp_path, sid="note", synced=True):
     return staging
 
 
-def test_dry_run_classifies_and_deletes_nothing(tmp_path):
+def test_dry_run_then_apply_then_idempotent(tmp_path):
+    # 一次发布场景走完整生命周期（合并自 dry-run / apply / 幂等三条，断言全保留）：
+    # 默认 dry-run 只报告不删 → --apply 只删可再生重物 → 再次 --apply 幂等。
     _published(tmp_path)
-    staging = _fabricate_junk(tmp_path)
+    staging = _fabricate_junk(tmp_path, synced=True)
 
+    # ① 默认 dry-run：三分类都出现在报告里；unknown fail-safe 列出但保留；一个字节都不删。
     r = _run(["staging-clean", "--source", "note"], tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "dry-run" in r.stdout
-    # 三分类都要出现在报告里；unknown fail-safe 列出但保留。
     assert "mineru_raw" in r.stdout and "dump_ch1.txt" in r.stdout
     assert "_win_range.py" in r.stdout
-    # 一个字节都不删。
     assert (staging / "mineru_raw" / "sub" / "big.bin").exists()
     assert (staging / "audit" / "raw.json").exists()
     assert (staging / "dump_ch1.txt").exists()
+
+    # ② --apply：可再生重物删；审计件 / 续跑必需 / arbitration / assets / unknown 一个不动。
+    r = _run(["staging-clean", "--source", "note", "--apply"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (staging / "mineru_raw").exists()
+    assert not (staging / "audit").exists()
+    assert not (staging / "diag").exists()
+    assert not (staging / "dump_ch1.txt").exists()
+    assert (staging / "reconciliation.json").exists()
+    assert (staging / "arbitration" / "queue.json").exists()
+    assert (staging / "assets" / "p0001.png").exists()
+    assert (staging / "_win_range.py").exists()
+    assert (staging / "source.md").exists()
+    assert (staging / "windows.jsonl").exists()
+
+    # ③ 再次 --apply：幂等（无可删项时仍成功退出）。
+    r2 = _run(["staging-clean", "--source", "note", "--apply"], tmp_path)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
 
 
 def test_apply_refuses_unpublished(tmp_path):
@@ -118,34 +137,6 @@ def test_apply_refuses_unsynced_assets(tmp_path):
     r = _run(["staging-clean", "--source", "note", "--apply"], tmp_path)
     assert r.returncode != 0
     assert (staging / "mineru_raw" / "sub" / "big.bin").exists()
-
-
-def test_apply_deletes_only_regenerables(tmp_path):
-    _published(tmp_path)
-    staging = _fabricate_junk(tmp_path, synced=True)
-
-    r = _run(["staging-clean", "--source", "note", "--apply"], tmp_path)
-    assert r.returncode == 0, r.stdout + r.stderr
-    # 可再生重物：删。
-    assert not (staging / "mineru_raw").exists()
-    assert not (staging / "audit").exists()
-    assert not (staging / "diag").exists()
-    assert not (staging / "dump_ch1.txt").exists()
-    # 审计件 / 续跑必需 / arbitration / assets / unknown：一个不动。
-    assert (staging / "reconciliation.json").exists()
-    assert (staging / "arbitration" / "queue.json").exists()
-    assert (staging / "assets" / "p0001.png").exists()
-    assert (staging / "_win_range.py").exists()
-    assert (staging / "source.md").exists()
-    assert (staging / "windows.jsonl").exists()
-
-
-def test_apply_idempotent(tmp_path):
-    _published(tmp_path)
-    _fabricate_junk(tmp_path, synced=True)
-    assert _run(["staging-clean", "--source", "note", "--apply"], tmp_path).returncode == 0
-    r2 = _run(["staging-clean", "--source", "note", "--apply"], tmp_path)
-    assert r2.returncode == 0, r2.stdout + r2.stderr
 
 
 def test_unknown_source_or_missing_staging_exits_nonzero(tmp_path):

@@ -68,24 +68,12 @@ def _ingesting(tmp_path, sid="note"):
     return db
 
 
-def test_window_done_writes_file_roundtrip(tmp_path):
+def test_window_done_writes_file_rejection_matrix_then_roundtrip(tmp_path):
+    # 同一 running window 上的参数拒绝矩阵 + 最终成功 roundtrip（合并自 4 条，断言全保留）：
+    # 错误输入都不会结束窗口，所以可顺序验证，只搭一次 ingesting 环境。
     db = _ingesting(tmp_path)
-    writes = ["domains/misc/lessons/a.md", "domains/misc/concepts/b.md"]
-    wf = tmp_path / "writes.json"
-    wf.write_text(json.dumps(writes), encoding="utf-8")
 
-    r = _run(["window-done", "--source", "note", "--window", "w0000",
-              "--writes-file", str(wf)], tmp_path)
-    assert r.returncode == 0, r.stdout + r.stderr
-
-    rows = state_store.window_states(db, "note")
-    w = next(x for x in rows if x["window_id"] == "w0000")
-    assert w["status"] == "finished"
-    assert json.loads(w["write_set_json"]) == writes
-
-
-def test_window_done_writes_and_writes_file_mutually_exclusive(tmp_path):
-    _ingesting(tmp_path)
+    # ① --writes 与 --writes-file 显式互斥（不静默优先）。
     wf = tmp_path / "writes.json"
     wf.write_text('["a.md"]', encoding="utf-8")
     r = _run(["window-done", "--source", "note", "--window", "w0000",
@@ -93,71 +81,68 @@ def test_window_done_writes_and_writes_file_mutually_exclusive(tmp_path):
     assert r.returncode != 0
     assert "互斥" in (r.stdout + r.stderr)
 
-
-def test_window_done_writes_file_invalid_json_fails_fast(tmp_path):
-    db = _ingesting(tmp_path)
-    wf = tmp_path / "writes.json"
-    wf.write_text("[a.md]", encoding="utf-8")  # 被吞引号后的典型损坏形态
+    # ② 损坏 JSON（被吞引号后的典型形态）→ fail-fast，窗口仍 running、没有存入损坏值。
+    wf.write_text("[a.md]", encoding="utf-8")
     r = _run(["window-done", "--source", "note", "--window", "w0000",
               "--writes-file", str(wf)], tmp_path)
     assert r.returncode != 0
     assert "JSON" in (r.stdout + r.stderr)
-    # fail-fast：窗口仍 running，没有存入损坏值。
     w = next(x for x in state_store.window_states(db, "note") if x["window_id"] == "w0000")
     assert w["status"] == "running" and not w["write_set_json"]
 
-
-def test_window_done_writes_file_missing_file(tmp_path):
-    _ingesting(tmp_path)
+    # ③ 文件不存在 → 非零退出，窗口仍不受影响。
     r = _run(["window-done", "--source", "note", "--window", "w0000",
               "--writes-file", str(tmp_path / "nope.json")], tmp_path)
     assert r.returncode != 0
 
+    # ④ 合法 UTF-8 JSON 数组 → 成功 roundtrip：窗口 finished、write_set 精确落库。
+    writes = ["domains/misc/lessons/a.md", "domains/misc/concepts/b.md"]
+    wf.write_text(json.dumps(writes), encoding="utf-8")
+    r = _run(["window-done", "--source", "note", "--window", "w0000",
+              "--writes-file", str(wf)], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    w = next(x for x in state_store.window_states(db, "note") if x["window_id"] == "w0000")
+    assert w["status"] == "finished"
+    assert json.loads(w["write_set_json"]) == writes
+
 
 # ---- reset-source ----
 
-def test_reset_source_dry_run_changes_nothing(tmp_path):
+def test_reset_source_dry_run_then_apply_preserves_ledgers_and_allows_rerun(tmp_path):
+    # 同一预处理环境上的状态推进场景（合并自 dry-run / apply+rerun / preserve-ledgers 三条，
+    # 断言全保留）：dry-run 无变化 → apply 删下游缓存行 → 账本不动 → 同输入真正重跑。
     db = _preprocessed(tmp_path)
+    state_store.add_review_proposal(db, "note", target_path="x.md",
+                                    kind="broken-link", reason="r")
+
+    # ① 默认 dry-run：打印 plan，但 stage-run / source 行一个字节不变。
     before_runs = _stage_runs(db, "note")
     before_src = dict(state_store.get_source(db, "note"))
-
-    r = _run(["reset-source", "--source", "note", "--to", "profiled"], tmp_path)
+    r = _run(["reset-source", "--source", "note", "--to", "registered"], tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "dry-run" in r.stdout
-
     assert _stage_runs(db, "note") == before_runs
     assert dict(state_store.get_source(db, "note")) == before_src
 
-
-def test_reset_source_apply_deletes_downstream_and_allows_rerun(tmp_path):
-    db = _preprocessed(tmp_path)
-
+    # ② --apply：回到 registered/done；下游 stage-run 缓存行全删（否则同 input_hash 永远
+    # [skip]，reset 无意义）；留 reset 审计行。
     r = _run(["reset-source", "--source", "note", "--to", "registered", "--apply"], tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
-
     src = state_store.get_source(db, "note")
     assert (src["current_stage"], src["current_status"]) == ("registered", "done")
     runs = _stage_runs(db, "note")
-    # 下游 stage-run 缓存行全删（否则同 input_hash 永远 [skip]，reset 无意义）；留 reset 审计行。
     assert all(stage == "reset" for stage, _ in runs), runs
 
-    # 同一输入重跑 profile：不再被缓存跳过，真正重跑成功。
+    # ③ review_proposals / work_orders 是历史账本，reset 绝不动。
+    assert len(state_store.list_review_proposals(db, "note")) == 1
+    assert state_store.get_work_order(db, "note") is not None
+
+    # ④ 同一输入重跑 profile：不再被缓存跳过，真正重跑成功。
     r2 = _run(["profile", "--source", "note"], tmp_path)
     assert r2.returncode == 0, r2.stdout + r2.stderr
     src2 = state_store.get_source(db, "note")
     assert (src2["current_stage"], src2["current_status"]) == ("profiled", "done")
     assert ("profiled", "done") in _stage_runs(db, "note")
-
-
-def test_reset_source_preserves_other_ledgers(tmp_path):
-    db = _preprocessed(tmp_path)
-    state_store.add_review_proposal(db, "note", target_path="x.md",
-                                    kind="broken-link", reason="r")
-    assert _run(["reset-source", "--source", "note", "--to", "registered", "--apply"],
-                tmp_path).returncode == 0
-    # review_proposals / work_orders 是历史账本，reset 绝不动。
-    assert len(state_store.list_review_proposals(db, "note")) == 1
-    assert state_store.get_work_order(db, "note") is not None
 
 
 def test_reset_source_refuses_running_or_locked(tmp_path):
