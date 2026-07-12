@@ -238,7 +238,8 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 
 | 命令 | 作用 | 必填 | 可选 |
 |------|------|------|------|
-| `lint` | 收尾门禁：过则 promote，败则回滚+Review-Queue | `--source` | — |
+| `lint` | 收尾门禁（两段事务隔离）：vault preflight 复检全库 published 渲染旧伤——发现即阻断但**不回滚当前批**；当前批过则 promote，**当前批违规**才回滚+Review-Queue。kb-save 会话发布必须带 `--session` | `--source`（kb-save 模式为 `--source kb-save`） | `--session <run_id>`（kb-save 必填） |
+| `vault-lint` | 全库渲染安全健康门禁（published∪proposed，只读可 CI；违规非零退出） | — | — |
 | `reopen` | 重开已收尾来源做增量补充 | `--source` | — |
 | `sync-assets` | 把难页 PNG 同步进 `wiki/assets/<src>/` | `--source` | — |
 | `promotion-candidates` | 检测跨域提升候选 | — | `--propose` |
@@ -522,8 +523,8 @@ python scripts/pipeline.py staging-clean --source game-theory --apply   # 确认
 
 # ── 10. 测试（开发者） ──
 $bt="$PWD\tmp\pt-$(Get-Random)"
-python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt   # 日常层（约 533 测试）
-python -m pytest tests -q --basetemp=$bt                                  # 全量门禁（约 608 测试）
+python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt   # 日常层（约 1 分钟；计数以 pytest --collect-only 为准）
+python -m pytest tests -q --basetemp=$bt                                  # 全量门禁（约 3 分钟）
 
 # ── 11. 在 Obsidian 阅读 ──
 #   Obsidian → Open folder as vault → 选项目里的 wiki/ 目录 → 从 overview.md 读起

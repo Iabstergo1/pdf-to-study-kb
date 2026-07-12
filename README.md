@@ -149,7 +149,7 @@ flowchart TD
     U["你说：把这个 PDF 加进知识库，领域 X"] --> P["① 预处理：复杂来源 → 可写证据包（CLI 零 LLM，幂等）<br/>add-source → profile → source-convert → source-audit → windows → workorder<br/>（hard-risk 双审分歧由 agent 仲裁、CLI 物化进证据包）"]
     P --> W["② LLM 写库（同一会话）<br/>读 chapters.json 全书图 + 按章读整源 / 难页图 → 写 status:proposed 页（难页原生重建，源图不入正文）<br/>→ resolve-concept 归一 + 综合层"]
     W --> G{"③ lint 收尾门禁"}
-    G -->|通过| Pub["promote → published<br/>重建 index / registry / aliases"]
+    G -->|通过| Pub["promote → published<br/>重建 index / registry（aliases.md 已废弃）"]
     G -->|不过| RQ["回滚就地改动 + 写 Review-Queue"]
     Pub --> Stop["仅在需人工决策时停下问你<br/>lint 失败 / 覆盖冲突 / 跨域提升 / human 页"]
     RQ --> Stop
@@ -294,11 +294,12 @@ pdf-to-study-kb/
 
 ### 收尾、提升与查询
 
-> **为什么有这组**：发布是**一道门**而非直接写盘（核心约束③两阶段发布）。`lint` 是收尾门禁——proposed 全部过检才 promote 成 published 并重建 index，任一不过（断链 / 孤儿页 / 重复 canonical_id / **正文嵌了源图**（`source-image-embed`）/ frontmatter 缺项 / 占位符残留 / 综合层或 topic 缺失 / 概念未被 topic 收编 / 未知 callout 类型 等；**正文小节标题已不再是门禁**——D-4）即回滚就地修改、把违规项写进 `Review-Queue/`。**发布成功后**再确定性重建知识图谱（`graph-data.generated.json` + 离线 HTML 力导向图，见〈在 Obsidian 中阅读〉）——这一步**发布隔离**：图谱重建失败只告警、保留旧产物、绝不回滚已发布内容（派生阅读层不当内容发布门禁）。`promotion-candidates`/`promote-concept` 处理"领域私有概念何时升为跨域 shared"（人工确认后机械执行）；`check-session` 守 query-session 的只读目录契约。
+> **为什么有这组**：发布是**一道门**而非直接写盘（核心约束③两阶段发布）。`lint` 是收尾门禁，**两段事务隔离**：先 vault preflight 复检全库已发布页的渲染安全旧伤（发现即阻断 promote、登记 `vault-health` 队列，**不回滚当前批**）；再检当前批——proposed 全部过检才 promote 成 published 并重建 index，**当前批**任一不过（断链 / 孤儿页 / 未记账写入 / 重复 canonical_id / **正文嵌了源图**（`source-image-embed`）/ frontmatter 缺项 / 占位符残留 / 综合层或 topic 缺失 / 概念未被 topic 收编 / 渲染安全（callout 类型与嵌套、数学分隔符、空题干）/ 旧模板骨架成套复活 等；**正文小节标题已不再是门禁**——D-4）才回滚就地修改、把违规项写进 `Review-Queue/`。**发布成功后**再确定性重建知识图谱（`graph-data.generated.json` + 离线 HTML 力导向图，见〈在 Obsidian 中阅读〉）——这一步**发布隔离**：图谱重建失败只告警、保留旧产物、绝不回滚已发布内容（派生阅读层不当内容发布门禁）。`promotion-candidates`/`promote-concept` 处理"领域私有概念何时升为跨域 shared"（人工确认后机械执行）；`check-session` 守 query-session 的只读目录契约。
 
 | 命令 | 作用 | 关键参数 |
 |------|------|------|
-| `lint` | 收尾门禁：proposed 过则 promote + 重建 index/registry + 知识图谱(graph-data+HTML)、败则回滚 + Review-Queue | `--source` |
+| `lint` | 收尾门禁（vault preflight 事务隔离 + batch lint）：proposed 过则 promote + 重建 index/registry + 知识图谱(graph-data+HTML)、当前批违规才回滚 + Review-Queue；kb-save 会话发布：`--source kb-save --session <run_id>`（candidate 集定发布范围与记账，页面须带 `save_session` 身份标记） | `--source [--session]` |
+| `vault-lint` | 全库渲染安全健康门禁（published∪proposed 已知渲染陷阱，只读、违规非零退出、可 CI） | — |
 | `reopen` | 重开已收尾来源做增量补充（重建 workorder + 状态机回 `workorder_ready`） | `--source` |
 | `reset-source` | **维护**：确定性重置到某预处理阶段刚完成（forward-only 状态机的回退出口；**默认 dry-run**，只删下游 stage-run 缓存行 + 插 reset 审计行，不动 ingest_progress/artifacts/work_orders/review_proposals/staging） | `--source --to {registered,profiled,converted,windowed,workorder_ready} [--apply]` |
 | `sync-assets` | 把本源 staging 难页 PNG 同步进 `wiki/assets/<src>/`（预处理 / reopen 会自动调用） | `--source` |
@@ -538,10 +539,10 @@ Windows 上建议每次给 pytest 一个新的 `--basetemp`，避免历史运行
 $env:PYTHONUTF8=1
 $bt="$PWD\tmp\pt-$(Get-Random)"
 
-# 日常层：跳过慢工作流和真实书籍验证，约 533 个测试 / 58s
+# 日常层：跳过慢工作流和真实书籍验证（约 1 分钟；精确计数以 pytest --collect-only 为准）
 python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt
 
-# 全量确定性门禁：约 608 个测试 / 197s，发布或大重构前跑
+# 全量确定性门禁（约 3 分钟），发布或大重构前跑
 python -m pytest tests -q --basetemp=$bt
 
 # 只看分层收集是否符合预期

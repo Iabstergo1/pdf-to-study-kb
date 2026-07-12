@@ -34,26 +34,47 @@ def _cli_subcommands() -> list[str]:
     return m.group(1).split(",")
 
 
+def _tracked_markdown() -> list:
+    """git 追踪的全部 *.md（含 docs/skill-runtime、templates、双 skill 树）——文档守卫的扫描域。"""
+    out = subprocess.run(["git", "ls-files", "*.md"], cwd=ROOT,
+                         capture_output=True, text=True, encoding="utf-8").stdout
+    return [ROOT / line for line in out.splitlines() if line.strip()]
+
+
 def test_docs_command_count_matches_cli():
     # 文档守卫（复审教训：README/指南的命令数与 CLI 真值脱节无人发现）：
-    # 用户/开发指南声称的子命令数必须等于 argparse 真实数量，且提及 vault-lint。
+    # ① 两份指南里**每一处**"N 个子命令"声明都必须等于 argparse 真值（防某处更新、他处残留旧数）；
+    # ② vault-lint 与 kb-save 会话发布路径必须在 CLI 命令表里有正式条目（表行），不只是正文提一句。
+    import re
     n = len(_cli_subcommands())
     for rel in ["docs/user-guide.md", "docs/developer-guide.md"]:
         text = (ROOT / rel).read_text(encoding="utf-8")
-        assert f"{n} 个" in text, f"{rel} 声称的子命令数 ≠ CLI 真值 {n}（更新文档计数）"
-        assert "vault-lint" in text, f"{rel} 缺 vault-lint 命令说明"
+        claims = [int(m) for m in re.findall(r"(\d+)\s*个\**子命令", text)]
+        assert claims, f"{rel} 未声明子命令数"
+        assert all(c == n for c in claims), f"{rel} 声称的子命令数 {claims} ≠ CLI 真值 {n}"
+        table_rows = [ln for ln in text.splitlines() if ln.lstrip().startswith("|")]
+        assert any("vault-lint" in ln for ln in table_rows), f"{rel} 的命令表缺 vault-lint 条目"
+        assert "--session" in text and "kb-save" in text, f"{rel} 缺 kb-save 会话发布路径说明"
+
+
+def test_docs_no_hardcoded_test_counts_outside_dev_guide():
+    # 文档守卫（复审教训：精确测试数写进五份文档，刚更新就再次过期）：
+    # 测试计数只允许开发指南保留一次快照，其余文档一律"以 pytest --collect-only 为准"。
+    import re
+    for rel in ["README.md", "docs/user-guide.md", "CLAUDE.md", "AGENTS.md"]:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        hits = re.findall(r"\d{3,}\s*(?:个测试|tests\b|测试\b)", text)
+        assert not hits, f"{rel} 仍硬编码测试数量 {hits}（会随提交漂移；只在开发指南留快照）"
 
 
 def test_docs_no_stale_source_image_or_scaffold_claims():
-    # 文档守卫：任何面向模型/用户的文本不得再教"嵌原图"（D-1），脚本不得输出可复制的
-    # 源图嵌入串；开发指南不得再把旧固定小节骨架当作现行模板描述。
-    doc_files = [ROOT / "README.md", ROOT / "docs/user-guide.md", ROOT / "docs/developer-guide.md",
-                 ROOT / "CLAUDE.md", ROOT / "AGENTS.md"]
-    for tree in (ROOT / ".claude/skills", ROOT / ".agents/skills"):
-        doc_files += sorted(tree.rglob("*.md"))
-    for f in doc_files:
+    # 文档守卫：git 追踪的全部 markdown（含 docs/skill-runtime、templates）不得再出现
+    # "嵌原图/内嵌的源图/强制内嵌"这类肯定式嵌图措辞（D-1；明确的"禁止嵌入"说明不含这些词）；
+    # 脚本不得输出可复制的源图嵌入串；开发指南不得把旧骨架当现行模板描述。
+    for f in _tracked_markdown():
         text = f.read_text(encoding="utf-8")
-        assert "嵌原图" not in text, f"{f.relative_to(ROOT)} 仍在教嵌入源图（D-1 违背）"
+        for bad in ("嵌原图", "内嵌的源图", "强制内嵌"):
+            assert bad not in text, f"{f.relative_to(ROOT)} 出现肯定式嵌图措辞「{bad}」（D-1 违背）"
     for py in sorted((ROOT / "scripts").rglob("*.py")):
         src = py.read_text(encoding="utf-8")
         assert "vault=![[" not in src, f"{py.relative_to(ROOT)} 仍输出可复制的源图嵌入串"

@@ -3,7 +3,7 @@
 > 本文面向开发者，描述仓库 `D:\pdf-to-study-kb` 的架构、模块职责、数据契约、命令层与测试。
 > 所有结论以**源码为准**。
 > 面向使用者的操作说明见 [用户使用说明](user-guide.md)。
-> 版本锚点：`main` 分支 `933a042`（2026-07-12 增量核对）；fast 层 533 测试 / 全量 608 测试 / **45 个 CLI 子命令**（新增 `vault-lint`）/ 11 个技能 / 46 个测试文件。
+> 版本锚点：`main` 分支 `933a042`（2026-07-12 增量核对）；fast 层 535 测试 / 全量 610 测试（2026-07-12 快照，精确数以 `pytest --collect-only` 为准）/ **45 个 CLI 子命令**（新增 `vault-lint`）/ 11 个技能 / 46 个测试文件。
 > 2026-07-11 六阶段重构后的新机制（§7 已更新，其余章节以源码为准）：统一 callout 解析器
 > `page_rules.parse_callouts`（唯一语法入口，错误不吞节点）、渲染安全唯一实现 + **vault preflight
 > 事务隔离**（published 旧伤阻断 promote 但不回滚当前批）、`vault-lint` 全库健康门禁、归属≠记账
@@ -139,8 +139,9 @@ content-routing.md` 定义的 5 分类：理论型/方法型/案例型/参考型
 ### 1.7 校验 / 质量门流程
 
 - **预处理验收门**：`preflight-eval --strict`（`check_dual_audit` + `check_evidence_bundle` 等）。
-- **收尾发布门**：`lint`（`wiki_gate.lint_pages` + `pipeline.cmd_lint` 自身两条）——fail-closed，任一
-  违规即回滚 + Review-Queue（共 20 种违规类型，见 §8）。
+- **收尾发布门**：`lint`——fail-closed，两段事务隔离：vault preflight（published 渲染旧伤 → 阻断
+  promote + Review-Queue 去重登记，**不回滚当前批**）→ batch lint（当前批违规才回滚 + Review-Queue；
+  共 27 个违规标识，见 §7）。同一渲染安全扫描可用 `vault-lint` 独立跑。
 - **写前守卫**：`check-write`（`ingest_guards.in_write_scope` + `can_overwrite`）。
 - **概念去重门**：`resolve-concept`（唯一入口）+ lint 的 `duplicate-canonical`。
 - **并发门**：`source_locks`（单 vault 锁）+ `ingest-start` 的 stale registry 校验。
@@ -328,7 +329,8 @@ pdf-to-study-kb/
 
 | 操作 | 命令 | 实现函数 | 输入 | 输出/产物 | 失败处理 | 测试 | 实现状态 |
 |---|---|---|---|---|---|---|---|
-| 收尾门禁 | `lint --source` | `cmd_lint` → `wiki_gate.lint_pages` + `promote` + `_rebuild_graph_artifacts` + `write_quiz_index` + `write_propositions_index` | proposed 页 | promote→published + 重建 index/registry + 知识图谱 v2.0 + quiz-index + propositions（后三者各自 publish-isolated） + log | 违规 → 回滚快照 + Review-Queue + exit 非零（20 种违规类型，见 §8） | `test_lint_republish_cli.py`、`test_wiki_gate.py` | 准确 |
+| 收尾门禁 | `lint --source <src>`；kb-save 会话发布：`lint --source kb-save --session <run_id>` | `cmd_lint` → vault preflight（`wiki_gate.vault_render_safety`）→ `wiki_gate.lint_pages` + `promote` + `_rebuild_graph_artifacts` + `write_quiz_index` + `write_propositions_index` | proposed 页 | promote→published + 重建 index/registry + 知识图谱 v2.0 + quiz-index + propositions（后三者各自 publish-isolated） + log | preflight 旧伤 → 阻断不回滚（vault-health 队列）；当前批违规 → 回滚快照 + Review-Queue + exit 非零（27 个违规标识，见 §7） | `test_lint_republish_cli.py`、`test_wiki_gate.py` | 准确 |
+| 全库渲染安全门禁 | `vault-lint` | `cmd_vault_lint` → `wiki_gate.vault_render_safety(published∪proposed)` | 全 vault | 违规清单，非零退出（可 CI） | 只读，零写入 | `test_lint_republish_cli.py` | 准确 |
 | 跨域提升候选 | `promotion-candidates [--propose]` | `cmd_promotion_candidates` → `promotion.find_candidates` | registry | 终端 + (可选)Review-Queue | — | `test_promotion.py` | 准确 |
 | 机械提升概念 | `promote-concept --id concept.<domain>.<slug>` | `cmd_promote_concept` → `promotion.promote_to_shared` | 概念页 | 移动到 `concepts/` + 全 vault 链接重写 | 目标冲突 → 中止 | `test_concept_promotion_cli.py` | 准确 |
 | query-session 契约 | `check-session --id <run_id> [--saved]` | `cmd_check_session` → `query_session.check_session` | session 目录 | ok / 问题列表 | 缺文件 → exit 非零 | `test_query_session*.py` | 准确 |
@@ -386,7 +388,7 @@ pdf-to-study-kb/
 | 「概念去重唯一入口 resolve-concept」 | `concept_store.resolve_or_create_concept`（准确） |
 | 「两阶段发布」 | proposed → lint → published（准确） |
 | 「覆盖保护三条件」 | `ingest_guards.can_overwrite`（准确） |
-| 「fail-closed lint（order/safety/provenance，共 20 种违规类型）」 | `wiki_gate.lint_pages` + `wiki_gate.lint_risk_traceability` + `pipeline.cmd_lint` 自身两条；**正文小节标题不是门禁**（D-4） |
+| 「fail-closed lint（order/safety/provenance，共 27 个违规标识）」 | `wiki_gate.lint_pages`/`render_safety_violations` + `lint_risk_traceability` + `pipeline.cmd_lint` 自身；vault preflight 与当前批回滚事务隔离；**正文小节标题不是门禁**（D-4） |
 
 ---
 
@@ -638,12 +640,12 @@ lint 违规 `frontmatter-incomplete`）。
 
 ```powershell
 $env:PYTHONUTF8=1; $bt="$PWD\tmp\pt-$(Get-Random)"
-python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt   # 日常层（当前 533 测试）
-python -m pytest tests -q --basetemp=$bt                                  # 全量门禁（当前 608 测试）
+python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt   # 日常层（约 1 分钟）
+python -m pytest tests -q --basetemp=$bt                                  # 全量门禁（约 3 分钟）
 python -m pytest tests --collect-only -q --basetemp=$bt                   # 只看分层收集
 ```
 
-> 测试计数：fast 层 533 / 全量 608（2026-07-12 实测，46 个测试文件）。
+> 测试计数以 `pytest --collect-only -q` 为准（精确数随提交漂移，不在多份文档硬编码；本文顶部版本锚点保留一次快照）。
 
 `tests/conftest.py` 的 `_FILE_MARKERS` 字典（13 项，其余测试文件不带 tier marker、走日常层）：
 

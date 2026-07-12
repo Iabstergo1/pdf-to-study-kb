@@ -113,8 +113,8 @@ default — run the fast tier for ordinary edits, the full gate before publish/r
 
 ```powershell
 $env:PYTHONUTF8=1; $bt="$PWD\tmp\pt-$(Get-Random)"
-python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt   # daily ~58s / 533 tests
-python -m pytest tests -q --basetemp=$bt                                  # full gate ~197s / 608 tests
+python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt   # daily tier ~1 min (counts drift; pytest --collect-only is the truth)
+python -m pytest tests -q --basetemp=$bt                                  # full gate ~3 min before publish/refactor
 ```
 
 ## 9. Authority & do-not-reintroduce
