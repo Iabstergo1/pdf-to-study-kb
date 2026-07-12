@@ -381,8 +381,8 @@ pdf-to-study-kb/
 | 「自测题干抽取」 | `page_rules.extract_question_stems` → `rebuild-quiz` |
 | 「在 Obsidian 阅读」 `wiki/` | overview.md + `.obsidian/graph.json` + `knowledge-graph.generated.html` + `quiz-index.generated.md` + `propositions.generated.md` |
 | 「source-preflight 零成本验证」 | `source-preflight` skill（只跑预处理链 + 验收，不写库） |
-| 「中断续跑：说『继续』」 | `pipeline.py next` + digest `## RESUME` 块（digest 由 LLM skill 维护，非 CLI） |
-| 「无人值守续跑」 `resume-ingest.ps1` | OS 调度 + 有界 prompt（`-MaxWindows`，默认 4） |
+| 「中断续跑：说『继续』」 | `pipeline.py next` + digest `## RESUME` 块（digest 由 LLM skill 维护，非 CLI）；`next --source <src> --resume-packet` 输出结构化 `RESUME_PACKET v1`（`resume_packet.py`，fail-closed：RESUME 过期/digest 或 workorder 缺失即拒绝出包） |
+| 「无人值守续跑」 `resume-ingest.ps1` | OS 调度 + resume packet 落盘 `tmp/resume-packet.txt` + 单行 prompt 引用（多行参数会被 Windows `.cmd` shim 截断）；有界 `-MaxWindows` 默认 4；packet 拿不到则记日志退出，不唤起 agent |
 | 「发布后复盘 / 失败信号销账 / 状态机卡死修复 / staging 清理」 | `kb-postmortem` / `proposals-resolve` / `pipeline-doctor`+`reset-source` / `staging-clean`（§3.7b） |
 | 「STUDY_KB_ROOT 重定向」 | `_workspace_root()` 读 env |
 | 「测试分层 fast/cli/slow/skill/realbook」 | `pytest.ini` + `tests/conftest.py`（准确） |

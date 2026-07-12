@@ -1565,11 +1565,29 @@ def cmd_status(args):
 
 
 def cmd_next(args):
-    """列出每个 source 的下一步人工动作 + stale 锁清理建议（spec §3.3）。"""
+    """列出每个 source 的下一步人工动作 + stale 锁清理建议（spec §3.3）；
+    --source <src> --resume-packet 输出结构化 RESUME_PACKET v1（恢复体验加固，
+    fail-closed：状态/产物矛盾时拒绝出包；安全保障仍是末端 lint，不在此处）。"""
     import state_store
     import locks
 
     db = _vault_state_db()
+    if getattr(args, "resume_packet", False):
+        if not getattr(args, "source", None):
+            raise SystemExit("--resume-packet 需要 --source <source_id>")
+        if not db.exists():
+            raise SystemExit("no state db yet")
+        import resume_packet
+        try:
+            print(resume_packet.build_resume_packet(
+                db_path=db, staging_dir=_staging_dir(args.source),
+                repo_root=Path(__file__).resolve().parents[1], source_id=args.source,
+                lock_ttl_seconds=LOCK_TTL_SECONDS))
+        except resume_packet.ResumePacketError as e:
+            raise SystemExit(str(e))
+        return
+    if getattr(args, "source", None):
+        raise SystemExit("--source 只与 --resume-packet 连用（普通 next 是全库视图）")
     if not db.exists():
         print("no state db yet")
         return
@@ -1829,7 +1847,11 @@ def main():
 
     # status / next（vault 级单库状态视图，不接 --book）
     subparsers.add_parser("status", help="列出每个 source 的阶段/状态（vault 级单库）")
-    subparsers.add_parser("next", help="列出每个 source 的下一步人工动作")
+    nxp = subparsers.add_parser("next", help="列出每个 source 的下一步人工动作")
+    nxp.add_argument("--source", default=None,
+                     help="与 --resume-packet 连用：输出该 source 的结构化恢复包")
+    nxp.add_argument("--resume-packet", action="store_true", dest="resume_packet",
+                     help="输出 RESUME_PACKET v1（中断 ingest 恢复用；fail-closed：状态矛盾拒绝出包）")
     ulp = subparsers.add_parser("unlock", help="回收 stale vault 锁（heartbeat 超时才允许；活锁拒绝）")
     ulp.add_argument("--ttl", type=int, default=LOCK_TTL_SECONDS, help="stale 判定秒数")
 

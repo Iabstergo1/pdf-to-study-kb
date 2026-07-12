@@ -62,10 +62,36 @@ python scripts/pipeline.py skill-adopt --candidate <id>     # human-triggered: r
 | Sub-unit | Input | Output | Acceptance | Persisted | Failure stop |
 |---|---|---|---|---|---|
 | E1 mine | review_proposals | backlog.yaml entries (count≥2) | recurring signature only | backlog.yaml | nothing recurring |
+| E1.5 route | one signature + failure samples | legislation-routing verdict (three written answers) | only "semantic judgment / thin orchestration" proceeds to E2 | routing answers in the hand-off report / proposal | routed to another layer → stop + report |
 | E2 bounded edit | one signature + target SKILL.md | a 1–2 section edit, both trees | byte-equivalent across trees | branch worktree | edit needs tests/pipeline changes |
 | E3 gate | candidate id | gate result | gate-integrity PASS + pytest green | — | gate red |
 | E4 stage | green candidate | proposal.diff + audit entry | mainline untouched | candidates/<id>/ + audit.jsonl | — |
 | E5 adopt (human) | proposal | both-tree commit | gate re-run passes | git commit + audit | gate red on re-run |
+
+### E1.5 legislation routing (mandatory, before any edit)
+
+A skill edit is the **last resort, not the default output** — the most valuable outcome of this skill is
+often "do not edit the skill; sink the fix into the runtime". Classify the failure before touching any
+SKILL.md:
+
+| Failure class | Belongs in (NOT a skill edit) |
+|---|---|
+| deterministically reproducible & machine-checkable (state / order / ownership / accounting / format / render-safety) | parser / state machine / gate / schema in the CLI runtime |
+| induced by a runtime prompt surface (CLI output, template seed, RESUME text) | that prompt surface + its contract test |
+| a missing deterministic capability | a new CLI primitive |
+| calling judgment / writing strategy / when-to-invoke / how-to-phrase | **the skill — the only class that proceeds to E2** |
+| not yet reducible to any of the above | postmortem / QA / Review-Queue / human |
+
+Every candidate must answer three questions **in writing** before E2:
+
+1. What is the minimal reproduction?
+2. Why can't a deterministic runtime check block or detect it?
+3. Why does it belong in the skill rather than a runtime prompt surface?
+
+If any answer routes away from the skill: **stop skill-evolve and report which layer should receive the
+fix** — that hand-off report is a successful outcome of this skill, not a failure. (This skill still never
+edits `tests/` or `pipeline.py` itself; routing to runtime means handing the signal back to a human /
+normal development flow, not implementing it here.)
 
 ## 8. Failure stops / recovery
 
@@ -73,6 +99,8 @@ python scripts/pipeline.py skill-adopt --candidate <id>     # human-triggered: r
   - **gate-integrity:** the candidate touched anything outside the two skill trees (especially `tests/`) → stop immediately. That is out-of-bounds / gaming its own gate.
   - **pytest red** (incl. dual-tree parity T2) → stop; paste the failure back, log a "dead-end" negative in audit, rewrite or abandon.
 - the backlog entry's `count` = 1 (not reproducing) → not worth it, stop.
+- E1.5 routes the failure to runtime / prompt surface / new primitive / human → stop, report the target
+  layer, do not edit any SKILL.md.
 - it would require editing `tests/` or gate logic to pass → never do it, stop and hand back.
 - `skill-adopt` is always human-triggered; this skill never auto-adopts. **Recovery:** the audit.jsonl trail records every staged/rejected attempt.
 
@@ -81,5 +109,7 @@ python scripts/pipeline.py skill-adopt --candidate <id>     # human-triggered: r
 - [ ] The candidate diff only touches `.claude/skills/` and `.agents/skills/` (`skill-gate` gate-integrity PASS).
 - [ ] Dual-tree byte-equivalence holds (pytest T2 green).
 - [ ] `pytest tests` all green (`skill-gate` PASS).
+- [ ] The E1.5 routing answers (three questions) are recorded, and the failure genuinely remains
+      "semantic judgment or thin orchestration" — anything determinable was routed to the runtime instead.
 - [ ] The edit is bounded (a section or two) and targets that backlog `signature`.
 - [ ] The proposal is `skill-stage`-d; `audit.jsonl` has a record; `skill-adopt` is left to a human.

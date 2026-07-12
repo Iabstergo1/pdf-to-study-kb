@@ -105,7 +105,9 @@ after an interruption, re-read `chapters.json` + the digest `## RESUME` block, *
 `references/write-pages.md` before writing any page** — an interrupted session has lost the writing
 contracts (prose organization, self-test nesting, accounting), and a fresh page's seed scaffold never
 substitutes for the contract file; then resume from the next unfinished window (`pipeline.py next` is
-the machine anchor); otherwise auto-advance and report progress.
+the machine anchor; `next --source <src> --resume-packet` hands you the structured RESUME_PACKET —
+ledger-decided next window + write boundary + digest RESUME + resume-critical excerpt — and fail-closes
+on a stale RESUME instead of emitting a half-true packet); otherwise auto-advance and report progress.
 
 ## 9. Acceptance criteria
 

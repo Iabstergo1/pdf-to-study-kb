@@ -414,6 +414,18 @@ def should_run_window(db_path, source_id: str, window_id: str, *, input_hash: st
         con.close()
 
 
+def window_progress(db_path, source_id: str) -> list[dict]:
+    """本源 window 账本只读视图（resume packet / 观测用）：window_id + status + 起止时间。"""
+    con = connect(db_path)
+    try:
+        rows = con.execute(
+            "SELECT window_id,status,started_at,finished_at FROM ingest_progress"
+            " WHERE source_id=? ORDER BY id", (source_id,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
 def has_open_review_proposal(db_path, *, kind: str, target_path: str, reason: str) -> bool:
     """vault preflight 去重：同 (kind, target_path, reason) 的 open 行已存在则不重复登记
     （reason 内嵌页面 content hash——页面内容变了才允许再登记一条）。"""

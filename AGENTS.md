@@ -80,6 +80,11 @@ and merged only by a human `skill-adopt`. Protocols: `docs/skill-runtime/{routin
   changes go there**, never duplicated in skills. If you change CLI behavior, keep both skill trees consistent.
 - **Resume anchor = `pipeline.py next` + the digest `## RESUME` block** (no session-level hook): after an
   interruption say "continue" or let `scripts/resume-ingest.ps1` resume from the next unfinished window.
+  `next --source <src> --resume-packet` emits the structured `RESUME_PACKET v1` (ledger-decided next window,
+  write boundary, digest RESUME, resume-critical contract excerpt) that `resume-ingest.ps1` writes to
+  `tmp/resume-packet.txt` and points the headless session at (single-line prompt — multiline args break
+  Windows `.cmd` shims); it is **fail-closed** on state contradictions (stale RESUME, missing digest/workorder)
+  and is a resume-experience hardening, not a safety boundary — the end-of-line lint gate remains the only guarantee.
 - **Interpreter = the project `study-kb` conda env** (`conda create -n study-kb python=3.12`, then
   `requirements.txt`: PyMuPDF / PyYAML / pytest; optional MinerU per `requirements.txt` / `scripts/install_mineru.py`).
 - **Generated state is not git:** `wiki/` and `pipeline-workspace/` are gitignored per-machine runtime state.

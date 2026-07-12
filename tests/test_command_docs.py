@@ -261,3 +261,8 @@ def test_resume_ingest_detects_active_ingest_with_lock_status_line(tmp_path):
     args = arg_log.read_text(encoding="utf-8", errors="replace")
     assert "exec --sandbox workspace-write" in args
     assert "dangerously-bypass" not in args
+    # resume packet 走"落盘文件 + 单行 prompt 引用"：多行参数经 npm 的 .cmd shim（cmd.exe）
+    # 会在换行处截断命令行——prompt 必须保持单行，packet 内容只经文件传递。
+    assert "resume-packet.txt" in args
+    assert (ROOT / "tmp" / "resume-packet.txt").exists()
+    assert "\n" not in args.strip("\n")  # echo 追加的单条记录：prompt 单行，无第二行

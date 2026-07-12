@@ -5,6 +5,22 @@
 `python scripts/pipeline.py ingest-start --source <src>`: takes the vault lock + validates the stale
 registry. If it aborts, regenerate the work order as prompted — **do not bypass it.**
 
+<!-- resume-critical:start -->
+## Resume-critical（恢复关键契约；`next --source <src> --resume-packet` 原样抽取本块）
+
+1. 你是无记忆恢复会话：动笔前**完整重读本文件**（write-pages.md）——新页种子只展示形状，绝不替代
+   本文件；packet 摘要同样不替代全文。
+2. 定位真值：`chapters.json`（全书地图）+ digest 顶部 `## RESUME`（下一窗）；不重跑预处理，不
+   reopen；`ingest-start` 幂等恢复/重取锁。
+3. 概念只经 `resolve-concept`（命中即合并，落 home domain）；wikilink 一律库内全路径。
+4. 自测：题干在 callout 块内首行，答案只进嵌套折叠 `> > [!success]-`——同级 callout 头会被
+   Obsidian 渲染成明文，答案泄漏。
+5. 源图只是阅读证据（D-1）：公式原生 KaTeX、表 Markdown/散文、图 mermaid/散文重建，发布正文
+   绝不嵌入源图。
+6. 记账：每个非 source 页必须进本窗 `window-done --writes`（漏记 `unaccounted-write` 阻断）；
+   最后一窗完成后必须先做阶段 E 综合层再 `ingest-done → lint`。
+<!-- resume-critical:end -->
+
 ## Phase C prelude: build whole-book understanding first (`chapters.json` = deterministic chapter map / navigation spine)
 
 Before writing windows, read `staging/<src>/chapters.json` — produced **deterministically** by
@@ -73,7 +89,9 @@ Sub-unit command detail:
 - U6: `python scripts/pipeline.py window-done --source <src> --window <id> --writes '["<page>"]'` (on failure use `window-fail --error "<reason>"`). If the shell strips quotes from the JSON (Windows `conda run` gotcha), write the array to a UTF-8 file and pass `--writes-file <path.json>` instead.
 - U7: refresh the `## RESUME` block at the **top** of `digest.md` each window (the resume anchor; on
   resume say "continue" or run `scripts/resume-ingest.ps1`, both relocate via the RESUME block + `pipeline.py
-  next` — a machine-readable anchor for Claude and Codex alike, no session hook). The block runs from
+  next --source <src> --resume-packet` — a structured fail-closed resume packet for Claude and Codex alike,
+  no session hook; a stale RESUME that no longer names the true next window makes the packet **refuse to
+  emit**, so keeping this block fresh is load-bearing). The block runs from
   `## RESUME` to the next `## `, stays terse, and contains at least: **progress** (done windows + next
   window id and its `--hash`), **resume steps** (`ingest-start` is idempotent and reports resumed →
   **re-read THIS file (write-pages.md) before writing any page** — an interrupted session has lost the
