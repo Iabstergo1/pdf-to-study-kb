@@ -523,7 +523,7 @@ python scripts/pipeline.py staging-clean --source game-theory --apply   # 确认
 
 # ── 10. 测试（开发者） ──
 $bt="$PWD\tmp\pt-$(Get-Random)"
-python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt   # 日常层（约 1 分钟；计数以 pytest --collect-only 为准）
+python -m pytest tests -q -m fast --basetemp=$bt                          # 日常层（十几秒；计数以 pytest --collect-only 为准）
 python -m pytest tests -q --basetemp=$bt                                  # 全量门禁（约 3 分钟）
 
 # ── 11. 在 Obsidian 阅读 ──

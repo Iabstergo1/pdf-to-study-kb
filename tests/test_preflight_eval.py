@@ -1,29 +1,19 @@
 """L4 调用与评测层：preflight_eval 纯函数 + check_*（确定性，零-LLM）。
 
 每个 check_* 用合成 staging（正例 + 违例）测；evaluate 端到端组装 + summary；
-pipeline preflight-eval 的 --strict 退出码语义另在 test_conversion_backend_cli / test_preprocessing_cli 的 subprocess 测。
+pipeline preflight-eval 的 CLI（--strict 退出码/JSON 落盘）在 test_preflight_eval_cli.py 的 subprocess 测。
 """
 import importlib.util
 import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PIPELINE = ROOT / "scripts" / "pipeline.py"
 spec = importlib.util.spec_from_file_location("preflight_eval", ROOT / "scripts" / "preflight_eval.py")
 pe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pe)
 
 
-def _run(args, cwd):
-    env = {**os.environ, "STUDY_KB_ROOT": str(cwd)}
-    return subprocess.run([sys.executable, str(PIPELINE), *args], cwd=cwd,
-                          capture_output=True, text=True, env=env)
-
-
-# ---- helpers：合成 staging ----
+# ---- helpers：合成 staging（test_preflight_eval_cli.py 复用）----
 
 def _block(bid, page, cs, ce, *, typ="text", asset=None, rf=None, chapter="ch00-full"):
     return {"block_id": bid, "type": typ, "text": "x", "page": page,
@@ -582,89 +572,3 @@ def test_evaluate_pdf_without_reconciliation_flags_dual_audit_fail(tmp_path):
 
 
 # ---- pipeline preflight-eval CLI（--source / --strict / --json + 退出码语义） ----
-
-def _staging_under_root(root, source_id, **kw):
-    d = root / "pipeline-workspace" / "staging" / source_id
-    return _write_staging(d, **kw)
-
-
-def test_cli_preflight_eval_ok_writes_default_json(tmp_path):
-    blocks = [_block("b1", 1, 0, 100), _block("b2", 2, 100, 200)]
-    ws = [_window("w0", 0, 200, ["b1", "b2"], ps=1, pe_=2, refs=["p0001#b1", "p0002#b2"])]
-    _staging_under_root(tmp_path, "good", blocks=blocks, windows=ws,
-                        report=_ok_report(), pages=[{"page": 1}, {"page": 2}],
-                        reconciliation=_ok_reconciliation())
-    r = _run(["preflight-eval", "--source", "good"], tmp_path)
-    assert r.returncode == 0, r.stderr
-    out_json = tmp_path / "pipeline-workspace" / "staging" / "good" / "preflight_eval.json"
-    assert out_json.exists()
-    rep = json.loads(out_json.read_text(encoding="utf-8"))
-    assert rep["generated_by"] == "preflight-eval" and rep["summary"]["fail"] == 0
-
-
-def test_cli_preflight_eval_nonstrict_exits_zero_even_on_fail(tmp_path):
-    blocks = [_block("b1", 1, 0, 100), _block("b3", 3, 100, 200)]  # 缺 page 2
-    ws = [_window("w0", 0, 200, ["b1", "b3"], ps=1, pe_=3, refs=["p0001#b1", "p0003#b3"])]
-    _staging_under_root(tmp_path, "bad", blocks=blocks, windows=ws,
-                        report=_ok_report(page_count=3))
-    r = _run(["preflight-eval", "--source", "bad"], tmp_path)
-    assert r.returncode == 0, r.stderr            # 非 strict → 退出 0（report 标注 fail）
-    assert "fail" in r.stdout.lower()
-
-
-def test_cli_preflight_eval_strict_nonzero_on_fail(tmp_path):
-    blocks = [_block("b1", 1, 0, 100), _block("b3", 3, 100, 200)]
-    ws = [_window("w0", 0, 200, ["b1", "b3"], ps=1, pe_=3, refs=["p0001#b1", "p0003#b3"])]
-    _staging_under_root(tmp_path, "bad", blocks=blocks, windows=ws,
-                        report=_ok_report(page_count=3))
-    r = _run(["preflight-eval", "--source", "bad", "--strict"], tmp_path)
-    assert r.returncode != 0                       # strict + high/fail → 非零退出码（CI 化）
-
-
-def test_cli_preflight_eval_strict_zero_when_all_ok(tmp_path):
-    blocks = [_block("b1", 1, 0, 100), _block("b2", 2, 100, 200)]
-    ws = [_window("w0", 0, 200, ["b1", "b2"], ps=1, pe_=2, refs=["p0001#b1", "p0002#b2"])]
-    _staging_under_root(tmp_path, "good", blocks=blocks, windows=ws, report=_ok_report(),
-                        reconciliation=_ok_reconciliation())
-    r = _run(["preflight-eval", "--source", "good", "--strict"], tmp_path)
-    assert r.returncode == 0, r.stdout + r.stderr
-
-
-def test_cli_preflight_eval_strict_fails_pdf_without_dual_audit(tmp_path):
-    # 端到端：PDF 源但缺 reconciliation.json（未跑 source-audit）→ strict fail-closed（双审契约）。
-    blocks = [_block("b1", 1, 0, 200)]
-    ws = [_window("w0", 0, 200, ["b1"], ps=1, pe_=1, refs=["p0001#b1"])]
-    _staging_under_root(tmp_path, "nd", blocks=blocks, windows=ws, report=_ok_report(page_count=1))
-    r = _run(["preflight-eval", "--source", "nd", "--strict"], tmp_path)
-    assert r.returncode != 0
-
-
-def test_cli_preflight_eval_custom_json_path(tmp_path):
-    blocks = [_block("b1", 1, 0, 200)]
-    ws = [_window("w0", 0, 200, ["b1"], ps=1, pe_=1, refs=["p0001#b1"])]
-    _staging_under_root(tmp_path, "g", blocks=blocks, windows=ws, report=_ok_report(page_count=1))
-    custom = tmp_path / "out" / "pf.json"
-    r = _run(["preflight-eval", "--source", "g", "--json", str(custom)], tmp_path)
-    assert r.returncode == 0, r.stderr
-    assert custom.exists()
-
-
-def test_cli_preflight_eval_missing_staging_errors(tmp_path):
-    r = _run(["preflight-eval", "--source", "nope"], tmp_path)
-    assert r.returncode != 0
-
-
-def test_cli_preflight_eval_help(tmp_path):
-    r = _run(["preflight-eval", "--help"], tmp_path)
-    assert r.returncode == 0 and "--strict" in r.stdout and "--source" in r.stdout
-
-
-def test_cli_preflight_eval_strict_nonzero_on_scanned_without_ocr(tmp_path):
-    # 端到端：扫描件但 ocr_used=False（schema/字段齐全）→ strict 非零退出（OCR 契约硬规则）。
-    blocks = [_block("b1", 1, 0, 200)]
-    ws = [_window("w0", 0, 200, ["b1"], ps=1, pe_=1, refs=["p0001#b1"])]
-    _staging_under_root(tmp_path, "scn", blocks=blocks, windows=ws,
-                        report=_ok_report(page_count=1, source_type="scanned_pdf",
-                                          scan_suspected=True, ocr_used=False))
-    r = _run(["preflight-eval", "--source", "scn", "--strict"], tmp_path)
-    assert r.returncode != 0

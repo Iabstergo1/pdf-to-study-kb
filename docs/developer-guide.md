@@ -635,49 +635,37 @@ lint 违规 `frontmatter-incomplete`）。
 
 ## 7. 测试与验证
 
-### 7.1 分层（`pytest.ini` marker + `tests/conftest.py` 按文件应用）
+### 7.1 分层（`pytest.ini` marker + `tests/_tiering.py` 唯一注册表 + `tests/conftest.py` 守卫）
 
-`fast`（默认）/ `cli` / `slow` / `skill` / `realbook`。命令（PowerShell）：
+五层：`fast`（正向白名单 = 日常层，纯函数/直接模块测试）/ `cli`（subprocess 起真实 CLI 的 wiring）/
+`slow`（完整工作流，只进全量门禁）/ `skill`（双树协议与文档契约）/ `realbook`（预留层，当前无测试）。
+命令（PowerShell）：
 
 ```powershell
 $env:PYTHONUTF8=1; $bt="$PWD\tmp\pt-$(Get-Random)"
-python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt   # 日常层（约 1 分钟）
-python -m pytest tests -q --basetemp=$bt                                  # 全量门禁（约 3 分钟）
-python -m pytest tests --collect-only -q --basetemp=$bt                   # 只看分层收集
+python -m pytest tests -q -m fast --basetemp=$bt          # 日常层（十几秒）
+python -m pytest tests -q --basetemp=$bt                  # 全量门禁（约 3 分钟）
+python -m pytest tests --collect-only -q --basetemp=$bt   # 只看分层收集
 ```
 
-> 测试计数以 `pytest --collect-only -q` 为准（精确数随提交漂移，不在多份文档硬编码；本文顶部版本锚点保留一次快照）。
+> 测试计数以 `pytest --collect-only -q` 为准（精确数随提交漂移，不在多份文档硬编码）。
 
-`tests/conftest.py` 的 `_FILE_MARKERS` 字典（13 项，其余测试文件不带 tier marker、走日常层）：
-
-```python
-_FILE_MARKERS = {
-    "test_conversion_backend_cli.py": ("cli", "slow"),
-    "test_lint_republish_cli.py": ("cli", "slow"),
-    "test_ingest_orchestration_cli.py": ("cli", "slow"),
-    "test_skill_evolution.py": ("skill", "slow"),
-    "test_preprocessing_cli.py": ("cli",),
-    "test_ops_metrics_cli.py": ("cli",),
-    "test_doctor_cli.py": ("cli",),
-    "test_staging_clean_cli.py": ("cli",),
-    "test_concept_promotion_cli.py": ("cli",),
-    "test_query_session_cli.py": ("cli",),
-    "test_vault_init_cli.py": ("cli",),
-    "test_command_docs.py": ("skill",),
-    "test_skill_standard.py": ("skill",),
-}
-```
+文件→tier 的映射**只**存在于 `tests/_tiering.py` 的 `FILE_TIERS`（本文不内嵌快照，以该文件为唯一真值）。
+`tests/conftest.py` 在 collection 期执行 **fail-closed 归层守卫**：新增测试文件未登记、注册表条目指向
+已删文件、tier 名非法、`fast` 与重 tier 组合——任一违规直接中止收集。这样日常层是显式白名单，
+新测试不可能静默掉出频繁反馈层（守卫判定本身由 `test_tiering_guard.py` 的 fast 单元测试覆盖）。
 
 ### 7.2 重要测试 → 它保护的功能
 
 | 测试文件 | 保护的功能 |
 |----------|-----------|
 | `test_legacy_removed.py` | **架构不回退**：禁 LangGraph / 双 SQLite / plan-units / surya 硬 OCR；确认双审架构（source_audit/mineru_backend/check_dual_audit）在位 |
-| `test_command_docs.py` | **文档与协议一致**：锁定各 skill 必备协议要素、ingest 端到端编排、双审接线、续跑脚本旗标措辞（`--sandbox workspace-write` / `--dangerously-bypass...`） |
+| `test_command_docs.py` | **文档与协议一致**：锁定各 skill 必备协议要素、ingest 端到端编排、双审接线、续跑脚本旗标措辞（`--sandbox workspace-write` / `--dangerously-bypass...`）；真跑 pwsh + `.cmd` shim 的烟测拆在 `test_resume_ingest_smoke.py` |
+| `test_tiering_guard.py` | **fail-closed 归层守卫**：`tests/_tiering.py` 注册表 vs 磁盘漂移、非法/冲突 tier 判定（daily 白名单不静默漏测） |
 | `test_skill_standard.py` | 九段合约（T1）、**双树字节对等**（T2）、卫生（T3）、协议关键词完好（T4，含 `kb-postmortem`/`pipeline-doctor` 词表）、source-xray guard（T5） |
 | `test_state_store.py` | 状态机单向转换、幂等跳过、reopen、window 记账 |
 | `test_locks.py` | 单 vault 锁获取/释放/stale 判定/受控破锁 |
-| `test_preflight_eval.py`（670 行） | 12 项 check 各自行为（最大测试文件之一） |
+| `test_preflight_eval.py` | 12 项 check 各自行为（最大测试文件之一；CLI wiring 拆在 `test_preflight_eval_cli.py`） |
 | `test_source_convert.py`（747 行） | 后端选择 + 转换契约（最大测试文件） |
 | `test_conversion_backend_cli.py`（518 行） | backend/policy CLI 路由 |
 | `test_wiki_gate.py`（502 行） | lint 各规则（含新增的 `table-wikilink-pipe`/`overview-seed`）、quiz/命题索引构建 |

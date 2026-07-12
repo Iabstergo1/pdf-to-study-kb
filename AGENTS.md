@@ -110,16 +110,21 @@ On Windows, prefer the native tools (Glob/Grep/Read/Edit — no path issues). To
 (PowerShell 7) + the study-kb interpreter directly; do not drive PowerShell through Git Bash. Set
 `$env:PYTHONUTF8=1` before Python (CJK sources/paths).
 
-**Testing tiers (markers).** The suite is layered by pytest marker (registered in `pytest.ini`, applied
-per-file in `tests/conftest.py`; rationale + audit in `pipeline-workspace/reports/test-audit-2026-06-25.md`):
-`fast` (default), `cli`, `slow`, `skill`, `realbook`. Do **not** treat full `pytest tests` as the per-edit
-default — run the fast tier for ordinary edits, the full gate before publish/refactor. Always pass a fresh
-`--basetemp` (a prior run can leave a locked `pytest-of-Lenovo` temp dir that blocks default cleanup).
+**Testing tiers (markers).** The suite is layered by pytest marker (registered in `pytest.ini`; the
+single file→tier registry is `tests/_tiering.py` `FILE_TIERS`, applied and **fail-closed guarded** by
+`tests/conftest.py` — an unregistered new test file, a stale entry, or `fast` combined with a heavier
+tier aborts collection, so nothing silently drops out of the daily tier. Rationale + audit in
+`pipeline-workspace/reports/test-audit-2026-07-13.md`): `fast` (positive whitelist = the daily tier,
+pure-function/direct-module tests), `cli`, `slow`, `skill`, `realbook` (reserved layer, no tests yet).
+Do **not** treat full `pytest tests` as the per-edit default — run the fast tier for ordinary edits,
+the full gate before publish/refactor. Always pass a fresh `--basetemp` (a prior run can leave a locked
+`pytest-of-Lenovo` temp dir that blocks default cleanup).
 
 ```powershell
 $env:PYTHONUTF8=1; $bt="$PWD\tmp\pt-$(Get-Random)"
-python -m pytest tests -q -m "not slow and not realbook" --basetemp=$bt   # daily tier ~1 min (counts drift; pytest --collect-only is the truth)
-python -m pytest tests -q --basetemp=$bt                                  # full gate ~3 min before publish/refactor
+python -m pytest tests -q -m fast --basetemp=$bt        # daily tier, seconds (counts drift; pytest --collect-only is the truth)
+python -m pytest tests/test_doctor_cli.py -q --basetemp=$bt   # targeted subsystem run when touching that CLI
+python -m pytest tests -q --basetemp=$bt                # full gate ~3 min before publish/refactor
 ```
 
 ## 9. Authority & do-not-reintroduce

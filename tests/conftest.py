@@ -1,38 +1,32 @@
-"""Centralised test-tier marking.
+"""Centralised test-tier marking + fail-closed tier registry guard.
 
-Applies pytest markers per test file so the marker policy lives in one place
-instead of editing every contract test module. See
-``pipeline-workspace/reports/test-audit-2026-06-25.md`` for the rationale
-(layered execution: fast local checks, targeted subsystem checks, full
-deterministic gate before release / real-book validation).
+Markers are applied per test file from the single registry in ``tests/_tiering.py``
+(FILE_TIERS), so the tier policy lives in one place. The daily tier is the
+**positive whitelist** ``-m fast``; the full deterministic gate runs with no -m.
+See ``pipeline-workspace/reports/test-audit-2026-07-13.md`` (P0) for the rationale.
 
-Files not listed here carry no tier marker and are picked up by the default
-``-m "not slow and not realbook"`` daily run.
+Fail-closed guard: every ``tests/test_*.py`` file MUST be registered with a
+primary tier. An unregistered new file, a stale registry entry, an unknown tier
+name, or ``fast`` combined with a heavier tier aborts collection — a new test
+file can never silently drop out of the frequent ``-m fast`` run.
 """
 import os
+from pathlib import Path
 
 import pytest
 
-# filename -> markers to apply to every test collected from that file.
-_FILE_MARKERS = {
-    "test_conversion_backend_cli.py": ("cli", "slow"),
-    "test_lint_republish_cli.py": ("cli", "slow"),
-    "test_ingest_orchestration_cli.py": ("cli", "slow"),
-    "test_skill_evolution.py": ("skill", "slow"),
-    "test_preprocessing_cli.py": ("cli",),
-    "test_ops_metrics_cli.py": ("cli",),
-    "test_doctor_cli.py": ("cli",),
-    "test_staging_clean_cli.py": ("cli",),
-    "test_concept_promotion_cli.py": ("cli",),
-    "test_query_session_cli.py": ("cli",),
-    "test_vault_init_cli.py": ("cli",),
-    "test_command_docs.py": ("skill",),
-    "test_skill_standard.py": ("skill",),
-}
+import _tiering
 
 
 def pytest_collection_modifyitems(items):
+    tests_dir = Path(__file__).resolve().parent
+    problems = _tiering.registry_violations(
+        (p.name for p in tests_dir.glob("test_*.py")), _tiering.FILE_TIERS)
+    if problems:
+        raise pytest.UsageError(
+            "test tier registry violations (fail-closed; tests/_tiering.py):\n  "
+            + "\n  ".join(problems))
     for item in items:
         filename = os.path.basename(item.location[0])
-        for marker in _FILE_MARKERS.get(filename, ()):
+        for marker in _tiering.FILE_TIERS.get(filename, ()):
             item.add_marker(getattr(pytest.mark, marker))
