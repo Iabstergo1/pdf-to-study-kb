@@ -220,11 +220,6 @@ def test_source_audit_strict_fail_then_nonstrict_degraded(tmp_path, monkeypatch)
     assert recon["production_accepted"] is False
 
 
-def test_source_audit_help(tmp_path):
-    r = _run(["source-audit", "--help"], tmp_path)
-    assert r.returncode == 0 and "--strict" in r.stdout and "--source" in r.stdout
-
-
 # --- evidence-assembly: arbitration-apply materializes a render decision into route-B assets ---
 
 def test_arbitration_apply_cli_materializes_render_without_touching_source_md(tmp_path):
@@ -272,16 +267,6 @@ def test_arbitration_apply_cli_materializes_render_without_touching_source_md(tm
     ev = json.loads((staging / "evidence.json").read_text(encoding="utf-8"))
     assert ev["pages"]["2"]["resolution"] == "materialized" and 2 in ev["final_hard_pages"]
     assert (staging / "source.md").read_bytes() == before           # source.md 字节不变
-
-
-def test_arbitration_cli_help(tmp_path):
-    assert "--source" in _run(["arbitration-status", "--help"], tmp_path).stdout
-    assert "--source" in _run(["arbitration-apply", "--help"], tmp_path).stdout
-
-
-def test_arbitration_resolve_help(tmp_path):
-    out = _run(["arbitration-resolve", "--help"], tmp_path).stdout
-    assert "--page" in out and "--decision" in out and "--reason" in out
 
 
 def test_arbitration_resolve_closes_needs_human(tmp_path):

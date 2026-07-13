@@ -69,7 +69,6 @@ FILE_TIERS = {
     "test_thresholds.py": ("fast",),
     "test_tiering_guard.py": ("fast",),
     "test_wiki_gate.py": ("fast",),
-    "test_wiki_gate_callout.py": ("fast",),
     "test_windowing.py": ("fast",),
     "test_workorder.py": ("fast",),
 }

@@ -89,8 +89,28 @@ def test_t3_hygiene_no_dead_pointers():
 
 
 _PROTOCOL_KEYWORDS = {
-    "ingest": ["workorder.yaml", "resolve-concept", "check-write", "window-done",
-               "status: proposed", "lint", "source-audit", "arbitration"],
+    # ingest 是最复杂的编排 skill：详尽协议 manifest（合并自 test_command_docs.py 原先 6 条
+    # ingest 关键词 substring 测试——统一到这份唯一 manifest 且改为查双树，避免两套 substring 规则）。
+    "ingest": [
+        # 编排协议 + 派生文件契约
+        "workorder.yaml", "ingest-start", "show-window", "window-start", "window-done",
+        "resolve-concept", "check-write", "snapshot-page", "ingest-done", "digest.md",
+        "rolling digest", "status: proposed", "write_scope", "_registry.yaml",
+        "index.generated.md", "aliases.md", "retired",
+        # 端到端步骤
+        "add-source", "profile", "source-convert", "windows", "workorder", "init-vault", "lint",
+        # 双审 + 证据环
+        "source-audit", "reconciliation.json", "dual-audit", "MinerU", "PyMuPDF", "arbitration",
+        "evidence.json", "arbitration-apply", "check_evidence_bundle", "arbitration-resolve",
+        "formula_text_loss",
+        # 综合职责（D-2：lesson 降级、去 TOC 化）
+        "synthesis duties", "overview.md", "concept map", "chapter list", "topics/",
+        "comparisons/", "downgraded",
+        # 整书理解 + 原生复述（D-1：源图只读证据，不嵌入）
+        "chapters.json", "whole-book", "source-image-embed", "vector-figure", "navigation spine",
+        # 难页资产头
+        "route-b-assets", "tier=must",
+    ],
     "kb-query": ["check-session", "query-session", "candidate_write_set", "evidence_refs"],
     "kb-save": ["resolve-concept", "check-write", "check-session", "save-back-policy",
                 "status: proposed"],

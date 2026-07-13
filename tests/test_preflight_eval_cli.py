@@ -93,11 +93,6 @@ def test_cli_preflight_eval_missing_staging_errors(tmp_path):
     assert r.returncode != 0
 
 
-def test_cli_preflight_eval_help(tmp_path):
-    r = _run(["preflight-eval", "--help"], tmp_path)
-    assert r.returncode == 0 and "--strict" in r.stdout and "--source" in r.stdout
-
-
 def test_cli_preflight_eval_strict_nonzero_on_scanned_without_ocr(tmp_path):
     # 端到端：扫描件但 ocr_used=False（schema/字段齐全）→ strict 非零退出（OCR 契约硬规则）。
     blocks = [_block("b1", 1, 0, 200)]

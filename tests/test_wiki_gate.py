@@ -356,6 +356,10 @@ def test_render_safety_violations_shared_rules():
     # 嵌套层的未知类型同样被看到（同级错误头也带类型）
     assert "callout-unknown" in {v["rule"] for v in wiki_gate.render_safety_violations(
         "x.md", "> [!question] 自测\n> 一？\n> > [!фейк]- 答\n> > 内容。\n")}
+    # ⑤ 正向放行（迁自已删的 test_wiki_gate_callout.py）：标准嵌套折叠答案 `> > [!success]-`
+    # 是自测题的规范写法，白名单类型 + 合法嵌套 → 零渲染安全违规。
+    assert wiki_gate.render_safety_violations(
+        "x.md", "> [!question] 自测\n> 题干？\n> > [!success]- 参考答案\n> > 答案。\n") == []
 
 
 def test_vault_render_safety_scans_published_with_owner(tmp_path):

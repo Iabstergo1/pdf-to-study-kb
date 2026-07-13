@@ -9,16 +9,6 @@ def _skill(name: str) -> str:
     return (SKILLS / name / "SKILL.md").read_text(encoding="utf-8")
 
 
-def _skill_all(name: str) -> str:
-    # Complex skills push phase detail to references/*.md (skill-standard.md); protocol words checked across both.
-    parts = [_skill(name)]
-    refs = SKILLS / name / "references"
-    if refs.is_dir():
-        for f in sorted(refs.glob("*.md")):
-            parts.append(f.read_text(encoding="utf-8"))
-    return "\n".join(parts)
-
-
 def _cli_subcommands() -> list[str]:
     """从 argparse --help 提取真实子命令清单（文档计数守卫的机器真值）。"""
     import re
@@ -79,83 +69,16 @@ def test_docs_no_stale_source_image_or_scaffold_claims():
     assert "建议小节（一句话" not in dev, "开发指南仍把已废除的旧模板骨架当现行契约描述"
 
 
-def test_legacy_commands_dir_migrated_to_skills():
-    # The command layer migrated to .claude/skills/; the old .claude/commands/ is gone.
-    assert not (ROOT / ".claude/commands").exists(), "legacy .claude/commands/ should be deleted"
-    for name in ["ingest", "kb-query", "kb-save", "kb-review", "wiki-lint-semantic"]:
-        assert (SKILLS / name / "SKILL.md").exists(), f"missing skill: {name}"
-
-
-def test_skills_have_name_and_description_frontmatter():
-    for name in ["ingest", "kb-query", "kb-save", "kb-review", "wiki-lint-semantic"]:
-        text = _skill(name)
-        assert text.startswith("---"), f"{name} missing frontmatter"
-        assert f"name: {name}" in text, f"{name} frontmatter missing name"
-        assert "description:" in text, f"{name} frontmatter missing description"
-
-
-def test_ingest_skill_protocol_complete():
-    text = _skill_all("ingest")  # SKILL.md + references/*
-    for must in ["workorder.yaml", "ingest-start", "show-window", "window-start", "window-done",
-                 "resolve-concept", "check-write", "snapshot-page", "ingest-done",
-                 "digest.md", "rolling digest", "status: proposed", "write_scope"]:
-        assert must in text, f"ingest missing protocol element: {must}"
-    # Derived files must not be hand-written; aliases.md is retired (B2).
-    assert "_registry.yaml" in text and "index.generated.md" in text
-    assert "aliases.md" in text and "retired" in text
-
-
-def test_ingest_skill_orchestrates_full_pipeline():
-    # The ingest skill orchestrates preprocessing + dual-audit + finishing lint, not just writing.
-    text = _skill_all("ingest")
-    for must in ["add-source", "profile", "source-convert", "source-audit", "windows", "workorder",
-                 "init-vault", "lint"]:
-        assert must in text, f"ingest missing end-to-end step: {must}"
-
-
-def test_ingest_skill_dual_audit_wiring():
-    # The dual-audit + evidence-assembly loop must be wired through the full ingest workflow
-    # (preprocessing → auto-arbitration → materialization → closed-loop acceptance).
-    text = _skill_all("ingest")
-    for must in ["source-audit", "reconciliation.json", "dual-audit", "MinerU", "PyMuPDF",
-                 "arbitration", "evidence.json", "arbitration-apply", "check_evidence_bundle",
-                 "arbitration-resolve", "formula_text_loss"]:
-        assert must in text, f"ingest missing dual-audit/evidence-loop element: {must}"
-    assert (SKILLS / "ingest" / "references" / "arbitrate.md").exists(), "ingest missing references/arbitrate.md"
-
-
-def test_ingest_skill_synthesis_duties():
-    text = _skill_all("ingest")
-    # D-2: lessons are downgraded and the wiki is de-TOC-ified (no "follow the source TOC").
-    for must in ["synthesis duties", "overview.md", "concept map", "chapter list",
-                 "topics/", "comparisons/", "downgraded"]:
-        assert must in text, f"ingest missing synthesis-duty element: {must}"
-
-
-def test_ingest_skill_whole_book_chapter_map_and_native_reexpression():
-    # Whole-book understanding (chapters.json map / navigation spine) + D-1 native re-expression
-    # of source images (source-image-embed hard-blocks embedding; images are read-only evidence).
-    text = _skill_all("ingest")
-    for must in ["chapters.json", "whole-book", "source-image-embed", "vector-figure", "navigation spine"]:
-        assert must in text, f"ingest missing whole-book / native-reexpression element: {must}"
-
-
-def test_ingest_skill_window_asset_header():
-    # show-window's hard-page asset header (route-b-assets + tier) is part of the ingest protocol.
-    text = _skill_all("ingest")
-    for must in ["route-b-assets", "tier=must"]:
-        assert must in text, f"ingest missing window asset-header protocol: {must}"
-
+# 命令层已迁到 .claude/skills/；旧 .claude/commands/ 不存在这一断言并入 test_legacy_removed.py 的
+# 统一 removed-artifacts guard；skill 集合与 frontmatter 由 test_skill_standard.py T1/T2 覆盖。
+# ingest 的多条协议关键词 substring 测试已并入 T4 唯一 manifest（_PROTOCOL_KEYWORDS["ingest"]），
+# 这里只保留 T1/T4 未覆盖的结构性契约：references/*.md 相位文件存在。
 
 def test_ingest_skill_split_into_references():
-    # Engineering standard: a complex skill keeps orchestration in SKILL.md, phase detail in references/*.md.
+    # 工程标准（结构性，T1/T4 未覆盖）：复杂 skill 把相位细节下放 references/*.md。
     refs = SKILLS / "ingest" / "references"
-    for f in ["preflight.md", "write-pages.md", "synthesis.md", "finish-lint.md"]:
+    for f in ["arbitrate.md", "preflight.md", "write-pages.md", "synthesis.md", "finish-lint.md"]:
         assert (refs / f).exists(), f"ingest missing references/{f}"
-    # The main SKILL.md carries the nine-section headers.
-    sk = _skill("ingest")
-    for seg in ["Triggers / Non-triggers", "## 2. Inputs", "## 3. Outputs", "Acceptance criteria"]:
-        assert seg in sk, f"ingest SKILL.md missing nine-section header: {seg}"
 
 
 def test_routing_doc_has_negative_examples():

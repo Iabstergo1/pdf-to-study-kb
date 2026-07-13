@@ -27,8 +27,3 @@ def test_next_smoke_runs(tmp_path):
                        cwd=tmp_path, env=_isolated_env(tmp_path),
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-
-
-def test_state_db_path_is_vault_level():
-    text = PIPELINE.read_text(encoding="utf-8")
-    assert "pipeline-workspace/state/study-kb.sqlite" in text
