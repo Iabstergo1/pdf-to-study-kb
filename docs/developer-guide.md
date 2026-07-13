@@ -665,22 +665,22 @@ python -m pytest tests --collect-only -q --basetemp=$bt   # 只看分层收集
 | `test_skill_standard.py` | 九段合约（T1）、**双树字节对等**（T2）、卫生（T3）、协议关键词完好（T4，含 `kb-postmortem`/`pipeline-doctor` 词表）、source-xray guard（T5） |
 | `test_state_store.py` | 状态机单向转换、幂等跳过、reopen、window 记账 |
 | `test_locks.py` | 单 vault 锁获取/释放/stale 判定/受控破锁 |
-| `test_preflight_eval.py` | 12 项 check 各自行为（最大测试文件之一；CLI wiring 拆在 `test_preflight_eval_cli.py`） |
-| `test_source_convert.py`（747 行） | 后端选择 + 转换契约（最大测试文件） |
-| `test_conversion_backend_cli.py`（518 行） | backend/policy CLI 路由 |
+| `test_preflight_eval.py` | 12 项 check 各自行为（纯 check_* 已 parametrize；CLI wiring 拆在 `test_preflight_eval_cli.py`，端到端 evaluate 独立） |
+| `test_source_convert.py` | 后端选择 + 转换契约（needs-vision/backend/classify 判定矩阵已 parametrize，真实 PDF/convert 独立） |
+| `test_conversion_backend_cli.py` | backend/policy CLI 路由 |
 | `test_wiki_gate.py` | lint 各规则（含 `table-wikilink-pipe`/`overview-seed`）、渲染安全（callout 白名单/嵌套）、quiz/命题索引构建 |
 | `test_source_audit.py` | 双审互检、reconcile、fail-closed |
-| `test_arbitration.py` | 证据模型/候选/物化/闭环门 |
+| `test_arbitration.py` | 证据模型/候选/物化/闭环门（candidate·closure·windows-blockers 判定矩阵已 parametrize） |
 | `test_windowing.py` | 切窗、长表不切、char fallback |
 | `test_concept_store.py` / `test_concept_promotion_cli.py` | 概念归一、跨域提升 |
 | `test_ingest_guards.py` | 写入边界 + 覆盖保护三条件 |
 | `test_graph_model.py` / `test_graph_analysis.py` / `test_graph_data.py` / `test_graph_html.py` / `test_graph_lint.py` / `test_graph_v2_e2e.py` | **知识图谱 v2.0**：图模型→Louvain 社区→graph-data 契约→力导向 HTML→lint 校验→端到端 |
 | `test_skill_evolution.py` | skill-mine 聚类（open-only）、skill-gate/stage/adopt 全链路 |
-| `test_ops_metrics_cli.py`（237 行，2026-07-09 新增） | `ingest-stats` 代理指标聚合、`proposals-resolve` 精确/批量退场 + `--all-matching` 护栏 |
-| `test_doctor_cli.py`（176 行，新增） | `window-done --writes-file`、`reset-source` dry-run/apply/护栏 |
-| `test_staging_clean_cli.py`（154 行，新增） | staging 三分类、`--apply` 双护栏、幂等 |
+| `test_ops_metrics_cli.py` | `ingest-stats` 代理指标聚合、`proposals-resolve` 精确/批量退场 + `--all-matching` 护栏 |
+| `test_doctor_cli.py` | `window-done --writes-file` 参数拒绝矩阵、`reset-source` 状态推进（dry-run/apply/护栏） |
+| `test_staging_clean_cli.py` | staging 三分类、`--apply` 双护栏、幂等（dry-run→apply→再 apply 顺序场景） |
 | `test_page_rules.py` | 页正文规则原语，含 `extract_question_stems`/`extract_propositions` |
-| `test_mineru_backend.py`（386 行） | MinerU 归一（mock 注入，不依赖真实安装） |
+| `test_mineru_backend.py` | MinerU 归一（mock 注入，不依赖真实安装） |
 
 ---
 
