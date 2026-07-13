@@ -7,6 +7,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("preflight_eval", ROOT / "scripts" / "preflight_eval.py")
 pe = importlib.util.module_from_spec(spec)
@@ -78,62 +80,75 @@ def _char_window(wid, cs, ce):
             "char_end": ce, "overlap_before": 0, "source_id": "s"}
 
 
+# ---- 决策表 helpers（parametrize 专用；del-case 构造 + detail 或断言）----
+
+def _report_without(key):
+    r = _ok_report(); del r[key]; return r
+
+
+def _block_without(key):
+    b = _block("b1", 1, 0, 10); del b[key]; return b
+
+
+def _window_without(key):
+    w = _window("w0", 0, 200, ["b1"]); del w[key]; return w
+
+
+def _block_with_ref(ref):
+    b = _block("b1", 1, 0, 10); b["source_ref"] = ref; return b
+
+
+def _win_rf(wid, cs, ce, block_ids, ps, pe_, rf):
+    w = _window(wid, cs, ce, block_ids, ps=ps, pe_=pe_); w["risk_flags"] = rf; return w
+
+
+def _assert_check(c, name, status, severity=None, detail=None):
+    # 统一断言：name/status 恒查；severity/detail 给定才查；detail 支持 tuple(任一命中)。
+    assert c["name"] == name
+    assert c["status"] == status
+    if severity is not None:
+        assert c["severity"] == severity
+    if detail is not None:
+        alts = detail if isinstance(detail, tuple) else (detail,)
+        assert any(a in c["detail"] for a in alts), f"{c['detail']!r} 不含 {alts} 任一"
+
+
 # ---- check_page_coverage ----
 
-def test_check_page_coverage_ok():
-    blocks = [_block("b1", 1, 0, 10), _block("b2", 2, 10, 20)]
-    c = pe.check_page_coverage(blocks, page_count=2)
-    assert c["name"] == "page_coverage" and c["status"] == "ok"
+_PAGE_COVERAGE_CASES = [
+    ("ok", [_block("b1", 1, 0, 10), _block("b2", 2, 10, 20)], 2, "ok", None, None),
+    ("missing_page_2", [_block("b1", 1, 0, 10), _block("b3", 3, 10, 20)], 3, "fail", "high", "2"),
+]
 
 
-def test_check_page_coverage_missing_page_fails():
-    blocks = [_block("b1", 1, 0, 10), _block("b3", 3, 10, 20)]  # page 2 缺
-    c = pe.check_page_coverage(blocks, page_count=3)
-    assert c["status"] == "fail" and c["severity"] == "high"
-    assert "2" in c["detail"]
+@pytest.mark.parametrize("cid,blocks,page_count,status,severity,detail", _PAGE_COVERAGE_CASES,
+                         ids=[c[0] for c in _PAGE_COVERAGE_CASES])
+def test_check_page_coverage(cid, blocks, page_count, status, severity, detail):
+    c = pe.check_page_coverage(blocks, page_count=page_count)
+    _assert_check(c, "page_coverage", status, severity, detail)
 
 
 # ---- check_window_monotonic ----
 
-def test_check_window_monotonic_ok():
-    ws = [_window("w0", 0, 100, ["b1"], ps=1, pe_=1),
-          _window("w1", 100, 200, ["b2"], ps=2, pe_=2)]
-    c = pe.check_window_monotonic(ws)
-    assert c["status"] == "ok"
+_MONOTONIC_CASES = [
+    ("ok_sequential", [_window("w0", 0, 100, ["b1"], ps=1, pe_=1),
+                       _window("w1", 100, 200, ["b2"], ps=2, pe_=2)], "ok", None),
+    ("ok_with_overlap", [_window("w0", 0, 120, ["b1"], ps=1, pe_=1),
+                         _window("w1", 100, 200, ["b2"], ps=1, pe_=2)], "ok", None),
+    ("hole_between_windows", [_window("w0", 0, 100, ["b1"]),
+                              _window("w1", 150, 200, ["b2"])], "fail", "high"),
+    ("cross_window_page_descending", [_window("w0", 0, 100, ["b1"], ps=5, pe_=6),
+                                      _window("w1", 100, 200, ["b2"], ps=2, pe_=3)], "fail", None),
+    ("empty_block_ids", [_window("w0", 0, 100, [])], "fail", None),
+    ("bad_page_range", [_window("w0", 0, 100, ["b1"], ps=3, pe_=1)], "fail", None),
+]
 
 
-def test_check_window_monotonic_ok_with_overlap():
-    # 相邻窗 overlap（后窗起点早于前窗终点）合法
-    ws = [_window("w0", 0, 120, ["b1"], ps=1, pe_=1),
-          _window("w1", 100, 200, ["b2"], ps=1, pe_=2)]
-    c = pe.check_window_monotonic(ws)
-    assert c["status"] == "ok"
-
-
-def test_check_window_monotonic_hole_fails():
-    # 窗间有洞（w1 起点 > w0 终点）→ fail
-    ws = [_window("w0", 0, 100, ["b1"]), _window("w1", 150, 200, ["b2"])]
-    c = pe.check_window_monotonic(ws)
-    assert c["status"] == "fail" and c["severity"] == "high"
-
-
-def test_check_window_monotonic_page_descending_fails():
-    ws = [_window("w0", 0, 100, ["b1"], ps=5, pe_=6),
-          _window("w1", 100, 200, ["b2"], ps=2, pe_=3)]  # 跨窗页倒退
-    c = pe.check_window_monotonic(ws)
-    assert c["status"] == "fail"
-
-
-def test_check_window_monotonic_empty_block_ids_fails():
-    ws = [_window("w0", 0, 100, [])]  # block 窗 block_ids 空
-    c = pe.check_window_monotonic(ws)
-    assert c["status"] == "fail"
-
-
-def test_check_window_monotonic_bad_page_range_fails():
-    ws = [_window("w0", 0, 100, ["b1"], ps=3, pe_=1)]  # page_start > page_end
-    c = pe.check_window_monotonic(ws)
-    assert c["status"] == "fail"
+@pytest.mark.parametrize("cid,windows,status,severity", _MONOTONIC_CASES,
+                         ids=[c[0] for c in _MONOTONIC_CASES])
+def test_check_window_monotonic(cid, windows, status, severity):
+    c = pe.check_window_monotonic(windows)
+    _assert_check(c, "window_monotonic", status, severity)
 
 
 # ---- check_asset_traceability ----
@@ -184,102 +199,72 @@ def test_check_asset_traceability_table_html_without_asset_ok(tmp_path):
 
 # ---- check_artifact_schema（四层必备字段契约，item 2）----
 
-def test_check_artifact_schema_ok():
-    blocks = [_block("b1", 1, 0, 10)]
-    ws = [_window("w0", 0, 200, ["b1"])]
-    c = pe.check_artifact_schema(_ok_report(), blocks, ws)
-    assert c["name"] == "artifact_schema" and c["status"] == "ok"
+_SCHEMA_CASES = [
+    ("ok", _ok_report(), [_block("b1", 1, 0, 10)], [_window("w0", 0, 200, ["b1"])],
+     "ok", None, None),
+    ("unknown_source_type", _ok_report(source_type="unknown"),
+     [_block("b1", 1, 0, 10)], [_window("w0", 0, 200, ["b1"])], "fail", "high", "source_type"),
+    ("missing_backend_reason", _report_without("backend_reason"),
+     [_block("b1", 1, 0, 10)], [_window("w0", 0, 200, ["b1"])], "fail", None, "backend_reason"),
+    ("missing_block_chapter_id", _ok_report(),
+     [_block_without("chapter_id")], [_window("w0", 0, 200, ["b1"])], "fail", None, "chapter_id"),
+    ("missing_window_l3_source_refs", _ok_report(),
+     [_block("b1", 1, 0, 10)], [_window_without("source_refs")], "fail", None, "source_refs"),
+    ("char_window_minimal_ok", _ok_report(),
+     [_block("b1", 1, 0, 10)], [_char_window("w0", 0, 100)], "ok", None, None),
+]
 
 
-def test_check_artifact_schema_unknown_source_type_fails():
-    c = pe.check_artifact_schema(_ok_report(source_type="unknown"),
-                                 [_block("b1", 1, 0, 10)], [_window("w0", 0, 200, ["b1"])])
-    assert c["status"] == "fail" and c["severity"] == "high"
-    assert "source_type" in c["detail"]
-
-
-def test_check_artifact_schema_missing_backend_reason_fails():
-    rep = _ok_report()
-    del rep["backend_reason"]
-    c = pe.check_artifact_schema(rep, [_block("b1", 1, 0, 10)], [_window("w0", 0, 200, ["b1"])])
-    assert c["status"] == "fail" and "backend_reason" in c["detail"]
-
-
-def test_check_artifact_schema_missing_block_chapter_id_fails():
-    b = _block("b1", 1, 0, 10)
-    del b["chapter_id"]
-    c = pe.check_artifact_schema(_ok_report(), [b], [_window("w0", 0, 200, ["b1"])])
-    assert c["status"] == "fail" and "chapter_id" in c["detail"]
-
-
-def test_check_artifact_schema_missing_window_l3_fails():
-    w = _window("w0", 0, 200, ["b1"])
-    del w["source_refs"]                       # block 窗缺 L3 字段
-    c = pe.check_artifact_schema(_ok_report(), [_block("b1", 1, 0, 10)], [w])
-    assert c["status"] == "fail" and "source_refs" in c["detail"]
-
-
-def test_check_artifact_schema_char_window_needs_only_minimal():
+@pytest.mark.parametrize("cid,report,blocks,windows,status,severity,detail", _SCHEMA_CASES,
+                         ids=[c[0] for c in _SCHEMA_CASES])
+def test_check_artifact_schema(cid, report, blocks, windows, status, severity, detail):
     # char-fallback 窗只需 window_id/source_id，不因缺块级 L3 字段而 schema-fail（由 window_contract 标降级）。
-    c = pe.check_artifact_schema(_ok_report(), [_block("b1", 1, 0, 10)],
-                                 [_char_window("w0", 0, 100)])
-    assert c["status"] == "ok"
+    c = pe.check_artifact_schema(report, blocks, windows)
+    _assert_check(c, "artifact_schema", status, severity, detail)
 
 
 # ---- check_window_contract（char-fallback 显式降级，item 3）----
 
-def test_check_window_contract_ok_all_block_windows():
-    c = pe.check_window_contract([_window("w0", 0, 200, ["b1"])])
-    assert c["status"] == "ok"
+_WINDOW_CONTRACT_CASES = [
+    ("ok_all_block_windows", [_window("w0", 0, 200, ["b1"])], "ok", None, None),
+    ("flags_char_fallback", [_char_window("w0", 0, 100), _window("w1", 100, 200, ["b1"])],
+     "warn", "warn", "w0"),
+]
 
 
-def test_check_window_contract_flags_char_fallback():
-    c = pe.check_window_contract([_char_window("w0", 0, 100), _window("w1", 100, 200, ["b1"])])
-    assert c["status"] == "warn" and c["severity"] == "warn"
-    assert "w0" in c["detail"]
+@pytest.mark.parametrize("cid,windows,status,severity,detail", _WINDOW_CONTRACT_CASES,
+                         ids=[c[0] for c in _WINDOW_CONTRACT_CASES])
+def test_check_window_contract(cid, windows, status, severity, detail):
+    c = pe.check_window_contract(windows)
+    _assert_check(c, "window_contract", status, severity, detail)
 
 
 # ---- check_dual_audit（PyMuPDF + MinerU 双审验收契约）----
 
-def test_check_dual_audit_cross_checked_ok():
-    c = pe.check_dual_audit(_ok_reconciliation(), _ok_report())
-    assert c["name"] == "dual_audit" and c["status"] == "ok"
+_DUAL_AUDIT_CASES = [
+    ("cross_checked_ok", _ok_reconciliation(), _ok_report(), "ok", None, None),
+    ("na_for_markdown", {}, _ok_report(source_type="markdown", dual_audit_required=False),
+     "ok", "info", None),
+    ("missing_reconciliation_for_pdf", {}, _ok_report(), "fail", "high", ("reconciliation", "双审")),
+    ("degraded_no_review", _ok_reconciliation(
+        review_status="degraded_no_review", dual_audited=False, degraded=True,
+        production_accepted=False, review_backend=None, degraded_reason="mineru unavailable",
+        missing_evidence=["mineru_review"]), _ok_report(), "fail", "high", None),
+    ("review_failed", _ok_reconciliation(
+        review_status="review_failed", dual_audited=False, degraded=True,
+        production_accepted=False, review_backend=None, degraded_reason="mineru crashed",
+        missing_evidence=["mineru_review"]), _ok_report(), "fail", "high", None),
+    ("disagreements_warn", _ok_reconciliation(disagreements=[
+        {"page": 2, "kind": "table_presence", "primary": True, "review": False}]),
+     _ok_report(), "warn", "warn", None),
+]
 
 
-def test_check_dual_audit_not_applicable_for_markdown():
-    c = pe.check_dual_audit({}, _ok_report(source_type="markdown", dual_audit_required=False))
-    assert c["status"] == "ok" and c["severity"] == "info"
-
-
-def test_check_dual_audit_missing_reconciliation_for_pdf_fails():
-    # PDF 但没跑 source-audit（无 reconciliation.json）→ high/fail（验收要求双审证据）。
-    c = pe.check_dual_audit({}, _ok_report())
-    assert c["status"] == "fail" and c["severity"] == "high"
-    assert "reconciliation" in c["detail"] or "双审" in c["detail"]
-
-
-def test_check_dual_audit_degraded_no_review_fails():
-    # PyMuPDF-only（MinerU 缺）→ not dual-audited → high/fail（strict 不放行）。
-    rec = _ok_reconciliation(review_status="degraded_no_review", dual_audited=False,
-                             degraded=True, production_accepted=False, review_backend=None,
-                             degraded_reason="mineru unavailable", missing_evidence=["mineru_review"])
-    c = pe.check_dual_audit(rec, _ok_report())
-    assert c["status"] == "fail" and c["severity"] == "high"
-
-
-def test_check_dual_audit_review_failed_fails():
-    rec = _ok_reconciliation(review_status="review_failed", dual_audited=False, degraded=True,
-                             production_accepted=False, review_backend=None,
-                             degraded_reason="mineru crashed", missing_evidence=["mineru_review"])
-    c = pe.check_dual_audit(rec, _ok_report())
-    assert c["status"] == "fail" and c["severity"] == "high"
-
-
-def test_check_dual_audit_disagreements_warn():
-    rec = _ok_reconciliation(disagreements=[{"page": 2, "kind": "table_presence",
-                                             "primary": True, "review": False}])
-    c = pe.check_dual_audit(rec, _ok_report())
-    assert c["status"] == "warn" and c["severity"] == "warn"
+@pytest.mark.parametrize("cid,recon,report,status,severity,detail", _DUAL_AUDIT_CASES,
+                         ids=[c[0] for c in _DUAL_AUDIT_CASES])
+def test_check_dual_audit(cid, recon, report, status, severity, detail):
+    c = pe.check_dual_audit(recon, report)
+    _assert_check(c, "dual_audit", status, severity, detail)
 
 
 # ---- check_evidence_bundle（双审分歧是否闭环进 LLM 读取窗口；evidence-assembly 核心门）----
@@ -289,205 +274,159 @@ def _evidence(candidates):
             "reviewer_structural": list(candidates), "final_hard_pages": [1]}
 
 
-def test_check_evidence_bundle_na_when_no_candidates():
-    c = pe.check_evidence_bundle({"candidates": []}, [], [], [], _ok_report())
-    assert c["name"] == "evidence_bundle" and c["status"] == "ok" and c["severity"] == "info"
-
-
-def test_check_evidence_bundle_fails_when_unarbitrated():
+_EVIDENCE_CASES = [
+    ("na_when_no_candidates", {"candidates": []}, [], [], [], _ok_report(), "ok", "info"),
     # 候选页 2 无裁决 → 分歧未闭环 → high/fail（阻断整本 ingest）。
-    blocks = [_block("b2", 2, 0, 10)]
-    ws = [_window("w0", 0, 10, ["b2"], ps=2, pe_=2)]
-    c = pe.check_evidence_bundle(_evidence([2]), [], blocks, ws, _ok_report())
-    assert c["status"] == "fail" and c["severity"] == "high"
+    ("unarbitrated_candidate_fail", _evidence([2]), [], [_block("b2", 2, 0, 10)],
+     [_window("w0", 0, 10, ["b2"], ps=2, pe_=2)], _ok_report(), "fail", "high"),
+    ("render_materialized_in_window_ok", _evidence([2]),
+     [{"page": 2, "decision": "render", "reason": "flattened fraction"}],
+     [_block("b2", 2, 0, 10, asset="assets/p0002.png")],
+     [_window("w0", 0, 10, ["b2"], ps=2, pe_=2, assets=["assets/p0002.png"])],
+     _ok_report(), "ok", "high"),
+    ("render_not_in_window_fail", _evidence([2]),
+     [{"page": 2, "decision": "render", "reason": "x"}],
+     [_block("b2", 2, 0, 10, asset="assets/p0002.png")],
+     [_window("w0", 0, 10, ["b2"], ps=2, pe_=2)], _ok_report(), "fail", None),
+    ("needs_human_fail", _evidence([2]),
+     [{"page": 2, "decision": "needs_human", "reason": "ambiguous table/figure"}],
+     [_block("b2", 2, 0, 10)], [_window("w0", 0, 10, ["b2"], ps=2, pe_=2)],
+     _ok_report(), "fail", None),
+    ("na_for_markdown", _evidence([2]), [], [], [],
+     _ok_report(source_type="markdown", dual_audit_required=False), "ok", "info"),
+]
 
 
-def test_check_evidence_bundle_ok_when_render_materialized_in_window():
-    blocks = [_block("b2", 2, 0, 10, asset="assets/p0002.png")]
-    ws = [_window("w0", 0, 10, ["b2"], ps=2, pe_=2, assets=["assets/p0002.png"])]
-    decs = [{"page": 2, "decision": "render", "reason": "flattened fraction"}]
-    c = pe.check_evidence_bundle(_evidence([2]), decs, blocks, ws, _ok_report())
-    assert c["status"] == "ok" and c["severity"] == "high"
+@pytest.mark.parametrize("cid,evidence,decisions,blocks,windows,report,status,severity",
+                         _EVIDENCE_CASES, ids=[c[0] for c in _EVIDENCE_CASES])
+def test_check_evidence_bundle(cid, evidence, decisions, blocks, windows, report, status, severity):
+    c = pe.check_evidence_bundle(evidence, decisions, blocks, windows, report)
+    _assert_check(c, "evidence_bundle", status, severity)
 
 
-def test_check_evidence_bundle_fails_when_render_not_in_window():
-    blocks = [_block("b2", 2, 0, 10, asset="assets/p0002.png")]
-    ws = [_window("w0", 0, 10, ["b2"], ps=2, pe_=2)]   # window does not carry the asset
-    decs = [{"page": 2, "decision": "render", "reason": "x"}]
-    c = pe.check_evidence_bundle(_evidence([2]), decs, blocks, ws, _ok_report())
-    assert c["status"] == "fail"
+# ---- check_risk_coverage（soft 证据风险是否记录进窗口；观测，不阻断；per-page 非全书）----
+
+_RISK_COVERAGE_CASES = [
+    # 已写进窗口 → ok
+    ("soft_recorded_ok",
+     {"soft_risk_pages": [1], "risk_flags_by_page": {"1": ["reading_order_risk"]}},
+     [_win_rf("w0", 0, 200, ["b1"], 1, 1, ["reading_order_risk"])], _ok_report(),
+     "ok", "info", None),
+    # 默认 risk_flags=[] → 未记录 → warn
+    ("uncovered_warn",
+     {"soft_risk_pages": [1], "risk_flags_by_page": {"1": ["reading_order_risk"]}},
+     [_window("w0", 0, 200, ["b1"], ps=1, pe_=1)], _ok_report(), "warn", "warn", None),
+    ("na_for_markdown",
+     {"soft_risk_pages": [1], "risk_flags_by_page": {"1": ["reading_order_risk"]}},
+     [], _ok_report(source_type="markdown", dual_audit_required=False), "ok", "info", None),
+    ("na_when_no_soft_risk", {"soft_risk_pages": []}, [], _ok_report(), "ok", "info", None),
+    # page1 窗带 flag、page2 窗不带 → page2 未覆盖 → warn，detail 提及页 2
+    ("some_pages_uncovered_warn",
+     {"soft_risk_pages": [1, 2],
+      "risk_flags_by_page": {"1": ["reading_order_risk"], "2": ["reading_order_risk"]}},
+     [_win_rf("w0", 0, 100, ["b1"], 1, 1, ["reading_order_risk"]),
+      _window("w1", 100, 200, ["b2"], ps=2, pe_=2)], _ok_report(), "warn", None, "2"),
+    # 该页两类 soft，覆盖窗只带一类 → warn（要求全部 soft flag 都被覆盖窗携带）
+    ("covering_window_missing_one_flag_warn",
+     {"soft_risk_pages": [1],
+      "risk_flags_by_page": {"1": ["heading_structure_risk", "reading_order_risk"]}},
+     [_win_rf("w0", 0, 100, ["b1"], 1, 1, ["reading_order_risk"])], _ok_report(), "warn", None, None),
+    # 每页的覆盖窗都带全该页 soft flags → ok
+    ("each_page_window_carries_flags_ok",
+     {"soft_risk_pages": [1, 2],
+      "risk_flags_by_page": {"1": ["reading_order_risk"], "2": ["reading_order_risk"]}},
+     [_win_rf("w0", 0, 100, ["b1"], 1, 1, ["reading_order_risk"]),
+      _win_rf("w1", 100, 200, ["b2"], 2, 2, ["reading_order_risk"])], _ok_report(),
+     "ok", "info", None),
+]
 
 
-def test_check_evidence_bundle_fails_on_needs_human():
-    blocks = [_block("b2", 2, 0, 10)]
-    ws = [_window("w0", 0, 10, ["b2"], ps=2, pe_=2)]
-    decs = [{"page": 2, "decision": "needs_human", "reason": "ambiguous table/figure"}]
-    c = pe.check_evidence_bundle(_evidence([2]), decs, blocks, ws, _ok_report())
-    assert c["status"] == "fail"
-
-
-def test_check_evidence_bundle_na_for_markdown():
-    c = pe.check_evidence_bundle(_evidence([2]), [], [], [],
-                                 _ok_report(source_type="markdown", dual_audit_required=False))
-    assert c["status"] == "ok" and c["severity"] == "info"
-
-
-# ---- check_risk_coverage（soft 证据风险是否记录进窗口；观测，不阻断）----
-
-def test_check_risk_coverage_ok_when_soft_recorded():
-    ev = {"soft_risk_pages": [1], "risk_flags_by_page": {"1": ["reading_order_risk"]}}
-    ws = [_window("w0", 0, 200, ["b1"], ps=1, pe_=1)]
-    ws[0]["risk_flags"] = ["reading_order_risk"]                  # 已写进窗口
-    c = pe.check_risk_coverage(ev, ws, _ok_report())
-    assert c["name"] == "risk_coverage" and c["status"] == "ok" and c["severity"] == "info"
-
-
-def test_check_risk_coverage_warn_when_uncovered():
-    ev = {"soft_risk_pages": [1], "risk_flags_by_page": {"1": ["reading_order_risk"]}}
-    ws = [_window("w0", 0, 200, ["b1"], ps=1, pe_=1)]            # 默认 risk_flags=[] → 未记录
-    c = pe.check_risk_coverage(ev, ws, _ok_report())
-    assert c["status"] == "warn" and c["severity"] == "warn"
-
-
-def test_check_risk_coverage_na_for_markdown():
-    ev = {"soft_risk_pages": [1], "risk_flags_by_page": {"1": ["reading_order_risk"]}}
-    c = pe.check_risk_coverage(ev, [], _ok_report(source_type="markdown", dual_audit_required=False))
-    assert c["status"] == "ok" and c["severity"] == "info"
-
-
-def test_check_risk_coverage_na_when_no_soft_risk():
-    c = pe.check_risk_coverage({"soft_risk_pages": []}, [], _ok_report())
-    assert c["status"] == "ok" and c["severity"] == "info"
-
-
-def test_check_risk_coverage_warn_when_only_some_pages_covered():
-    # per-page（非全书）：page1 窗带 flag、page2 窗不带 → page2 未覆盖 → warn。
-    ev = {"soft_risk_pages": [1, 2],
-          "risk_flags_by_page": {"1": ["reading_order_risk"], "2": ["reading_order_risk"]}}
-    w1 = _window("w0", 0, 100, ["b1"], ps=1, pe_=1)
-    w1["risk_flags"] = ["reading_order_risk"]
-    w2 = _window("w1", 100, 200, ["b2"], ps=2, pe_=2)   # risk_flags=[]（page2 未带）
-    c = pe.check_risk_coverage(ev, [w1, w2], _ok_report())
-    assert c["status"] == "warn" and "2" in c["detail"]
-
-
-def test_check_risk_coverage_warn_when_covering_window_missing_one_flag():
-    # 该页有两类 soft，覆盖窗只带一类 → warn（另一类未覆盖；要求全部 soft flag 都被覆盖窗携带）。
-    ev = {"soft_risk_pages": [1],
-          "risk_flags_by_page": {"1": ["heading_structure_risk", "reading_order_risk"]}}
-    w1 = _window("w0", 0, 100, ["b1"], ps=1, pe_=1)
-    w1["risk_flags"] = ["reading_order_risk"]            # 缺 heading_structure_risk
-    c = pe.check_risk_coverage(ev, [w1], _ok_report())
-    assert c["status"] == "warn"
-
-
-def test_check_risk_coverage_ok_when_each_page_window_carries_its_flags():
-    # 每页的覆盖窗都带全该页 soft flags → ok。
-    ev = {"soft_risk_pages": [1, 2],
-          "risk_flags_by_page": {"1": ["reading_order_risk"], "2": ["reading_order_risk"]}}
-    w1 = _window("w0", 0, 100, ["b1"], ps=1, pe_=1)
-    w1["risk_flags"] = ["reading_order_risk"]
-    w2 = _window("w1", 100, 200, ["b2"], ps=2, pe_=2)
-    w2["risk_flags"] = ["reading_order_risk"]
-    c = pe.check_risk_coverage(ev, [w1, w2], _ok_report())
-    assert c["status"] == "ok" and c["severity"] == "info"
+@pytest.mark.parametrize("cid,evidence,windows,report,status,severity,detail", _RISK_COVERAGE_CASES,
+                         ids=[c[0] for c in _RISK_COVERAGE_CASES])
+def test_check_risk_coverage(cid, evidence, windows, report, status, severity, detail):
+    c = pe.check_risk_coverage(evidence, windows, report)
+    _assert_check(c, "risk_coverage", status, severity, detail)
 
 
 # ---- check_risk_signals ----
 
-def test_check_risk_signals_info_when_clean():
-    c = pe.check_risk_signals(_ok_report(), low_confidence_pages=[])
-    assert c["name"] == "risk_signals" and c["status"] == "ok" and c["severity"] == "info"
-
-
-def test_check_risk_signals_warn_on_low_confidence():
-    c = pe.check_risk_signals(_ok_report(scan_suspected=True, ocr_used=True),
-                              low_confidence_pages=[3, 5])
-    assert c["status"] == "warn" and c["severity"] == "info"
-    assert "scan_suspected" in c["detail"] or "3" in c["detail"]
-
-
-def test_check_risk_signals_scanned_without_ocr_fails():
+_RISK_SIGNALS_CASES = [
+    ("clean_info", _ok_report(), [], "ok", "info", None),
+    ("low_confidence_warn", _ok_report(scan_suspected=True, ocr_used=True), [3, 5],
+     "warn", "info", ("scan_suspected", "3")),
     # item 4 硬规则：扫描件/疑似扫描但 ocr_used=False → 内容可能被当文本悄悄丢失 → high/fail。
-    c = pe.check_risk_signals(_ok_report(source_type="scanned_pdf", scan_suspected=True,
-                                         ocr_used=False), low_confidence_pages=[])
-    assert c["status"] == "fail" and c["severity"] == "high"
-    assert "ocr_used=False" in c["detail"]
-
-
-def test_check_risk_signals_scanned_with_ocr_ok():
+    ("scanned_without_ocr_fail",
+     _ok_report(source_type="scanned_pdf", scan_suspected=True, ocr_used=False), [],
+     "fail", "high", "ocr_used=False"),
     # 扫描件正确走了 OCR → 不触发硬规则。
-    c = pe.check_risk_signals(_ok_report(source_type="scanned_pdf", scan_suspected=True,
-                                         ocr_used=True), low_confidence_pages=[])
-    assert c["status"] == "ok"
+    ("scanned_with_ocr_ok",
+     _ok_report(source_type="scanned_pdf", scan_suspected=True, ocr_used=True), [],
+     "ok", None, None),
+]
+
+
+@pytest.mark.parametrize("cid,report,low_confidence_pages,status,severity,detail", _RISK_SIGNALS_CASES,
+                         ids=[c[0] for c in _RISK_SIGNALS_CASES])
+def test_check_risk_signals(cid, report, low_confidence_pages, status, severity, detail):
+    c = pe.check_risk_signals(report, low_confidence_pages=low_confidence_pages)
+    _assert_check(c, "risk_signals", status, severity, detail)
 
 
 # ---- check_orphan_blocks ----
 
-def test_check_orphan_blocks_none():
-    blocks = [_block("b1", 1, 0, 10), _block("b2", 2, 10, 20)]
-    ws = [_window("w0", 0, 200, ["b1", "b2"])]
-    c = pe.check_orphan_blocks(blocks, ws)
-    assert c["status"] == "ok"
+_ORPHAN_CASES = [
+    ("none_all_windowed", [_block("b1", 1, 0, 10), _block("b2", 2, 10, 20)],
+     [_window("w0", 0, 200, ["b1", "b2"])], "ok", None, None),
+    # b2/b3 未进任何窗 → warn，detail 计 2 个孤儿
+    ("two_orphans_warn",
+     [_block("b1", 1, 0, 10), _block("b2", 2, 10, 20), _block("b3", 3, 20, 30)],
+     [_window("w0", 0, 200, ["b1"])], "warn", "warn", "2"),
+]
 
 
-def test_check_orphan_blocks_warns_and_counts():
-    blocks = [_block("b1", 1, 0, 10), _block("b2", 2, 10, 20), _block("b3", 3, 20, 30)]
-    ws = [_window("w0", 0, 200, ["b1"])]  # b2/b3 未进任何窗
-    c = pe.check_orphan_blocks(blocks, ws)
-    assert c["status"] == "warn" and c["severity"] == "warn"
-    assert "2" in c["detail"]  # 2 个孤儿
+@pytest.mark.parametrize("cid,blocks,windows,status,severity,detail", _ORPHAN_CASES,
+                         ids=[c[0] for c in _ORPHAN_CASES])
+def test_check_orphan_blocks(cid, blocks, windows, status, severity, detail):
+    c = pe.check_orphan_blocks(blocks, windows)
+    _assert_check(c, "orphan_blocks", status, severity, detail)
 
 
 # ---- check_source_ref_integrity ----
 
-def test_check_source_ref_integrity_ok():
-    blocks = [_block("b1", 1, 0, 10), _block("b2", 2, 10, 20)]
-    ws = [_window("w0", 0, 200, ["b1", "b2"],
-                  refs=["p0001#b1", "p0002#b2"])]
-    c = pe.check_source_ref_integrity(blocks, ws)
-    assert c["status"] == "ok"
-
-
-def test_check_source_ref_integrity_bad_block_ref_fails():
-    bad = _block("b1", 1, 0, 10)
-    bad["source_ref"] = "WRONG"
-    c = pe.check_source_ref_integrity([bad], [_window("w0", 0, 200, ["b1"], refs=["WRONG"])])
-    assert c["status"] == "fail" and c["severity"] == "high"
-
-
-def test_check_source_ref_integrity_empty_ref_fails():
-    bad = _block("b1", 1, 0, 10)
-    bad["source_ref"] = ""
-    c = pe.check_source_ref_integrity([bad], [_window("w0", 0, 200, ["b1"], refs=[""])])
-    assert c["status"] == "fail"
-
-
-def test_check_source_ref_integrity_window_missing_ref_fails():
-    blocks = [_block("b1", 1, 0, 10), _block("b2", 1, 10, 20)]
+_SOURCE_REF_CASES = [
+    ("ok", [_block("b1", 1, 0, 10), _block("b2", 2, 10, 20)],
+     [_window("w0", 0, 200, ["b1", "b2"], refs=["p0001#b1", "p0002#b2"])], "ok", None),
+    ("bad_block_ref", [_block_with_ref("WRONG")],
+     [_window("w0", 0, 200, ["b1"], refs=["WRONG"])], "fail", "high"),
+    ("empty_ref", [_block_with_ref("")],
+     [_window("w0", 0, 200, ["b1"], refs=[""])], "fail", None),
     # window 覆盖 b1,b2 但 source_refs 只给 b1 的 → 不覆盖
-    ws = [_window("w0", 0, 200, ["b1", "b2"], refs=["p0001#b1"])]
-    c = pe.check_source_ref_integrity(blocks, ws)
-    assert c["status"] == "fail"
+    ("window_missing_ref", [_block("b1", 1, 0, 10), _block("b2", 1, 10, 20)],
+     [_window("w0", 0, 200, ["b1", "b2"], refs=["p0001#b1"])], "fail", None),
+]
+
+
+@pytest.mark.parametrize("cid,blocks,windows,status,severity", _SOURCE_REF_CASES,
+                         ids=[c[0] for c in _SOURCE_REF_CASES])
+def test_check_source_ref_integrity(cid, blocks, windows, status, severity):
+    c = pe.check_source_ref_integrity(blocks, windows)
+    _assert_check(c, "source_ref_integrity", status, severity)
 
 
 # ---- check_detection_distribution（检测分布观测，proposal 2）----
 
-def test_check_detection_distribution_no_pages_ok():
-    c = pe.check_detection_distribution([])
-    assert c["name"] == "detection_distribution" and c["status"] == "ok" and c["severity"] == "info"
+_DETECTION_CASES = [
+    ("no_pages_ok", [], "ok", "info", None),
+    ("normal_ratio_ok", [{"needs_vision": i < 2} for i in range(10)], "ok", None, None),  # 20% 难页
+    ("over_recall_warn", [{"needs_vision": True} for _ in range(10)], "warn", "warn", "过召回"),  # 100%
+]
 
 
-def test_check_detection_distribution_normal_ratio_ok():
-    pages = [{"needs_vision": i < 2} for i in range(10)]      # 20% 难页 → 正常 ok
+@pytest.mark.parametrize("cid,pages,status,severity,detail", _DETECTION_CASES,
+                         ids=[c[0] for c in _DETECTION_CASES])
+def test_check_detection_distribution(cid, pages, status, severity, detail):
     c = pe.check_detection_distribution(pages)
-    assert c["status"] == "ok"
-
-
-def test_check_detection_distribution_warn_when_over_recall():
-    pages = [{"needs_vision": True} for _ in range(10)]       # 100% 难页 → 疑过召回 warn
-    c = pe.check_detection_distribution(pages)
-    assert c["status"] == "warn" and c["severity"] == "warn" and "过召回" in c["detail"]
+    _assert_check(c, "detection_distribution", status, severity, detail)
 
 
 def test_evaluate_includes_detection_distribution_warn(tmp_path):
@@ -569,6 +508,3 @@ def test_evaluate_pdf_without_reconciliation_flags_dual_audit_fail(tmp_path):
     da = next(c for c in rep["checks"] if c["name"] == "dual_audit")
     assert da["status"] == "fail" and da["severity"] == "high"
     assert rep["summary"]["fail"] >= 1
-
-
-# ---- pipeline preflight-eval CLI（--source / --strict / --json + 退出码语义） ----

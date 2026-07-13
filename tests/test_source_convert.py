@@ -1,6 +1,8 @@
 from pathlib import Path
 import importlib.util
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -66,6 +68,17 @@ def test_profile_source_md_single_page(tmp_path):
 
 
 source_convert = _load("source_convert")
+
+
+# 决策表共享页构造（select_backend / classify_source parametrize 复用）：每种 PDF 页型的最小信号。
+def _pages(kind, n):
+    shapes = {
+        "native": {"text_len": 800, "image_count": 0, "needs_vision_reason": []},
+        "scanned": {"text_len": 0, "image_count": 1, "needs_vision_reason": ["scanned-or-image"]},
+        "lowtext": {"text_len": 20, "image_count": 0, "needs_vision_reason": []},
+        "dense": {"text_len": 800, "image_count": 0, "needs_vision_reason": ["formula"]},
+    }
+    return [dict(shapes[kind]) for _ in range(n)]
 
 
 def test_markdown_passthrough(tmp_path):
@@ -222,19 +235,19 @@ def test_matrix_word_without_structure_not_flagged():
     assert p["needs_vision"] is False
 
 
-def test_is_scanned_source_true_for_full_scan():
-    pages = [{"text_len": 0, "image_count": 1} for _ in range(100)]
-    assert source_profile.is_scanned_source(pages) is True
+_IS_SCANNED_CASES = [
+    ("full_scan_true", [{"text_len": 0, "image_count": 1} for _ in range(100)], True),
+    ("few_scanned_in_normal_pdf_false",
+     [{"text_len": 800, "image_count": 0} for _ in range(90)]
+     + [{"text_len": 0, "image_count": 1} for _ in range(10)], False),
+    ("empty_false", [], False),
+]
 
 
-def test_is_scanned_source_false_for_few_scanned_in_normal_pdf():
-    pages = ([{"text_len": 800, "image_count": 0} for _ in range(90)]
-             + [{"text_len": 0, "image_count": 1} for _ in range(10)])
-    assert source_profile.is_scanned_source(pages) is False
-
-
-def test_is_scanned_source_false_empty():
-    assert source_profile.is_scanned_source([]) is False
+@pytest.mark.parametrize("cid,pages,expected", _IS_SCANNED_CASES,
+                         ids=[c[0] for c in _IS_SCANNED_CASES])
+def test_is_scanned_source(cid, pages, expected):
+    assert source_profile.is_scanned_source(pages) is expected
 
 
 def test_subthreshold_formula_now_flagged():
@@ -432,46 +445,29 @@ def test_e2e_pdf_convert_then_block_windows(tmp_path):
 
 # --- Spec 2 C4：dispatcher backend/policy 路由 + cache key ---
 
-def test_select_backend_explicit_pymupdf_does_not_consume_auto():
-    assert source_convert.select_backend("pdf", None, backend="pymupdf",
-                                         policy="conservative") == ("pymupdf", False)
+# select_backend 决策矩阵：(fmt, pages, backend, policy) → (selected, auto_consumed)。
+# expect_consumed=None 时只校验 selected[0]（原测试即如此）；显式后端校验完整元组。
+_SELECT_BACKEND_CASES = [
+    ("explicit_pymupdf_not_auto_consumed", "pdf", None, "pymupdf", "conservative", "pymupdf", False),
+    ("explicit_mineru", "pdf", None, "mineru", "conservative", "mineru", False),
+    ("auto_md_markdown", "md", None, "auto", "conservative", "markdown", True),
+    ("auto_docx_mineru", "docx", None, "auto", "conservative", "mineru", None),
+    ("auto_pptx_mineru", "pptx", None, "auto", "conservative", "mineru", None),
+    ("auto_normal_pdf_pymupdf", "pdf", _pages("native", 5), "auto", "conservative", "pymupdf", None),
+    ("auto_scanned_pdf_mineru", "pdf", _pages("scanned", 10), "auto", "conservative", "mineru", None),
+    ("auto_low_text_pdf_mineru", "pdf", _pages("lowtext", 10), "auto", "conservative", "mineru", None),
+    ("dense_conservative_pymupdf", "pdf", _pages("dense", 10), "auto", "conservative", "pymupdf", None),
+    ("dense_aggressive_mineru", "pdf", _pages("dense", 10), "auto", "aggressive", "mineru", None),
+]
 
 
-def test_select_backend_explicit_mineru():
-    assert source_convert.select_backend("pdf", None, backend="mineru",
-                                         policy="conservative") == ("mineru", False)
-
-
-def test_select_backend_auto_md_markdown():
-    assert source_convert.select_backend("md", None, backend="auto",
-                                         policy="conservative") == ("markdown", True)
-
-
-def test_select_backend_auto_docx_pptx_mineru():
-    assert source_convert.select_backend("docx", None, backend="auto", policy="conservative")[0] == "mineru"
-    assert source_convert.select_backend("pptx", None, backend="auto", policy="conservative")[0] == "mineru"
-
-
-def test_select_backend_auto_normal_pdf_pymupdf():
-    pages = [{"text_len": 800, "image_count": 0, "needs_vision_reason": []} for _ in range(5)]
-    assert source_convert.select_backend("pdf", pages, backend="auto", policy="conservative")[0] == "pymupdf"
-
-
-def test_select_backend_auto_scanned_pdf_mineru():
-    pages = [{"text_len": 0, "image_count": 1, "needs_vision_reason": ["scanned-or-image"]}
-             for _ in range(10)]
-    assert source_convert.select_backend("pdf", pages, backend="auto", policy="conservative")[0] == "mineru"
-
-
-def test_select_backend_auto_low_text_pdf_mineru():
-    pages = [{"text_len": 20, "image_count": 0, "needs_vision_reason": []} for _ in range(10)]
-    assert source_convert.select_backend("pdf", pages, backend="auto", policy="conservative")[0] == "mineru"
-
-
-def test_select_backend_dense_conservative_pymupdf_aggressive_mineru():
-    pages = [{"text_len": 800, "image_count": 0, "needs_vision_reason": ["formula"]} for _ in range(10)]
-    assert source_convert.select_backend("pdf", pages, backend="auto", policy="conservative")[0] == "pymupdf"
-    assert source_convert.select_backend("pdf", pages, backend="auto", policy="aggressive")[0] == "mineru"
+@pytest.mark.parametrize("cid,fmt,pages,backend,policy,expect_backend,expect_consumed",
+                         _SELECT_BACKEND_CASES, ids=[c[0] for c in _SELECT_BACKEND_CASES])
+def test_select_backend(cid, fmt, pages, backend, policy, expect_backend, expect_consumed):
+    got = source_convert.select_backend(fmt, pages, backend=backend, policy=policy)
+    assert got[0] == expect_backend
+    if expect_consumed is not None:
+        assert got == (expect_backend, expect_consumed)
 
 
 def test_converted_input_hash_varies_by_backend_policy(tmp_path):
@@ -589,75 +585,53 @@ def test_convert_mineru_failure_writes_failed_report_and_raises(tmp_path, monkey
 # --- L1 解析层：classify_source（source_type + backend_reason，纯函数，additive） ---
 
 def _native_pdf_pages(n=5):
-    return [{"text_len": 800, "image_count": 0, "needs_vision_reason": []} for _ in range(n)]
+    return _pages("native", n)
 
 
-def test_classify_source_markdown():
-    c = source_convert.classify_source("md", [], backend="auto", policy="conservative")
-    assert c["source_type"] == "markdown"
-    assert "markdown" in c["backend_reason"]
+_PARTIAL_SCAN_PAGES = (
+    [{"text_len": 800, "image_count": 1, "needs_vision_reason": ["scanned-or-image"]} for _ in range(3)]
+    + [{"text_len": 800, "image_count": 0, "needs_vision_reason": []} for _ in range(7)])
 
-
-def test_classify_source_docx_pptx_by_fmt():
-    cd = source_convert.classify_source("docx", [], backend="auto", policy="conservative")
-    cp = source_convert.classify_source("pptx", [], backend="auto", policy="conservative")
-    assert cd["source_type"] == "docx" and cp["source_type"] == "pptx"
-    # docx/pptx 无 profile_pages（空）仍按 fmt 派生 type
-    assert "docx" in cd["backend_reason"] and "pptx" in cp["backend_reason"]
-
-
-def test_classify_source_native_pdf():
-    c = source_convert.classify_source("pdf", _native_pdf_pages(), backend="auto",
-                                       policy="conservative")
-    assert c["source_type"] == "native_pdf"
-    assert c["backend_reason"]
-
-
-def test_classify_source_scanned_pdf():
-    pages = [{"text_len": 0, "image_count": 1, "needs_vision_reason": ["scanned-or-image"]}
-             for _ in range(10)]
-    c = source_convert.classify_source("pdf", pages, backend="auto", policy="conservative")
-    assert c["source_type"] == "scanned_pdf"
-
-
-def test_classify_source_low_text_pdf():
-    # 低文本密度但不算整本扫描件（无 scanned-or-image 信号）→ low_text_pdf
-    pages = [{"text_len": 20, "image_count": 0, "needs_vision_reason": []} for _ in range(10)]
-    c = source_convert.classify_source("pdf", pages, backend="auto", policy="conservative")
-    assert c["source_type"] == "low_text_pdf"
-
-
-def test_classify_source_mixed_pdf_dense():
+# classify_source 决策矩阵：(fmt, pages, backend) → source_type + backend_reason 断言。
+# 各断言 None 表示不校验；reason_contains 支持 tuple(任一命中)；backend_reason 恒非空（原 native 断言）。
+_CLASSIFY_CASES = [
+    # cid, fmt, pages, backend, source_type, reason_contains, reason_exact, reason_absent
+    ("markdown", "md", [], "auto", "markdown", "markdown", None, None),
+    ("docx_by_fmt", "docx", [], "auto", "docx", "docx", None, None),
+    ("pptx_by_fmt", "pptx", [], "auto", "pptx", "pptx", None, None),
+    ("native_pdf", "pdf", _pages("native", 5), "auto", "native_pdf", None, None, None),
+    ("scanned_pdf", "pdf", _pages("scanned", 10), "auto", "scanned_pdf", None, None, None),
+    # 低文本密度但非整本扫描（无 scanned-or-image 信号）→ low_text_pdf
+    ("low_text_pdf", "pdf", _pages("lowtext", 10), "auto", "low_text_pdf", None, None, None),
     # 文本充足、非扫描、但表/图/公式密集 → mixed_pdf
-    pages = [{"text_len": 800, "image_count": 0, "needs_vision_reason": ["formula"]}
-             for _ in range(10)]
-    c = source_convert.classify_source("pdf", pages, backend="auto", policy="conservative")
-    assert c["source_type"] == "mixed_pdf"
+    ("mixed_pdf_dense", "pdf", _pages("dense", 10), "auto", "mixed_pdf", None, None, None),
+    # 保守策略 30% partial-scan（非整本扫描、文本充足）→ 路由 mineru，reason 如实标 partial-scan、
+    # 不误标 aggressive；type 看页面信号 = native_pdf（type 与 backend 可不同，均如实）。
+    ("partial_scan_conservative", "pdf", _PARTIAL_SCAN_PAGES, "auto", "native_pdf", None,
+     "partial-scan pdf→mineru", "aggressive"),
+    # PDF 但 profile 为空（异常/无页信息）→ 保守 native_pdf
+    ("empty_pdf_native_default", "pdf", [], "auto", "native_pdf", None, None, None),
+    # 显式 --backend mineru 的 reason 体现显式选择（与 auto 路由区分）
+    ("explicit_backend_reason", "pdf", _pages("native", 5), "mineru", None,
+     ("explicit", "mineru"), None, None),
+]
 
 
-def test_classify_source_partial_scan_reason_conservative():
-    # 保守策略下 30% 页 scanned-or-image（partial-scan，非整本扫描、文本充足）→ 路由 mineru，
-    # backend_reason 必须如实标 partial-scan，不能误标 aggressive（策略其实是 conservative）。
-    pages = ([{"text_len": 800, "image_count": 1, "needs_vision_reason": ["scanned-or-image"]}
-              for _ in range(3)]
-             + [{"text_len": 800, "image_count": 0, "needs_vision_reason": []} for _ in range(7)])
-    c = source_convert.classify_source("pdf", pages, backend="auto", policy="conservative")
-    assert c["backend_reason"] == "partial-scan pdf→mineru"
-    assert "aggressive" not in c["backend_reason"]
-    assert c["source_type"] == "native_pdf"      # type 看页面信号，backend 看路由——可不同，均如实
-
-
-def test_classify_source_empty_pdf_pages_native_default():
-    # PDF 但 profile 为空（异常/无页信息）→ 不误判扫描/低文本，保守 native_pdf
-    c = source_convert.classify_source("pdf", [], backend="auto", policy="conservative")
-    assert c["source_type"] == "native_pdf"
-
-
-def test_classify_source_explicit_backend_reason():
-    # 显式 --backend mineru 的 reason 要体现是显式选择（与 auto 路由区分）
-    c = source_convert.classify_source("pdf", _native_pdf_pages(), backend="mineru",
-                                       policy="conservative")
-    assert "explicit" in c["backend_reason"] or "mineru" in c["backend_reason"]
+@pytest.mark.parametrize("cid,fmt,pages,backend,source_type,reason_contains,reason_exact,reason_absent",
+                         _CLASSIFY_CASES, ids=[c[0] for c in _CLASSIFY_CASES])
+def test_classify_source(cid, fmt, pages, backend, source_type, reason_contains,
+                         reason_exact, reason_absent):
+    c = source_convert.classify_source(fmt, pages, backend=backend, policy="conservative")
+    assert c["backend_reason"]  # 恒非空（覆盖 native_pdf 原断言，其余为无害强化）
+    if source_type is not None:
+        assert c["source_type"] == source_type
+    if reason_exact is not None:
+        assert c["backend_reason"] == reason_exact
+    if reason_contains is not None:
+        alts = reason_contains if isinstance(reason_contains, tuple) else (reason_contains,)
+        assert any(a in c["backend_reason"] for a in alts)
+    if reason_absent is not None:
+        assert reason_absent not in c["backend_reason"]
 
 
 def test_convert_writes_source_type_and_backend_reason_md(tmp_path):

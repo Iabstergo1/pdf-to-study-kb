@@ -8,6 +8,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -63,67 +65,66 @@ def test_evidence_model_per_page_and_sets():
     assert m["final_hard_pages"] == [1]
 
 
-def test_candidate_is_mineru_found_pymupdf_missed_no_asset():
+# ---- candidate selection + evidence-risk layer（合成 (pages, blocks, review) → 候选页 [+ 该页 flag]）----
+# 决策矩阵：select_candidates 结果 + 可选 assess_risks flag（原风险层测试同时断言两者，合并进矩阵）。
+_CANDIDATE_CASES = [
+    # cid, pages, blocks, review, expected_candidates, expected_flag(page,name)|None
+    ("mineru_found_pymupdf_missed_no_asset",
+     [_ppage(1, needs_vision=True, reasons=["formula"]), _ppage(2)],
+     [_pblock("b1", 1, asset="assets/p0001.png", rf=["formula"]),
+      _pblock("b2", 2, text="MPL w = MPK r")],
+     [_rblock(1, "equation"), _rblock(2, "equation")], [2], None),
+    # MinerU 在 PyMuPDF 已 flag 且已渲染的页上检到公式 → 已闭环，不可执行
+    ("already_has_route_b_asset_not_candidate",
+     [_ppage(1, needs_vision=True, reasons=["formula"])],
+     [_pblock("b1", 1, asset="assets/p0001.png", rf=["formula"])], [_rblock(1, "equation")], [], None),
+    ("parsers_agree_nothing_not_candidate",
+     [_ppage(1)], [_pblock("b1", 1)], [_rblock(1, "text")], [], None),
+    # 两边都检到公式但 PyMuPDF 文本碎片化（多短行）→ formula_text_loss(hard) → candidate
+    ("formula_text_loss_fragmented",
+     [_ppage(1, needs_vision=True, reasons=["formula"])],
+     [_pblock("b1", 1, text="MPL\nw\n=\nMPK\nr")], [_rblock(1, "equation")],
+     [1], (1, "formula_text_loss")),
+    # MinerU 检到表但 source.md 该页只有线性文本 → table_linearization → candidate
+    ("table_linearization",
+     [_ppage(1)], [_pblock("b1", 1, text="row one row two row three flattened text")],
+     [_rblock(1, "table")], [1], (1, "table_linearization")),
+    ("figure_missing_asset",
+     [_ppage(1)], [_pblock("b1", 1, text="see the figure below")], [_rblock(1, "image")],
+     [1], (1, "figure_missing_asset")),
+    # 同样图风险但该页已有视觉资产 → 已闭环 → 不进 candidate
+    ("hard_risk_with_asset_closed_not_candidate",
+     [_ppage(1, needs_vision=True, reasons=["vector-figure"])],
+     [_pblock("b1", 1, asset="assets/p0001.png", text="fig")], [_rblock(1, "image")], [], None),
+    # blocks 流 page 倒退 → reading_order_risk(soft)：记录但不进 candidate（flag 断言见下方专测）
+    ("soft_reading_order_not_candidate",
+     [_ppage(1), _ppage(2)],
+     [_pblock("b1", 2, text="later page appears first in stream"),
+      _pblock("b2", 1, text="earlier page appears second")],
+     [_rblock(1, "text"), _rblock(2, "text")], [], None),
+]
+
+
+@pytest.mark.parametrize("cid,pages,blocks,review,expected_candidates,expected_flag", _CANDIDATE_CASES,
+                         ids=[c[0] for c in _CANDIDATE_CASES])
+def test_select_candidates_and_risk(cid, pages, blocks, review, expected_candidates, expected_flag):
+    m = arb.build_evidence_model(pages, blocks, review)
+    assert arb.select_candidates(m) == expected_candidates
+    if expected_flag is not None:
+        page, name = expected_flag
+        assert name in arb.assess_risks(pages, blocks, review).get(page, [])
+
+
+def test_candidate_page_severity_high_and_pending():
+    # 候选页 model 内部契约（迁自 test_candidate_is_mineru_found）：severity=high + arbitration=pending。
     m = _model_two_pages()
-    assert arb.select_candidates(m) == [2]            # page 2 only
+    assert arb.select_candidates(m) == [2]
     assert m["pages"][2]["severity"] == "high"
     assert m["pages"][2]["arbitration"] == "pending"
 
 
-def test_no_candidate_when_already_has_route_b_asset():
-    # MinerU finds a formula on a page PyMuPDF flagged AND already rendered → not actionable.
-    primary_pages = [_ppage(1, needs_vision=True, reasons=["formula"])]
-    primary_blocks = [_pblock("b1", 1, asset="assets/p0001.png", rf=["formula"])]
-    m = arb.build_evidence_model(primary_pages, primary_blocks, [_rblock(1, "equation")])
-    assert arb.select_candidates(m) == []
-
-
-def test_no_candidate_when_parsers_agree_nothing():
-    primary_pages = [_ppage(1)]
-    primary_blocks = [_pblock("b1", 1)]
-    m = arb.build_evidence_model(primary_pages, primary_blocks, [_rblock(1, "text")])
-    assert arb.select_candidates(m) == []
-
-
-# ---- evidence-risk layer: assess_risks + generalized candidates (②③) ----
-
-def test_formula_text_loss_both_detect_but_pymupdf_fragmented():
-    # 两边都检到公式，但 PyMuPDF 文本碎片化（多短行）→ formula_text_loss（hard）→ candidate。
-    pages = [_ppage(1, needs_vision=True, reasons=["formula"])]   # PyMuPDF formula presence
-    blocks = [_pblock("b1", 1, text="MPL\nw\n=\nMPK\nr")]         # fragmented, no asset
-    review = [_rblock(1, "equation")]                            # MinerU formula too
-    flags = arb.assess_risks(pages, blocks, review)
-    assert "formula_text_loss" in flags.get(1, [])
-    assert 1 in arb.select_candidates(arb.build_evidence_model(pages, blocks, review))
-
-
-def test_table_linearization_becomes_candidate():
-    # MinerU 检到表，但 source.md 该页只有线性文本（无 table 块/无管道符/无 asset）→ table_linearization。
-    pages = [_ppage(1)]
-    blocks = [_pblock("b1", 1, text="row one row two row three flattened text")]
-    review = [_rblock(1, "table")]
-    assert "table_linearization" in arb.assess_risks(pages, blocks, review).get(1, [])
-    assert 1 in arb.select_candidates(arb.build_evidence_model(pages, blocks, review))
-
-
-def test_figure_missing_asset_becomes_candidate():
-    pages = [_ppage(1)]
-    blocks = [_pblock("b1", 1, text="see the figure below")]
-    review = [_rblock(1, "image")]
-    assert "figure_missing_asset" in arb.assess_risks(pages, blocks, review).get(1, [])
-    assert 1 in arb.select_candidates(arb.build_evidence_model(pages, blocks, review))
-
-
-def test_hard_risk_with_asset_is_closed_not_candidate():
-    # 同样的图风险，但该页已有视觉资产 → 已闭环 → 不进 candidate。
-    pages = [_ppage(1, needs_vision=True, reasons=["vector-figure"])]
-    blocks = [_pblock("b1", 1, asset="assets/p0001.png", text="fig")]
-    review = [_rblock(1, "image")]
-    assert arb.select_candidates(arb.build_evidence_model(pages, blocks, review)) == []
-
-
 def test_soft_reading_order_risk_recorded_not_candidate():
-    # blocks 流里 page 倒退（2 在 1 前）→ reading_order_risk（soft）：记录但不进 candidate、不阻断。
+    # blocks 流里 page 倒退 → reading_order_risk（soft）：记录但不进 candidate、不阻断（迁自原测试）。
     pages = [_ppage(1), _ppage(2)]
     blocks = [_pblock("b1", 2, text="later page appears first in stream"),
               _pblock("b2", 1, text="earlier page appears second")]
@@ -232,100 +233,76 @@ def _win(wid, ps, pe, block_ids, assets):
             "block_ids": block_ids, "assets": assets}
 
 
-def test_closure_ok_when_render_materialized_and_window_carries_asset():
+# check_closure 决策矩阵：(blocks, windows, decisions) → (closed, problem)。
+# problem=() 表示断言 problems==[]（严格空）；problem=(kind,page) 断言该问题在列表中；None 不校验 problems。
+_CLOSURE_CASES = [
+    ("ok_render_materialized_window_carries_asset",
+     [_pblock("b1", 1, asset="assets/p0001.png"),
+      _pblock("b2", 2, asset="assets/p0002.png", rf=["arbitrated", "formula"])],
+     [_win("w0", 1, 2, ["b1", "b2"], ["assets/p0001.png", "assets/p0002.png"])],
+     _decisions({"page": 2, "decision": "render", "reason": "flattened"}), True, ()),
+    ("fails_candidate_unarbitrated",
+     [_pblock("b2", 2)], [_win("w0", 1, 2, ["b2"], [])], [], False, ("un_arbitrated", 2)),
+    # window does NOT carry the rendered asset → un_materialized
+    ("fails_render_not_materialized_in_window",
+     [_pblock("b2", 2, asset="assets/p0002.png", rf=["arbitrated"])], [_win("w0", 1, 2, ["b2"], [])],
+     _decisions({"page": 2, "decision": "render", "reason": "x"}), False, ("un_materialized", 2)),
+    ("blocks_on_needs_human",
+     [_pblock("b2", 2)], [_win("w0", 1, 2, ["b2"], [])],
+     _decisions({"page": 2, "decision": "needs_human", "reason": "ambiguous table/figure"}),
+     False, ("needs_human", 2)),
+    ("ok_on_ignore_with_reason",
+     [_pblock("b2", 2)], [_win("w0", 1, 2, ["b2"], [])],
+     _decisions({"page": 2, "decision": "ignore", "reason": "decorative rule line, no content"}),
+     True, None),
+    ("fails_on_ignore_without_reason",
+     [_pblock("b2", 2)], [_win("w0", 1, 2, ["b2"], [])],
+     _decisions({"page": 2, "decision": "ignore", "reason": ""}), False, ("ignore_no_reason", 2)),
+]
+
+
+@pytest.mark.parametrize("cid,blocks,windows,decisions,closed,problem", _CLOSURE_CASES,
+                         ids=[c[0] for c in _CLOSURE_CASES])
+def test_check_closure(cid, blocks, windows, decisions, closed, problem):
     m = _model_two_pages()
-    blocks = [_pblock("b1", 1, asset="assets/p0001.png"),
-              _pblock("b2", 2, asset="assets/p0002.png", rf=["arbitrated", "formula"])]
-    windows = [_win("w0", 1, 2, ["b1", "b2"], ["assets/p0001.png", "assets/p0002.png"])]
-    decs = _decisions({"page": 2, "decision": "render", "reason": "flattened"})
-    r = arb.check_closure(m, decs, blocks, windows)
-    assert r["closed"] is True and r["problems"] == []
-
-
-def test_closure_fails_when_candidate_unarbitrated():
-    m = _model_two_pages()
-    blocks = [_pblock("b2", 2)]
-    windows = [_win("w0", 1, 2, ["b2"], [])]
-    r = arb.check_closure(m, [], blocks, windows)        # no decision for candidate page 2
-    assert r["closed"] is False
-    assert any(p[0] == "un_arbitrated" and p[1] == 2 for p in r["problems"])
-
-
-def test_closure_fails_when_render_not_materialized_in_window():
-    m = _model_two_pages()
-    blocks = [_pblock("b2", 2, asset="assets/p0002.png", rf=["arbitrated"])]
-    windows = [_win("w0", 1, 2, ["b2"], [])]              # window does NOT carry the asset
-    decs = _decisions({"page": 2, "decision": "render", "reason": "x"})
-    r = arb.check_closure(m, decs, blocks, windows)
-    assert r["closed"] is False
-    assert any(p[0] == "un_materialized" and p[1] == 2 for p in r["problems"])
-
-
-def test_closure_blocks_on_needs_human():
-    m = _model_two_pages()
-    blocks = [_pblock("b2", 2)]
-    windows = [_win("w0", 1, 2, ["b2"], [])]
-    decs = _decisions({"page": 2, "decision": "needs_human", "reason": "ambiguous table/figure"})
-    r = arb.check_closure(m, decs, blocks, windows)
-    assert r["closed"] is False
-    assert any(p[0] == "needs_human" and p[1] == 2 for p in r["problems"])
-
-
-def test_closure_ok_on_ignore_with_reason():
-    m = _model_two_pages()
-    blocks = [_pblock("b2", 2)]
-    windows = [_win("w0", 1, 2, ["b2"], [])]
-    decs = _decisions({"page": 2, "decision": "ignore", "reason": "decorative rule line, no content"})
-    r = arb.check_closure(m, decs, blocks, windows)
-    assert r["closed"] is True
-
-
-def test_closure_fails_on_ignore_without_reason():
-    m = _model_two_pages()
-    blocks = [_pblock("b2", 2)]
-    windows = [_win("w0", 1, 2, ["b2"], [])]
-    decs = _decisions({"page": 2, "decision": "ignore", "reason": ""})
-    r = arb.check_closure(m, decs, blocks, windows)
-    assert r["closed"] is False
-    assert any(p[0] == "ignore_no_reason" and p[1] == 2 for p in r["problems"])
+    r = arb.check_closure(m, decisions, blocks, windows)
+    assert r["closed"] is closed
+    if problem == ():
+        assert r["problems"] == []
+    elif problem is not None:
+        assert any(p[0] == problem[0] and p[1] == problem[1] for p in r["problems"])
 
 
 # ---- pre-windows gate (deterministic fail-closed BEFORE windows are built) ----
 # Distinct from check_closure: windows don't exist yet, so a `render` is "ready" once its block carries
 # the asset; that the covering window actually lists it is verified post-windows by check_closure.
 
-def test_windows_blockers_flags_pending_candidate():
-    m = _model_two_pages()                               # candidate page 2, no decision yet
-    assert arb.windows_blockers(m, [], []) == [("un_arbitrated", 2)]
+# windows_blockers 前置门决策矩阵：(model, decisions, blocks) → 精确 blocker 列表。
+_WB_CASES = [
+    # candidate page 2, 尚无裁决
+    ("pending_candidate", _model_two_pages(), [], [], [("un_arbitrated", 2)]),
+    # render 已决但 block 还没 asset
+    ("render_not_yet_materialized", _model_two_pages(),
+     _decisions({"page": 2, "decision": "render", "reason": "x"}), [_pblock("b2", 2)],
+     [("un_materialized", 2)]),
+    # block 带 asset → 可安全构窗
+    ("render_materialized_into_block", _model_two_pages(),
+     _decisions({"page": 2, "decision": "render", "reason": "x"}),
+     [_pblock("b2", 2, asset="assets/p0002.png", rf=["arbitrated"])], []),
+    ("needs_human", _model_two_pages(),
+     _decisions({"page": 2, "decision": "needs_human", "reason": "amb"}), [], [("needs_human", 2)]),
+    ("reasonless_ignore", _model_two_pages(),
+     _decisions({"page": 2, "decision": "ignore", "reason": ""}), [], [("ignore_no_reason", 2)]),
+    ("empty_when_no_candidates",
+     arb.build_evidence_model([_ppage(1)], [_pblock("b1", 1)], [_rblock(1, "text")]),
+     [], [_pblock("b1", 1)], []),
+]
 
 
-def test_windows_blockers_flags_render_not_yet_materialized():
-    m = _model_two_pages()
-    blocks = [_pblock("b2", 2)]                           # render decided but block has no asset yet
-    decs = _decisions({"page": 2, "decision": "render", "reason": "x"})
-    assert arb.windows_blockers(m, decs, blocks) == [("un_materialized", 2)]
-
-
-def test_windows_blockers_ok_when_render_materialized_into_block():
-    m = _model_two_pages()
-    blocks = [_pblock("b2", 2, asset="assets/p0002.png", rf=["arbitrated"])]
-    decs = _decisions({"page": 2, "decision": "render", "reason": "x"})
-    assert arb.windows_blockers(m, decs, blocks) == []   # block carries asset → safe to build windows
-
-
-def test_windows_blockers_blocks_needs_human_and_reasonless_ignore():
-    m = _model_two_pages()
-    assert arb.windows_blockers(m, _decisions({"page": 2, "decision": "needs_human", "reason": "amb"}), []) \
-        == [("needs_human", 2)]
-    assert arb.windows_blockers(m, _decisions({"page": 2, "decision": "ignore", "reason": ""}), []) \
-        == [("ignore_no_reason", 2)]
-
-
-def test_windows_blockers_empty_when_no_candidates():
-    primary_pages = [_ppage(1)]
-    primary_blocks = [_pblock("b1", 1)]
-    m = arb.build_evidence_model(primary_pages, primary_blocks, [_rblock(1, "text")])
-    assert arb.windows_blockers(m, [], primary_blocks) == []
+@pytest.mark.parametrize("cid,model,decisions,blocks,expected", _WB_CASES,
+                         ids=[c[0] for c in _WB_CASES])
+def test_windows_blockers_pre_gate(cid, model, decisions, blocks, expected):
+    assert arb.windows_blockers(model, decisions, blocks) == expected
 
 
 # ---- end-to-end data loop: a render decision must close into the windows ingest reads ----
