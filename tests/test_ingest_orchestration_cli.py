@@ -1,3 +1,8 @@
+"""ingest 编排 CLI（P1.1 场景化）：锁生命周期、stale 恢复、registry 校验、mutation guards。
+
+五个场景（合并自 12 条，断言逐条迁移保留）：核心生命周期 / stale-lock 恢复 /
+stale-registry 两态 / 丢锁 mutation guards / concept create→merge 去重（独立保留）。
+"""
 import json
 import os
 import subprocess
@@ -38,40 +43,57 @@ def _prep_source(tmp_path, sid="note"):
     return tmp_path / "pipeline-workspace/state/study-kb.sqlite"
 
 
-def test_workorder_advances_state_and_writes_yaml(tmp_path):
+def _stale(db):
+    from datetime import datetime, timedelta, timezone
+    old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+    locks.force_set_heartbeat(db, scope="vault", iso=old)
+
+
+def test_ingest_core_lifecycle_scenario(tmp_path):
+    # 场景①核心生命周期（合并自 workorder / show-window / start-done+锁互斥 /
+    # check-write / snapshot 五条，断言全保留）：一次预处理环境走完整入库编排。
     db = _prep_source(tmp_path)
+
+    # workorder：推进状态 + 落 yaml + 状态库行 + 幂等 [skip]。
     r = _run(["workorder", "--source", "note"], tmp_path)
     assert r.returncode == 0, r.stderr
     assert (tmp_path / "pipeline-workspace/staging/note/workorder.yaml").exists()
     src = state_store.get_source(db, "note")
     assert (src["current_stage"], src["current_status"]) == ("workorder_ready", "done")
     assert state_store.get_work_order(db, "note") is not None
-    # 幂等：重跑 [skip]
     r2 = _run(["workorder", "--source", "note"], tmp_path)
     assert "[skip]" in r2.stdout
 
-
-def test_show_window_prints_window_text(tmp_path):
-    _prep_source(tmp_path)
+    # show-window：读窗打印源文本。
     ws = (tmp_path / "pipeline-workspace/staging/note/windows.jsonl").read_text(encoding="utf-8")
     wid = json.loads(ws.splitlines()[0])["window_id"]
     r = _run(["show-window", "--source", "note", "--window", wid], tmp_path)
     assert r.returncode == 0 and "aaa" in r.stdout
 
-
-def test_ingest_start_done_lifecycle_with_lock(tmp_path):
-    db = _prep_source(tmp_path)
-    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
+    # ingest-start：进入 ingesting/running；第二个 source 在同 vault 被锁拒绝。
     r = _run(["ingest-start", "--source", "note"], tmp_path)
     assert r.returncode == 0, r.stderr
     src = state_store.get_source(db, "note")
     assert (src["current_stage"], src["current_status"]) == ("ingesting", "running")
-    # 第二个 source 在同 vault 被锁拒绝
     _prep_source(tmp_path, sid="note2")
     assert _run(["workorder", "--source", "note2"], tmp_path).returncode == 0
     r2 = _run(["ingest-start", "--source", "note2"], tmp_path)
     assert r2.returncode != 0 and "lock" in (r2.stdout + r2.stderr).lower()
-    # window 记账 + 完成
+
+    # 持锁写作期：check-write ALLOW/DENY + snapshot-page 落 manifest。
+    ok = _run(["check-write", "--source", "note", "--path", "domains/misc/lessons/a.md"], tmp_path)
+    assert ok.returncode == 0 and "ALLOW" in ok.stdout
+    deny = _run(["check-write", "--source", "note", "--path", "index.generated.md"], tmp_path)
+    assert deny.returncode != 0 and "DENY" in deny.stdout
+    page = tmp_path / "wiki" / "overview.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("OLD", encoding="utf-8")
+    r = _run(["snapshot-page", "--source", "note", "--path", "overview.md"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    snaps = list((tmp_path / "pipeline-workspace/snapshots/note").rglob("manifest.json"))
+    assert len(snaps) == 1
+
+    # window 记账 + ingest-done：状态到 ingested/proposed，锁释放后 note2 能开工。
     assert _run(["window-start", "--source", "note", "--window", "w0000", "--hash", "h1"],
                 tmp_path).returncode == 0
     assert _run(["window-done", "--source", "note", "--window", "w0000"], tmp_path).returncode == 0
@@ -79,18 +101,26 @@ def test_ingest_start_done_lifecycle_with_lock(tmp_path):
     assert r3.returncode == 0, r3.stderr
     src = state_store.get_source(db, "note")
     assert (src["current_stage"], src["current_status"]) == ("ingested", "proposed")
-    # 锁已释放：note2 现在能开工
     assert _run(["ingest-start", "--source", "note2"], tmp_path).returncode == 0
 
 
-def test_ingest_start_resumes_after_same_source_stale_lock(tmp_path):
-    from datetime import datetime, timedelta, timezone
+def test_stale_lock_resume_and_recovery_scenario(tmp_path):
+    # 场景② stale-lock 恢复（合并自 same-source resume / status+heartbeat+unlock 两条，
+    # 断言全保留）：status 可见 → 活锁不可破 → 做旧后同源 resume → window 记账刷
+    # heartbeat → 再做旧后 next 给清理建议、unlock 受控破锁。
     db = _prep_source(tmp_path)
     assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
     assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
 
-    old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
-    locks.force_set_heartbeat(db, scope="vault", iso=old)
+    # status 显示锁持有者；活锁不可破。
+    r = _run(["status"], tmp_path)
+    assert "lock" in r.stdout.lower() and "note" in r.stdout
+    r = _run(["unlock"], tmp_path)
+    assert r.returncode != 0
+    assert locks.get(db, scope="vault") is not None
+
+    # 做旧模拟崩溃：同源 ingest-start 直接 resume（不必先 unlock），锁在、状态仍 running。
+    _stale(db)
     r = _run(["ingest-start", "--source", "note"], tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "resumed" in r.stdout
@@ -98,25 +128,57 @@ def test_ingest_start_resumes_after_same_source_stale_lock(tmp_path):
     src = state_store.get_source(db, "note")
     assert (src["current_stage"], src["current_status"]) == ("ingesting", "running")
 
+    # window 记账刷新 heartbeat：做旧后 window-start 应让锁不再 stale。
+    _stale(db)
+    assert _run(["window-start", "--source", "note", "--window", "w0000", "--hash", "h1"],
+                tmp_path).returncode == 0
+    assert not locks.is_stale(db, scope="vault", ttl_seconds=1800)
 
-def test_ingest_start_stale_registry_keeps_same_source_lock(tmp_path):
+    # 再做旧模拟崩溃残留：next 给清理建议，unlock 受控破锁。
+    _stale(db)
+    r = _run(["next"], tmp_path)
+    assert "unlock" in r.stdout
+    r = _run(["unlock"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert locks.get(db, scope="vault") is None
+
+
+def test_stale_registry_aborts_before_start_and_keeps_lock_after(tmp_path):
+    # 场景③ stale-registry 两态（合并自 启动前 abort / 持锁后 keep-lock 两条，断言全保留）：
+    # 启动前篡改 → 拒绝开工；恢复后开工成功；持锁中再篡改 → 重入拒绝且不误放锁。
     db = _prep_source(tmp_path)
     assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
+    reg = tmp_path / "wiki" / "concepts" / "_registry.yaml"
+    original = reg.read_bytes()  # 字节级：恢复须与 workorder 记 hash 时逐字节一致（避免文本模式换行翻译）
+
+    # 启动前篡改磁盘 registry → stale，拒绝 ingest-start。
+    reg.write_bytes(original + b"\n# tampered\n")
+    r = _run(["ingest-start", "--source", "note"], tmp_path)
+    assert r.returncode != 0 and "stale" in (r.stdout + r.stderr).lower()
+
+    # 恢复原文（字节一致）→ 正常开工持锁。
+    reg.write_bytes(original)
     assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
 
-    reg = tmp_path / "wiki" / "concepts" / "_registry.yaml"
-    reg.write_text(reg.read_text(encoding="utf-8") + "\n# tampered\n", encoding="utf-8")
+    # 持锁后再篡改 → 重入拒绝，且同源锁不被误放。
+    reg.write_bytes(reg.read_bytes() + b"\n# tampered\n")
     r = _run(["ingest-start", "--source", "note"], tmp_path)
     assert r.returncode != 0 and "stale" in (r.stdout + r.stderr).lower()
     assert locks.get(db, scope="vault") is not None
 
 
-def test_window_commands_require_current_vault_lock(tmp_path):
+def test_lost_lock_rejects_all_mutations(tmp_path):
+    # 场景④ 丢锁 mutation guards（合并自 window 命令 / resolve-concept 两条，断言全保留）：
+    # 无锁僵尸 agent 的一切写路径（window-start/done、check-write、ingest 期 resolve-concept）
+    # 都被拒；非 ingest 的 resolve-concept（无 ref-source，kb-save 式）不受锁约束。
     db = _prep_source(tmp_path)
     assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
     assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
     assert _run(["window-start", "--source", "note", "--window", "w0000", "--hash", "h1"],
                 tmp_path).returncode == 0
+    # 持锁中 resolve-concept 正常。
+    assert _run(["resolve-concept", "--mention", "甲", "--domain", "misc",
+                 "--ref-source", "note", "--ref-sections", "1"], tmp_path).returncode == 0
 
     assert _run(["unlock", "--ttl", "0"], tmp_path).returncode == 0
     assert locks.get(db, scope="vault") is None
@@ -132,46 +194,14 @@ def test_window_commands_require_current_vault_lock(tmp_path):
                    tmp_path)
     assert r_check.returncode != 0
     assert "vault lock" in (r_check.stdout + r_check.stderr).lower()
-
-
-def test_stale_lock_visible_and_recoverable(tmp_path):
-    # P1 回归（spec §3.3 / 2026-06-11 P9 code review）：
-    # status 显示锁持有者；window 记账刷新 heartbeat；next 对 stale 锁给清理建议；
-    # unlock 只破 stale 锁（活跃 /ingest 不可破）。
-    from datetime import datetime, timedelta, timezone
-    db = _prep_source(tmp_path)
-    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
-    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
-    # status 显示锁持有者
-    r = _run(["status"], tmp_path)
-    assert "lock" in r.stdout.lower() and "note" in r.stdout
-    # 活锁不可破
-    r = _run(["unlock"], tmp_path)
+    # 带 ref-source 且该 source 仍处 ingesting/running → 拒（守住约束 3「概念去重」）。
+    r = _run(["resolve-concept", "--mention", "丙", "--domain", "misc",
+              "--ref-source", "note"], tmp_path)
     assert r.returncode != 0
-    assert locks.get(db, scope="vault") is not None
-    # window 记账刷新 heartbeat：做旧后 window-start 应让锁不再 stale
-    old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
-    locks.force_set_heartbeat(db, scope="vault", iso=old)
-    assert _run(["window-start", "--source", "note", "--window", "w0000", "--hash", "h1"],
+    assert "vault lock" in (r.stdout + r.stderr).lower()
+    # 无 ref-source（kb-save 式）不受锁约束。
+    assert _run(["resolve-concept", "--mention", "乙", "--domain", "misc"],
                 tmp_path).returncode == 0
-    assert not locks.is_stale(db, scope="vault", ttl_seconds=1800)
-    # 再做旧模拟崩溃残留：next 给清理建议，unlock 受控破锁
-    locks.force_set_heartbeat(db, scope="vault", iso=old)
-    r = _run(["next"], tmp_path)
-    assert "unlock" in r.stdout
-    r = _run(["unlock"], tmp_path)
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert locks.get(db, scope="vault") is None
-
-
-def test_ingest_start_aborts_on_stale_registry(tmp_path):
-    _prep_source(tmp_path)
-    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
-    # 篡改磁盘 registry → stale
-    reg = tmp_path / "wiki" / "concepts" / "_registry.yaml"
-    reg.write_text(reg.read_text(encoding="utf-8") + "\n# tampered\n", encoding="utf-8")
-    r = _run(["ingest-start", "--source", "note"], tmp_path)
-    assert r.returncode != 0 and "stale" in (r.stdout + r.stderr).lower()
 
 
 def test_resolve_concept_cli_creates_then_merges(tmp_path):
@@ -185,46 +215,3 @@ def test_resolve_concept_cli_creates_then_merges(tmp_path):
     assert r2.returncode == 0 and "[merged]" in r2.stdout
     pages = list((tmp_path / "wiki/domains/misc/concepts").glob("*.md"))
     assert len(pages) == 1  # 绝不重复建页
-
-
-def test_resolve_concept_requires_lock_during_ingest(tmp_path):
-    # ingest 中途丢锁后，建/并概念页（resolve-concept --ref-source）应被拒——
-    # 守住约束 3「概念去重」不被无锁僵尸 agent 破坏；非 ingest（ref_source 为空）不受约束。
-    db = _prep_source(tmp_path)
-    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
-    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
-    assert _run(["resolve-concept", "--mention", "甲", "--domain", "misc",
-                 "--ref-source", "note", "--ref-sections", "1"], tmp_path).returncode == 0
-    assert _run(["unlock", "--ttl", "0"], tmp_path).returncode == 0
-    assert locks.get(db, scope="vault") is None
-    # 无 ref-source（kb-save 式）不受锁约束
-    assert _run(["resolve-concept", "--mention", "乙", "--domain", "misc"],
-                tmp_path).returncode == 0
-    # 带 ref-source 且该 source 仍处 ingesting/running → 拒
-    r = _run(["resolve-concept", "--mention", "丙", "--domain", "misc",
-              "--ref-source", "note"], tmp_path)
-    assert r.returncode != 0
-    assert "vault lock" in (r.stdout + r.stderr).lower()
-
-
-def test_check_write_allow_and_deny(tmp_path):
-    _prep_source(tmp_path)
-    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
-    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
-    ok = _run(["check-write", "--source", "note", "--path", "domains/misc/lessons/a.md"], tmp_path)
-    assert ok.returncode == 0 and "ALLOW" in ok.stdout
-    deny = _run(["check-write", "--source", "note", "--path", "index.generated.md"], tmp_path)
-    assert deny.returncode != 0 and "DENY" in deny.stdout
-
-
-def test_snapshot_page_records_manifest(tmp_path):
-    _prep_source(tmp_path)
-    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
-    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
-    page = tmp_path / "wiki" / "overview.md"
-    page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text("OLD", encoding="utf-8")
-    r = _run(["snapshot-page", "--source", "note", "--path", "overview.md"], tmp_path)
-    assert r.returncode == 0, r.stderr
-    snaps = list((tmp_path / "pipeline-workspace/snapshots/note").rglob("manifest.json"))
-    assert len(snaps) == 1
