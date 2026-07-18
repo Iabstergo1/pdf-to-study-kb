@@ -1156,6 +1156,130 @@ def cmd_reset_source(args):
               "（不动 ingest_progress/artifacts/work_orders/review_proposals/staging）")
 
 
+def cmd_retract_source(args):
+    """撤库（证据先行，删除在后；默认 dry-run）：把一个来源的独占页从 vault 撤下。
+
+    顺序固定：分类（只读）→ 导出证据包（页面全文 + 全部 DB 行 + 计划）→ 核验哈希 →
+    精确删除 → 清账本三表 → 状态机重置 → log 审计行 → 重建全部派生层。
+    动机（2026-07-17 mysql 事件）：手工下架直接清了三张账本表、index 残留 30 条死链——
+    处置动作销毁了审计底稿且派生层收不干净。本命令保证"先有底稿，才有删除"。
+    共享页（source_refs 含他源）与 human 页只报告、绝不删。staging 不动（重做入库要用）。"""
+    import json
+    import locks
+    import os
+    import retraction
+    import state_store
+    from datetime import date, datetime, timezone
+    db = _vault_state_db()
+    if not db.exists():
+        raise SystemExit("no state db yet")
+    src = state_store.get_source(db, args.source)
+    if src is None:
+        raise SystemExit(f"unknown source: {args.source}")
+    if src["current_status"] == "running":
+        raise SystemExit(f"{args.source} is running ({src['current_stage']}); 先 fail / window-fail")
+    holder = f"retract:{args.source}"
+    if args.apply:
+        # P1-3（Codex 2026-07-18）：apply 必须**原子取得**专用 vault 锁并持有到重建结束——
+        # 只做"当前无锁"检查是 TOCTOU：检查后到删除前，另一个 ingest/retract 可上锁改库，
+        # 随后删除的就是与证据副本不同的文件。
+        if not locks.acquire(db, scope="vault", holder=holder, pid=os.getpid()):
+            lk = locks.get(db, scope="vault")
+            raise SystemExit(f"vault lock held by {lk['holder'] if lk else '?'}"
+                             "（撤库须独占 vault；先 ingest-done / fail / unlock 再重试）")
+    else:
+        lk = locks.get(db, scope="vault")
+        if lk is not None:
+            raise SystemExit(f"vault lock held by {lk['holder']}（撤库计划须在无锁时评估；"
+                             "先 ingest-done / fail / unlock）")
+    try:
+        vault = _vault_dir()
+        written: set[str] = set()
+        for w in state_store.window_states(db, args.source):
+            if w["write_set_json"]:
+                try:
+                    written.update(str(x).replace("\\", "/")
+                                   for x in json.loads(w["write_set_json"]))
+                except ValueError:
+                    pass
+        cls = retraction.classify_pages(vault, args.source, written_paths=written)
+        rows = state_store.export_source_rows(db, args.source)
+        # 高精度时间戳目录名 + 存在即拒绝：两个同秒 retract 不得互相覆盖证据（P1-3）
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        dest = _workspace_root() / "pipeline-workspace/evidence" / f"retract-{args.source}-{ts}"
+
+        print(f"== retract-source {args.source}（{src['current_stage']}/{src['current_status']}）==")
+        for key, label in (("delete", "将删除"), ("keep_shared", "共享保留（人工去引）"),
+                           ("keep_human", "human 保留（永不动）")):
+            print(f"{label}: {len(cls[key])}")
+            for e in cls[key]:
+                print(f"  {e['path']}  [{e['type']}] "
+                      f"{e['reason'] if key != 'delete' else ''}".rstrip())
+        print("DB 账本行: " + ", ".join(
+            f"{t}={len(rows[t])}" for t in ("ingest_progress", "window_reads", "review_proposals")))
+        print(f"证据包: {dest}")
+        if not args.apply:
+            print("[dry-run] 未改任何文件/行；核对 plan 后加 --apply 执行（staging 与 work_orders 保留）")
+            return
+
+        if dest.exists():
+            raise SystemExit(f"evidence dir already exists: {dest}（拒绝覆盖既有证据包）")
+        plan = {"source_id": args.source, "generated_at": ts,
+                "from_state": f"{src['current_stage']}/{src['current_status']}",
+                "to_stage": args.to, "delete": cls["delete"], "keep_shared": cls["keep_shared"],
+                "keep_human": cls["keep_human"]}
+        delete_paths = [e["path"] for e in cls["delete"]]
+        summary = retraction.export_evidence(vault, dest, delete_paths, db_rows=rows, plan=plan)
+        bad = retraction.verify_evidence(dest)
+        if bad:
+            raise SystemExit(f"证据包核验失败（{'、'.join(bad)}）；未删除任何页——先排查磁盘再重试")
+        # 删除前源侧对账（持锁下不应发生；发生即整体中止，一页都不删）
+        drift = retraction.verify_sources_match(vault, dest)
+        if drift:
+            raise SystemExit(f"源文件在证据导出后发生变化（{'、'.join(drift)}）；"
+                             "未删除任何页——持锁期间不应有并发写，请先排查")
+        print(f"[OK] evidence: {summary['pages']} pages + {summary['tables']} tables -> {dest}")
+        n = retraction.delete_pages(vault, delete_paths)
+        counts = state_store.purge_source_ledgers(db, args.source)
+        print(f"[OK] deleted {n} pages; purged ledgers " +
+              ", ".join(f"{t}={c}" for t, c in sorted(counts.items())))
+        if src["current_stage"] in ("ingest_waiting", "ingesting", "ingested", "lint"):
+            res = state_store.reset_source(db, args.source, args.to, apply=True)
+            print(f"[OK] state {res['from']} -> {res['to']}")
+        else:
+            print(f"[keep] state {src['current_stage']}/{src['current_status']}（已在预处理段，不重置）")
+        try:
+            rel_ev = dest.relative_to(_workspace_root()).as_posix()
+        except ValueError:
+            rel_ev = str(dest)
+        retraction.append_log(vault, args.source, n, rel_ev, date.today().isoformat())
+
+        failures: list[str] = []
+        import wiki_gate
+
+        def _reb_index():
+            wiki_gate.write_index(vault)
+        rebuilds = (("registry", lambda: cmd_rebuild_registry(args)), ("index", _reb_index),
+                    ("graph", lambda: cmd_rebuild_graph(args)),
+                    ("quiz", lambda: cmd_rebuild_quiz(args)),
+                    ("propositions", lambda: cmd_rebuild_propositions(args)))
+        for name, fn in rebuilds:
+            try:
+                fn()
+            except (Exception, SystemExit) as e:
+                failures.append(name)
+                print(f"[warn] rebuild {name} failed: {e}；可单独重跑 rebuild-{name}")
+        if failures:
+            print(f"[retract done with warnings] 派生层重建失败: {', '.join(failures)}"
+                  "（撤库本体已完成，证据包完整；修复后单独重跑对应 rebuild 命令）")
+            raise SystemExit(3)
+        print(f"[OK] retract-source {args.source}: {n} pages removed, "
+              f"evidence {rel_ev}, derived rebuilt")
+    finally:
+        if args.apply:
+            locks.release(db, scope="vault", holder=holder)
+
+
 def cmd_resolve_concept(args):
     """概念归一唯一入口（spec §6）：实时扫描概念页构建 registry，命中合并、未命中新建。不写派生文件。"""
     import concept_store
@@ -1981,6 +2105,12 @@ def main():
     rstp.add_argument("--to", required=True, choices=RESETTABLE_TARGETS,
                       help="回退目标 stage（回到「它刚完成」；ingest 段请用 reopen/resume）")
     rstp.add_argument("--apply", action="store_true", help="执行（默认 dry-run 只打印 plan）")
+    rtp = subparsers.add_parser("retract-source",
+                                help="撤库（默认 dry-run）：先导证据包并核验，再删独占页/清账本/重置状态/重建派生层")
+    rtp.add_argument("--source", required=True, help="source_id")
+    rtp.add_argument("--to", default="workorder_ready", choices=["workorder_ready", "registered"],
+                     help="撤库后状态机落点（默认 workorder_ready，staging/workorder 保留可直接重跑 ingest）")
+    rtp.add_argument("--apply", action="store_true", help="执行（默认 dry-run 只打印 plan）")
     subparsers.add_parser("skill-mine",
                           help="skill 自进化·零-LLM：扫失败信号(review_proposals) → backlog.yaml")
     prp = subparsers.add_parser("proposals-resolve",
@@ -2047,6 +2177,7 @@ def main():
         'window-done': cmd_window_done,
         'window-fail': cmd_window_fail,
         'reset-source': cmd_reset_source,
+        'retract-source': cmd_retract_source,
         'resolve-concept': cmd_resolve_concept,
         'check-write': cmd_check_write,
         'snapshot-page': cmd_snapshot_page,

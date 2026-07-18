@@ -438,6 +438,39 @@ def has_open_review_proposal(db_path, *, kind: str, target_path: str, reason: st
         con.close()
 
 
+def export_source_rows(db_path, source_id: str) -> dict[str, list[dict]]:
+    """retract 证据包 DB 侧（只读）：该源在全部相关表的行 → {table: [row dict...]}。
+    处置动作必须先有可复核底稿——曾直接清账导致审计数字永久不可复核（2026-07-17 mysql）。"""
+    con = connect(db_path)
+    try:
+        con.execute(_WINDOW_READS_DDL)
+        out: dict[str, list[dict]] = {}
+        for table in ("sources", "source_stage_runs", "ingest_progress",
+                      "window_reads", "review_proposals", "work_orders", "artifacts"):
+            out[table] = [dict(r) for r in con.execute(
+                f"SELECT * FROM {table} WHERE source_id=?", (source_id,))]
+        return out
+    finally:
+        con.close()
+
+
+def purge_source_ledgers(db_path, source_id: str) -> dict[str, int]:
+    """retract 清账：删该源的 ingest_progress / window_reads / review_proposals 行，返回各表删除数。
+    只清账本三表——sources/stage_runs（状态机身份）与 work_orders/artifacts（预处理产物记账）保留。
+    调用方必须先 export_source_rows 落盘证据（顺序由 cmd_retract_source 编排保证）。"""
+    con = connect(db_path)
+    try:
+        con.execute(_WINDOW_READS_DDL)
+        counts: dict[str, int] = {}
+        for table in ("ingest_progress", "window_reads", "review_proposals"):
+            cur = con.execute(f"DELETE FROM {table} WHERE source_id=?", (source_id,))
+            counts[table] = cur.rowcount
+        con.commit()
+        return counts
+    finally:
+        con.close()
+
+
 def record_window_read(db_path, source_id: str, window_id: str) -> None:
     """show-window 留痕：读窗即记账（UPSERT 幂等）。空写集跳窗是否真读过窗内容，
     靠这张表事后可审计——文档约束防自觉，这条防绕过。"""

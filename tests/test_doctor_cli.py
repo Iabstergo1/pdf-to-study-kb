@@ -96,7 +96,13 @@ def test_window_done_writes_file_rejection_matrix_then_roundtrip(tmp_path):
     assert r.returncode != 0
 
     # ④ 合法 UTF-8 JSON 数组 → 成功 roundtrip：窗口 finished、write_set 精确落库。
+    # （本轮读窗校验：收窗前须 show-window——①②③ 各在更早的校验分支失败，不需要读）
+    assert _run(["show-window", "--source", "note", "--window", "w0000"], tmp_path).returncode == 0
     writes = ["domains/misc/lessons/a.md", "domains/misc/concepts/b.md"]
+    for rel in writes:              # 台账↔磁盘对账：记的页必须真在磁盘上（window-done 时页已写好）
+        p = tmp_path / "wiki" / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x", encoding="utf-8")
     wf.write_text(json.dumps(writes), encoding="utf-8")
     r = _run(["window-done", "--source", "note", "--window", "w0000",
               "--writes-file", str(wf)], tmp_path)
@@ -159,3 +165,109 @@ def test_reset_source_rejects_bad_target_and_unknown_source(tmp_path):
     assert r.returncode != 0  # ingest 段禁止 reset 进入（有 reopen）
     r2 = _run(["reset-source", "--source", "nope", "--to", "registered"], tmp_path)
     assert r2.returncode != 0
+
+
+# ---- retract-source ----
+
+mdpage = _load("mdpage")
+
+_RETRACT_LESSON = ("# A\n\n这一节讲述 aaa 的核心思想，用足够长的干净散文正文展开：先给直觉，"
+                   "再说明它和相邻概念的依赖关系，最后给出第一遍阅读可以跳过什么、什么时候应该"
+                   "回到原文核对。这样的长度足以通过空课代理检查。[^e1]\n\n[^e1]: 证据：note §A\n")
+
+
+def _publish_lesson(tmp_path, sid, rel):
+    """一轮完整发布：预处理→读窗→写 lesson→记账→lint promote。"""
+    assert _run(["ingest-start", "--source", sid], tmp_path).returncode == 0
+    assert _run(["show-window", "--source", sid, "--window", "w0000"], tmp_path).returncode == 0
+    assert _run(["window-start", "--source", sid, "--window", "w0000", "--hash", "h1"],
+                tmp_path).returncode == 0
+    mdpage.write_page(tmp_path / "wiki" / rel,
+                      {"type": "lesson", "status": "proposed", "managed_by": "pipeline",
+                       "title": sid, "source": sid}, _RETRACT_LESSON)
+    assert _run(["window-done", "--source", sid, "--window", "w0000",
+                 "--writes", json.dumps([rel])], tmp_path).returncode == 0
+    assert _run(["ingest-done", "--source", sid], tmp_path).returncode == 0
+    r = _run(["lint", "--source", sid], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_retract_source_dry_run_then_apply_roundtrip(tmp_path):
+    # 证据先行的撤库全链：dry-run 零改动 → apply 导证据包→删页→清账→重置→重建派生层
+    db = _preprocessed(tmp_path, sid="keep")
+    _publish_lesson(tmp_path, "keep", "domains/misc/lessons/keep.md")
+    _preprocessed(tmp_path, sid="gone")
+    _publish_lesson(tmp_path, "gone", "domains/misc/lessons/gone.md")
+
+    # dry-run：打印计划、零改动
+    r = _run(["retract-source", "--source", "gone"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "domains/misc/lessons/gone.md" in r.stdout and "dry-run" in r.stdout
+    assert (tmp_path / "wiki/domains/misc/lessons/gone.md").exists()
+    assert len(state_store.window_states(db, "gone")) == 1
+
+    # apply：硬步骤全部落地；正常场景五个派生层必须全部重建成功（P2-2：不许静默失败——
+    # 派生层故障的容忍度由 test_retract_source_reports_failed_rebuild_layers 单独验证）
+    r2 = _run(["retract-source", "--source", "gone", "--apply"], tmp_path)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    assert not (tmp_path / "wiki/domains/misc/lessons/gone.md").exists()
+    assert (tmp_path / "wiki/domains/misc/lessons/keep.md").exists()
+    # 证据包：页面副本 + manifest + DB 账本导出，且核验通过
+    ev = list((tmp_path / "pipeline-workspace/evidence").glob("retract-gone-*"))
+    assert len(ev) == 1, ev
+    assert (ev[0] / "pages/domains/misc/lessons/gone.md").exists()
+    assert json.loads((ev[0] / "db/ingest_progress.json").read_text(encoding="utf-8"))
+    # 账本清空、他源不动；状态回 workorder_ready
+    assert state_store.window_states(db, "gone") == []
+    assert len(state_store.window_states(db, "keep")) == 1
+    src = state_store.get_source(db, "gone")
+    assert (src["current_stage"], src["current_status"]) == ("workorder_ready", "done")
+    # index 重建：gone 出局、keep 保留；log 有撤库审计行
+    idx = (tmp_path / "wiki/index.generated.md").read_text(encoding="utf-8")
+    assert "gone.md" not in idx and "keep.md" in idx
+    assert "retract | gone" in (tmp_path / "wiki/log.md").read_text(encoding="utf-8")
+    # 幂等的第二次 apply：无页可删也不该炸，派生层照常全部重建成功
+    r3 = _run(["retract-source", "--source", "gone", "--apply"], tmp_path)
+    assert r3.returncode == 0, r3.stdout + r3.stderr
+    # 撤库锁已释放（finally 保证）
+    _locks = _load("locks")
+    assert _locks.get(db, scope="vault") is None
+
+
+def test_retract_source_reports_failed_rebuild_layers(tmp_path):
+    # P2-2（Codex 2026-07-18）：派生层重建失败必须显式暴露——撤库本体完成、返回 3、
+    # stdout 列出失败层，绝不静默；证据包与删除仍然有效。
+    _preprocessed(tmp_path, sid="keep")
+    _publish_lesson(tmp_path, "keep", "domains/misc/lessons/keep.md")
+    _preprocessed(tmp_path, sid="gone")
+    _publish_lesson(tmp_path, "gone", "domains/misc/lessons/gone.md")
+    gdir = tmp_path / "wiki" / "graph-data.generated.json"
+    if gdir.exists():
+        gdir.unlink()
+    gdir.mkdir()                                            # 目标被占成目录 → graph 写入失败
+    (gdir / "keep.txt").write_text("x", encoding="utf-8")
+    r = _run(["retract-source", "--source", "gone", "--apply"], tmp_path)
+    assert r.returncode == 3, r.stdout + r.stderr
+    out = r.stdout + r.stderr
+    assert "rebuild graph failed" in out and "retract done with warnings" in out, out
+    # 撤库本体已完成：页删了、证据包在、其余派生层照常重建（index 已无 gone）
+    assert not (tmp_path / "wiki/domains/misc/lessons/gone.md").exists()
+    assert list((tmp_path / "pipeline-workspace/evidence").glob("retract-gone-*"))
+    idx = (tmp_path / "wiki/index.generated.md").read_text(encoding="utf-8")
+    assert "gone.md" not in idx and "keep.md" in idx
+
+
+def test_retract_source_refuses_running_or_locked(tmp_path):
+    # 两个拒绝分支：①目标源自身 running ②vault 锁被他源持有——撤库改共享 vault 与派生层，必须独占时机
+    _ingesting(tmp_path, sid="note")   # note ingesting/running 且持有 vault 锁
+    r = _run(["retract-source", "--source", "note", "--apply"], tmp_path)
+    assert r.returncode != 0
+    assert "running" in (r.stdout + r.stderr)
+    # 另一源 other 处于 workorder_ready（非 running），但锁仍被 note 持有 → 锁分支拒绝
+    assert _run(["show-window", "--source", "note", "--window", "w0000"], tmp_path).returncode == 0
+    assert _run(["window-done", "--source", "note", "--window", "w0000"], tmp_path).returncode == 0
+    _preprocessed(tmp_path, sid="other")
+    r2 = _run(["retract-source", "--source", "other", "--apply"], tmp_path)
+    assert r2.returncode != 0
+    assert "lock" in (r2.stdout + r2.stderr).lower()
+    assert (tmp_path / "wiki").exists()  # 双拒绝下 vault 未被动过
