@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 CREATE TABLE IF NOT EXISTS work_orders (
   source_id TEXT PRIMARY KEY, path TEXT NOT NULL, registry_hash TEXT,
-  write_scope_json TEXT NOT NULL, created_at TEXT NOT NULL
+  write_scope_json TEXT NOT NULL, created_at TEXT NOT NULL,
+  round INTEGER                                -- 轮次 token：record_work_order 每次 +1（P1-1）
 );
 CREATE TABLE IF NOT EXISTS source_locks (
   scope TEXT PRIMARY KEY, holder TEXT NOT NULL, pid INTEGER NOT NULL,
@@ -44,10 +45,11 @@ CREATE TABLE IF NOT EXISTS review_proposals (
 CREATE TABLE IF NOT EXISTS ingest_progress (
   id INTEGER PRIMARY KEY AUTOINCREMENT, source_id TEXT NOT NULL, window_id TEXT NOT NULL,
   input_hash TEXT NOT NULL, started_at TEXT, finished_at TEXT, status TEXT NOT NULL,
-  write_set_json TEXT, proposal_set_json TEXT, error TEXT, UNIQUE(source_id, window_id)
+  write_set_json TEXT, proposal_set_json TEXT, error TEXT, round INTEGER,
+  UNIQUE(source_id, window_id)
 );
 CREATE TABLE IF NOT EXISTS window_reads (
-  source_id TEXT NOT NULL, window_id TEXT NOT NULL, read_at TEXT NOT NULL,
+  source_id TEXT NOT NULL, window_id TEXT NOT NULL, read_at TEXT NOT NULL, round INTEGER,
   UNIQUE(source_id, window_id)
 );
 """
@@ -55,7 +57,24 @@ CREATE TABLE IF NOT EXISTS window_reads (
 # 旧库升级护栏：window_reads 是后加表，读/写它的 API 先确保表存在（幂等，不动既有表）。
 _WINDOW_READS_DDL = ("CREATE TABLE IF NOT EXISTS window_reads ("
                      "source_id TEXT NOT NULL, window_id TEXT NOT NULL, read_at TEXT NOT NULL,"
-                     " UNIQUE(source_id, window_id))")
+                     " round INTEGER, UNIQUE(source_id, window_id))")
+
+
+def _ensure_column(con, table: str, column: str, decl: str) -> None:
+    """旧库列迁移护栏（幂等）：round 等后加列在触碰前确保存在。旧行该列为 NULL——
+    NULL 永不等于任何当前轮次 token，天然实现「升级前的账不代升级后的轮」。"""
+    cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def _ensure_round_columns(con) -> None:
+    """轮次 token 三处落点的幂等迁移：work_orders.round / ingest_progress.round /
+    window_reads(表+round)。所有触碰 round 的 API 先调它。"""
+    con.execute(_WINDOW_READS_DDL)
+    _ensure_column(con, "work_orders", "round", "INTEGER")
+    _ensure_column(con, "ingest_progress", "round", "INTEGER")
+    _ensure_column(con, "window_reads", "round", "INTEGER")
 
 
 def connect(db_path) -> sqlite3.Connection:
@@ -359,16 +378,20 @@ def list_artifacts(db_path, source_id: str) -> list[dict]:
 
 
 def start_window(db_path, source_id: str, window_id: str, *, input_hash: str) -> None:
-    """window 级进度（spec §3.3）：UPSERT 为 running（重启同窗合法——窗口本身幂等可重做）。"""
+    """window 级进度（spec §3.3）：UPSERT 为 running（重启同窗合法——窗口本身幂等可重做）。
+    重启**清空旧 write_set/proposal_set**（P1-2：否则 start→fail 就能把旧轮账带尸还魂），
+    并盖当轮 round token（本窗记账归属本轮的唯一依据）。"""
     con = connect(db_path)
     try:
+        _ensure_round_columns(con)
         con.execute(
-            "INSERT INTO ingest_progress(source_id,window_id,input_hash,started_at,status)"
-            " VALUES (?,?,?,?,'running')"
+            "INSERT INTO ingest_progress(source_id,window_id,input_hash,started_at,status,round)"
+            " VALUES (?,?,?,?,'running',(SELECT round FROM work_orders WHERE source_id=?))"
             " ON CONFLICT(source_id,window_id) DO UPDATE SET"
             "   input_hash=excluded.input_hash, started_at=excluded.started_at,"
-            "   status='running', error=NULL, finished_at=NULL",
-            (source_id, window_id, input_hash, _now()))
+            "   status='running', error=NULL, finished_at=NULL,"
+            "   write_set_json=NULL, proposal_set_json=NULL, round=excluded.round",
+            (source_id, window_id, input_hash, _now(), source_id))
         con.commit()
     finally:
         con.close()
@@ -438,6 +461,36 @@ def has_open_review_proposal(db_path, *, kind: str, target_path: str, reason: st
         con.close()
 
 
+def round_anchor(db_path, source_id: str) -> int | None:
+    """本轮 token = work_orders.round（P1-1 显式计数器，2026-07-18 取代 created_at 时间戳比较：
+    同秒碰撞会让旧账混入新轮）。workorder/reopen 每次记录 +1 换轮；lint 失败重试不动 workorder
+    → 不换轮，读过就算读过；重新预处理换 windows → workorder 重建 → 换轮，旧读账自动作废。
+    读/写行落账时盖当轮章，membership 用相等判定。无 workorder → None（无轮次可言）。"""
+    con = connect(db_path)
+    try:
+        _ensure_round_columns(con)
+        row = con.execute("SELECT round FROM work_orders WHERE source_id=?",
+                          (source_id,)).fetchone()
+        return row["round"] if row is not None else None
+    finally:
+        con.close()
+
+
+def window_reads_in_round(db_path, source_id: str, round_token) -> set[str]:
+    """本轮读集：round 章 == 当轮 token 的 window_id（相等判定，与时间戳无关）。
+    旧轮/升级前（NULL 章）读不入集——「旧轮 read 不得代新轮」的唯一实现。"""
+    if round_token is None:
+        return set()
+    con = connect(db_path)
+    try:
+        _ensure_round_columns(con)
+        return {r["window_id"] for r in con.execute(
+            "SELECT window_id FROM window_reads WHERE source_id=? AND round=?",
+            (source_id, round_token))}
+    finally:
+        con.close()
+
+
 def export_source_rows(db_path, source_id: str) -> dict[str, list[dict]]:
     """retract 证据包 DB 侧（只读）：该源在全部相关表的行 → {table: [row dict...]}。
     处置动作必须先有可复核底稿——曾直接清账导致审计数字永久不可复核（2026-07-17 mysql）。"""
@@ -477,11 +530,13 @@ def record_window_read(db_path, source_id: str, window_id: str) -> None:
     init_db(db_path)  # show-window 可先于任何建库命令运行；幂等建目录+schema
     con = connect(db_path)
     try:
-        con.execute(_WINDOW_READS_DDL)
+        _ensure_round_columns(con)
         con.execute(
-            "INSERT INTO window_reads(source_id,window_id,read_at) VALUES (?,?,?)"
-            " ON CONFLICT(source_id,window_id) DO UPDATE SET read_at=excluded.read_at",
-            (source_id, window_id, _now()))
+            "INSERT INTO window_reads(source_id,window_id,read_at,round)"
+            " VALUES (?,?,?,(SELECT round FROM work_orders WHERE source_id=?))"
+            " ON CONFLICT(source_id,window_id) DO UPDATE SET read_at=excluded.read_at,"
+            " round=excluded.round",
+            (source_id, window_id, _now(), source_id))
         con.commit()
     finally:
         con.close()
@@ -501,8 +556,10 @@ def window_read_ids(db_path, source_id: str) -> set[str]:
 def window_states(db_path, source_id: str) -> list[dict]:
     con = connect(db_path)
     try:
+        _ensure_round_columns(con)
         rows = con.execute(
-            "SELECT window_id,status,input_hash,write_set_json,proposal_set_json,error"
+            "SELECT window_id,status,input_hash,write_set_json,proposal_set_json,error,"
+            "       started_at,finished_at,round"
             " FROM ingest_progress WHERE source_id=? ORDER BY window_id", (source_id,)).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -511,13 +568,17 @@ def window_states(db_path, source_id: str) -> list[dict]:
 
 def record_work_order(db_path, source_id: str, *, path: str, registry_hash: str,
                       write_scope_json: str) -> None:
+    """记录/刷新 work order；**轮次 token +1**（P1-1：workorder/reopen 都经此换轮，
+    同秒重录也各得其轮——隔离不依赖时间戳跨秒）。"""
     con = connect(db_path)
     try:
+        _ensure_round_columns(con)
         con.execute(
-            "INSERT INTO work_orders(source_id,path,registry_hash,write_scope_json,created_at)"
-            " VALUES (?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET"
+            "INSERT INTO work_orders(source_id,path,registry_hash,write_scope_json,created_at,round)"
+            " VALUES (?,?,?,?,?,1) ON CONFLICT(source_id) DO UPDATE SET"
             "   path=excluded.path, registry_hash=excluded.registry_hash,"
-            "   write_scope_json=excluded.write_scope_json, created_at=excluded.created_at",
+            "   write_scope_json=excluded.write_scope_json, created_at=excluded.created_at,"
+            "   round=COALESCE(work_orders.round,0)+1",
             (source_id, path, registry_hash, write_scope_json, _now()))
         con.commit()
     finally:
@@ -623,7 +684,7 @@ def source_stats(db_path, source_id: str) -> dict | None:
                 return None
 
         windows = {"total": 0, "finished": 0, "failed": 0, "running": 0,
-                   "empty_writes_unread": 0,
+                   "empty_writes_unread": 0, "instant_write_windows": 0,
                    "last_attempt_seconds_total": 0.0, "last_attempt_seconds_max": 0.0}
         pages: set[str] = set()
         con.execute(_WINDOW_READS_DDL)
@@ -651,6 +712,11 @@ def source_stats(db_path, source_id: str) -> dict | None:
             # 静默遗漏信号：空写集收窗、又从未经 show-window 读过窗内容
             if r["status"] == "finished" and not ws and r["window_id"] not in read_ids:
                 windows["empty_writes_unread"] += 1
+            # 同秒刷窗软信号（非阻断，2026-07-17 规格 6）：start==done 同秒且有写入。
+            # 写页不强制发生在 start/done 之间，故不能当门禁（假阳性）；连片出现值得复盘。
+            if r["status"] == "finished" and ws and r["started_at"] \
+                    and r["started_at"] == r["finished_at"]:
+                windows["instant_write_windows"] += 1
 
         stages: dict[str, dict] = {}
         lint_failures = 0
@@ -688,6 +754,7 @@ def source_stats(db_path, source_id: str) -> dict | None:
                 "窗口耗时=最后一次尝试（重启同窗会覆盖 started_at，非累计）",
                 "pages_estimate=finished 窗 write_set 去重计数（估算）",
                 "empty_writes_unread=空写集且从未 show-window 读过的窗（静默遗漏信号；旧源无读窗记录会偏高）",
+                "instant_write_windows=start==done 同秒且有写入的窗（软信号不阻断；连片出现值得复盘）",
             ],
         }
     finally:

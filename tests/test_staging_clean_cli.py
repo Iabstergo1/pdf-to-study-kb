@@ -57,6 +57,12 @@ def _published(tmp_path, sid="note"):
     mdpage.write_page(tmp_path / "wiki/domains/misc/lessons/a.md",
                       {"type": "lesson", "status": "proposed", "managed_by": "pipeline",
                        "title": "A 课", "source": sid}, GOOD_LESSON)
+    # 2026-07-17 规格：本轮读窗 + 全部非 source 页记账，lint 才放行
+    assert _run(["show-window", "--source", sid, "--window", "w0000"], tmp_path).returncode == 0
+    assert _run(["window-start", "--source", sid, "--window", "w0000", "--hash", "h1"],
+                tmp_path).returncode == 0
+    assert _run(["window-done", "--source", sid, "--window", "w0000",
+                 "--writes", '["domains/misc/lessons/a.md"]'], tmp_path).returncode == 0
     assert _run(["ingest-done", "--source", sid], tmp_path).returncode == 0
     r = _run(["lint", "--source", sid], tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr

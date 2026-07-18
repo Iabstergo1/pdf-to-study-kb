@@ -72,11 +72,19 @@ def build_workorder(vault, *, source_id: str, domain: str, staging_dir) -> dict:
     # G3：跨域概念写入窄放行——每个 ≠ 当前域的 home 追加精确到 concepts/** 一条（不放行其 lessons/topics）
     cross_scope = [f"domains/{h}/concepts/**" for h in CROSS_DOMAIN_HOME_DOMAINS if h != domain]
 
+    # 本域边界与 G3 跨域同样收窄到 concepts/lessons（曾是 `domains/{domain}/**` 宽通配）：综合层
+    # （topic/comparison/synthesis）与来源台账页只落顶层，域下另建它们既偏离既有布局，域下的
+    # sources/<src>.md 更会与顶层台账页同 source_id，撞 graph_model._page_id 的 "source:<id>"
+    # 节点 id 使 rebuild-graph fail-hard（顶层 `sources/{source_id}.md` 那条本就意在"台账页唯一"，
+    # 宽通配把它架空了）。
+    own_scope = [f"domains/{domain}/concepts/**", f"domains/{domain}/lessons/**"]
+
     return {
         "source_id": source_id,
         "domain": domain,
-        "write_scope": [f"domains/{domain}/**", "concepts/**", "topics/**", "comparisons/**",
-                        "synthesis/**", f"sources/{source_id}.md", "overview.md", "log.md"]
+        "write_scope": own_scope + ["concepts/**", "topics/**", "comparisons/**",
+                                    "synthesis/**", f"sources/{source_id}.md",
+                                    "overview.md", "log.md"]
         + cross_scope,
         "cross_domain_concept_scope": cross_scope,   # 显式审计字段：本轮允许写入的跨域 home 概念目录
         "registry": {"path": "concepts/_registry.yaml", "hash": reg_hash,

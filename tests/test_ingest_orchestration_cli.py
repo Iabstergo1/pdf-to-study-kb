@@ -94,6 +94,8 @@ def test_ingest_core_lifecycle_scenario(tmp_path):
     assert len(snaps) == 1
 
     # window 记账 + ingest-done：状态到 ingested/proposed，锁释放后 note2 能开工。
+    # （2026-07-17 规格：window-done 前须本轮 show-window——空写跳窗也要读）
+    assert _run(["show-window", "--source", "note", "--window", "w0000"], tmp_path).returncode == 0
     assert _run(["window-start", "--source", "note", "--window", "w0000", "--hash", "h1"],
                 tmp_path).returncode == 0
     assert _run(["window-done", "--source", "note", "--window", "w0000"], tmp_path).returncode == 0
@@ -215,3 +217,50 @@ def test_resolve_concept_cli_creates_then_merges(tmp_path):
     assert r2.returncode == 0 and "[merged]" in r2.stdout
     pages = list((tmp_path / "wiki/domains/misc/concepts").glob("*.md"))
     assert len(pages) == 1  # 绝不重复建页
+
+
+def test_window_done_rejects_ledger_disk_drift(tmp_path):
+    # 台账↔磁盘对账：--writes 记的页必须真在磁盘上。resolve-concept 把 mention 归一成 slug
+    # （`Buffer Pool` → `buffer-pool.md`），写作方却按自以为的名字记账 → 台账与产出漂移；
+    # （引入本对账时 concept 页尚不受 unaccounted-write 约束；2026-07-18 起记账义务已覆盖
+    # 全部非 source 页，本对账仍是最早的 fail-fast 拦截点。）
+    _prep_source(tmp_path)
+    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["window-start", "--source", "note", "--window", "w0000", "--hash", "h1"],
+                tmp_path).returncode == 0
+    r = _run(["window-done", "--source", "note", "--window", "w0000",
+              "--writes", '["domains/misc/concepts/Buffer Pool.md"]'], tmp_path)
+    assert r.returncode != 0
+    assert "Buffer Pool.md" in (r.stdout + r.stderr)
+
+
+def test_window_done_accepts_writes_that_exist_on_disk(tmp_path):
+    _prep_source(tmp_path)
+    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["show-window", "--source", "note", "--window", "w0000"], tmp_path).returncode == 0
+    assert _run(["window-start", "--source", "note", "--window", "w0000", "--hash", "h1"],
+                tmp_path).returncode == 0
+    page = tmp_path / "wiki" / "domains" / "misc" / "concepts" / "buffer-pool.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("x", encoding="utf-8")
+    r = _run(["window-done", "--source", "note", "--window", "w0000",
+              "--writes", '["domains/misc/concepts/buffer-pool.md"]'], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_window_done_requires_this_round_read(tmp_path):
+    # 每次 window-done（含空写集跳窗）都要求该窗在本轮读过——window-skip 纪律从文档约束升为 CLI 拦截。
+    # 批量通读合法：只看"本轮内读过"，不限制与 window-start 的先后。
+    _prep_source(tmp_path)
+    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["window-start", "--source", "note", "--window", "w0000", "--hash", "h1"],
+                tmp_path).returncode == 0
+    r = _run(["window-done", "--source", "note", "--window", "w0000"], tmp_path)
+    assert r.returncode != 0
+    assert "show-window" in (r.stdout + r.stderr)
+    # 读窗后即可收窗（先读后 start 的批量通读顺序同样合法，由 happy-path 各测试覆盖）
+    assert _run(["show-window", "--source", "note", "--window", "w0000"], tmp_path).returncode == 0
+    assert _run(["window-done", "--source", "note", "--window", "w0000"], tmp_path).returncode == 0

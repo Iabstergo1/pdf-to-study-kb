@@ -96,3 +96,30 @@ def test_registry_fresh(tmp_path):
     # registry 不存在：期望空 hash 才算新鲜
     assert ingest_guards.registry_fresh(tmp_path / "no-vault", "") is True
     assert ingest_guards.registry_fresh(tmp_path / "no-vault", "0" * 64) is False
+
+
+def test_missing_write_paths_flags_ledger_disk_drift(tmp_path):
+    # window-done --writes 记的路径必须真在磁盘上。resolve-concept 的 slug 归一会让写作 LLM
+    # 按"自以为的名字"记账（Buffer Pool.md），磁盘实为 buffer-pool.md → 记账与产出漂移，
+    # （引入本对账时 concept 页尚不受 unaccounted-write 约束；2026-07-18 起记账义务已覆盖
+    # 全部非 source 页，本对账仍是最早的 fail-fast 拦截点。）
+    vault = tmp_path / "wiki"
+    (vault / "domains/d/concepts").mkdir(parents=True)
+    (vault / "domains/d/concepts/buffer-pool.md").write_text("x", encoding="utf-8")
+    missing = ingest_guards.missing_write_paths(vault, ["domains/d/concepts/buffer-pool.md",
+                                             "domains/d/concepts/Buffer Pool.md"])
+    assert missing == ["domains/d/concepts/Buffer Pool.md"]
+
+
+def test_missing_write_paths_clean_ledger(tmp_path):
+    vault = tmp_path / "wiki"
+    (vault / "topics").mkdir(parents=True)
+    (vault / "topics/t.md").write_text("x", encoding="utf-8")
+    assert ingest_guards.missing_write_paths(vault, ["topics/t.md"]) == []
+
+
+def test_missing_write_paths_rejects_unsafe_path(tmp_path):
+    # 穿越/绝对路径不得被当成"存在"放过（沿用 in_write_scope 的归一化拒绝语义）
+    vault = tmp_path / "wiki"
+    vault.mkdir(parents=True)
+    assert ingest_guards.missing_write_paths(vault, ["../outside.md"]) == ["../outside.md"]

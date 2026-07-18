@@ -78,3 +78,15 @@ def test_add_and_list_review_proposals(tmp_path):
     rows = state_store.list_review_proposals(db, "s1")
     assert rows[0]["kind"] == "L1" and rows[0]["status"] == "open"
     assert state_store.list_review_proposals(db, "nobody") == []
+
+
+def test_window_states_exposes_timestamps_with_write_set(tmp_path):
+    # 时间戳消费者（2026-07-17 定案）：cmd_lint 用 started_at 做本轮（workorder 锚点）过滤，
+    # ingest-stats 用 started==finished 计 instant_write_windows 软信号（同秒不做门禁——写页
+    # 不强制发生在 start/done 之间）。window_progress 有时间戳但无 write_set，本视图补齐两者。
+    db = _db(tmp_path)
+    state_store.start_window(db, "s1", "w0000", input_hash="h1")
+    state_store.finish_window(db, "s1", "w0000", write_set_json='["a.md"]')
+    row = state_store.window_states(db, "s1")[0]
+    assert row["started_at"] and row["finished_at"]
+    assert row["write_set_json"] == '["a.md"]'

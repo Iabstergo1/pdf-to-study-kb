@@ -126,6 +126,91 @@ def placeholder_violations(vault, pages: list[dict]) -> list[dict]:
     return vs
 
 
+def window_evidence_violations(rows: list[dict], read_window_ids, *, scope_paths=None) -> list[dict]:
+    """写页窗口的阅读证据（纯函数；rows = 本源 ingest_progress 行，read_window_ids = window_reads）。
+
+    `window-unread-write`：这一窗写了页，却从未 show-window 读过它 → 页的内容无源可依。确定性层
+    能强制"跑完流程"，却强制不了"LLM 真读了源"——读窗台账是唯一能机器判定的替代证据（靠预训练
+    知识 + chapters.json 章节地图凭空写页时，页面形式全部合规，只有这里露馅）。
+    无阈值二值判据（不问覆盖率，只问"写了页的窗读过吗"）。空写集跳窗合法——读后判定无可写内容
+    是正常结果，不在此约束。
+
+    刻意不查 `started_at == finished_at` 的"同秒刷窗"：window-start/done 之间并不强制包含写页
+    动作（页可先写好再记账），秒级时间戳下合法的快速记账也会同秒，假阳性高；且实测中同秒刷窗
+    的窗无一例外也是未读窗，本规则已完全覆盖其检出。
+
+    scope_paths：只查 write_set 与之有交集的窗（本批 proposed 页集合）；None = 全查。
+    reopen/reset 都不清 ingest_progress（"一概不动"），上一轮的窗行会永久留在台账里，其页早已
+    published——lint 是本批发布门禁，不为历史轮的证据缺口阻断本批（旧源根本没有读窗记录）。"""
+    import json as _json
+    reads = set(read_window_ids)
+    scope = None if scope_paths is None else {str(x).replace("\\", "/") for x in scope_paths}
+    vs: list[dict] = []
+    for r in rows:
+        raw = r.get("write_set_json")
+        try:
+            writes = _json.loads(raw) if raw else []
+        except (ValueError, TypeError):
+            writes = []          # 损坏 JSON 由 window-done 的 C3 校验负责，这里不重复报
+        if not writes:
+            continue
+        if scope is not None and not ({str(w).replace("\\", "/") for w in writes} & scope):
+            continue             # 历史轮的窗（页已 published，不在本批）
+        wid = r.get("window_id")
+        if wid not in reads:
+            vs.append({"path": f"(window {wid})", "rule": "window-unread-write",
+                       "detail": f"窗 {wid} 写了 {len(writes)} 个页却无 show-window 读窗记录；"
+                                 "写页前必须读窗——未读窗写出的页没有源依据"})
+    return vs
+
+
+def scan_source_pages(vault) -> list[dict]:
+    """vault 内全部 `type: source` 页（published ∪ proposed）→ [{rel_path, meta}]。
+    唯一性须跨 status 看：重复的两份无论哪份先发布都会撞图谱 node id。"""
+    vault = Path(vault)
+    out: list[dict] = []
+    for f in sorted(vault.rglob("*.md")):
+        rel = f.relative_to(vault).as_posix()
+        if rel in _DERIVED or rel.split("/")[0] in _EXCLUDE_TOP:
+            continue
+        meta, _body = mdpage.read_page(f)
+        if meta.get("type") == "source":
+            out.append({"rel_path": rel, "meta": meta})
+    return out
+
+
+def source_page_violations(pages: list[dict]) -> list[dict]:
+    """来源台账页的路径规范 + 每 source_id 唯一（纯函数；调用方给 vault 内全部 source 页）。
+
+    台账页只能落 `sources/<source_id>.md`。域下另建同 source_id 的台账页会与顶层那份在
+    graph_model._page_id 生成同一个 `source:<id>` 节点 id → rebuild-graph fail-hard；图谱是
+    publish-isolated 的，发布不拦，图谱就此静默坏掉。既有 source-page-missing 只查台账页**存在**，
+    不查唯一/位置——两份都在时它照样通过。"""
+    vs: list[dict] = []
+    by_id: dict[str, list[str]] = {}
+    for p in pages:
+        meta = p["meta"]
+        if meta.get("type") != "source":
+            continue
+        sid = str(meta.get("source_id") or "")
+        if not sid:
+            continue
+        rel = p["rel_path"]
+        by_id.setdefault(sid, []).append(rel)
+        expect = f"sources/{sid}.md"
+        if rel != expect:
+            vs.append({"path": rel, "rule": "source-page-misplaced",
+                       "detail": f"source 台账页须落 `{expect}`（当前 `{rel}`）；域下不设 sources/，"
+                                 "综合层与台账页只落顶层"})
+    for sid, rels in sorted(by_id.items()):
+        if len(rels) > 1:
+            vs.append({"path": sorted(rels)[0], "rule": "source-page-duplicate",
+                       "detail": f"source_id `{sid}` 有 {len(rels)} 个台账页（{'、'.join(sorted(rels))}）；"
+                                 f"同 source_id 撞图谱 `source:{sid}` 节点 id → rebuild-graph fail-hard，"
+                                 f"只保留 `sources/{sid}.md`"})
+    return vs
+
+
 # 非 Obsidian 数学分隔符：`\(`/`\[` 在 Obsidian 里不渲染（行内应 $…$，块级 $$…$$）。
 # 负向后顾排除 `\\[4pt]` 这类 KaTeX 换行间距；只查开分隔符，行内代码已被 strip 剔除。
 _MATH_DELIM = re.compile(r"(?<!\\)\\[\(\[]")
@@ -365,6 +450,9 @@ def lint_pages(vault, pages: list[dict], *, phase_e: bool = True) -> list[dict]:
         hit(cp, "concepts-uncovered",
             "概念未被任何 topic 收编（画布将落入「未分类」）；阶段 E 必做——"
             "归入某 topic 的 related_concepts 或正文 full-path wikilink")
+    # 来源台账页唯一性/位置（vault 级，阻断）：域下另建的同 source_id 台账页撞图谱 `source:<id>`
+    # 节点 id → rebuild-graph fail-hard；图谱 publish-isolated 不阻断发布，故必须在这里拦。
+    vs += source_page_violations(scan_source_pages(vault))
     # 重复 canonical_id（vault 级，阻断）
     _reg, errors, _warn = concept_store.build_registry(concept_store.scan_concept_pages(vault))
     for e in errors:

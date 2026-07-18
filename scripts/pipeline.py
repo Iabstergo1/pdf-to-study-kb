@@ -1115,6 +1115,29 @@ def cmd_window_done(args):
                 f"Windows 上多半是 `conda run` 吞了双引号——请改用环境 python 直调：\n"
                 f'  & "<miniconda>\\envs\\study-kb\\python.exe" scripts\\pipeline.py window-done '
                 f"--source {args.source} --window {args.window} {flag} '[\"a.md\",\"b.md\"]'")
+    # 台账↔磁盘对账（fail-fast）：--writes 记的页必须真在磁盘上。resolve-concept 会把 mention
+    # 归一成 slug 文件名（`Buffer Pool` → `buffer-pool.md`），写作方却按自以为的名字记账，台账
+    # 与产出就此漂移。（引入时 concept 页尚不受 unaccounted-write 约束；2026-07-18 起记账义务
+    # 已覆盖全部非 source 页，此处仍是最早的 fail-fast 拦截点。）--proposals 是"未写入的提案"，
+    # 不参与对账。
+    if args.writes:
+        import ingest_guards
+        missing = ingest_guards.missing_write_paths(_vault_dir(), json.loads(args.writes))
+        if missing:
+            raise SystemExit(
+                f"--writes 记的页在磁盘上查无此文件：{'、'.join(missing)}\n"
+                "台账须与产出一致——按磁盘实际路径记账（resolve-concept 可能已把名字归一成 slug，"
+                "以它打印的 `-> <path>` 为准）。")
+    # 本轮读窗校验（fail-fast，2026-07-17 规格）：任何 window-done（含空写集跳窗）都要求该窗在
+    # 本轮（workorder 锚点之后）有 show-window 记录。批量通读合法——只看本轮内读过，不限制与
+    # window-start 的先后；旧轮读不代新轮（reopen/重预处理会刷新锚点）。
+    anchor = state_store.round_anchor(db, args.source)
+    if anchor is None or \
+            args.window not in state_store.window_reads_in_round(db, args.source, anchor):
+        raise SystemExit(
+            f"窗 {args.window} 本轮无 show-window 读窗记录；写页/跳窗前都必须先读窗：\n"
+            f"  python scripts/pipeline.py show-window --source {args.source} --window {args.window}\n"
+            "（本轮内读过即可，批量通读合法；reopen/重预处理后旧轮读账作废，须重读）")
     state_store.finish_window(db, args.source, args.window,
                               write_set_json=args.writes, proposal_set_json=args.proposals)
     locks.heartbeat(db, scope="vault", holder=args.source)
@@ -1489,17 +1512,40 @@ def cmd_lint(args):
                              "或 frontmatter 归属），fail-closed 阻断发布"}
                   for p in orphans] + wiki_gate.lint_pages(vault, proposed,
                                                            phase_e=not session_mode)
-    # 归属 ≠ 记账（契约对齐）：本轮 proposed 的导航/综合层页（topic/comparison/synthesis/
-    # overview）必须入台账——ingest 只认本源窗口 write_set，kb-save 只认本会话 candidate 集
-    # （P1b：历史/未保存会话不得代记账，两条通道互不越界）。不追溯 published 页。
-    accounted = session_set if session_mode else set(written_by[args.source])
+    # —— 本轮作用域（2026-07-17 规格；07-18 P1 改显式 round token）：本轮 = work_orders.round
+    # 章相等的行（workorder/reopen 换轮，lint 失败重试不换轮；同秒碰撞免疫）。记账只认本轮
+    # **finished** 行（P1-2：failed/running 行不记账——start 已清旧账，此处双保险）；历史归属
+    # （written_by）仍 lifetime——归属 ≠ 记账。无 workorder → 无轮次 → 空记账集（fail-closed）。——
+    round_reads: set[str] = set()
+    round_written: set[str] = set()
+    round_rows: list[dict] = []
+    if not session_mode:
+        _round = state_store.round_anchor(db, args.source)
+        round_reads = state_store.window_reads_in_round(db, args.source, _round)
+        if _round is not None:
+            for w in state_store.window_states(db, args.source):
+                if w["status"] == "finished" and w.get("round") == _round \
+                        and w.get("write_set_json"):
+                    round_rows.append(w)
+                    try:
+                        round_written.update(str(x).replace("\\", "/")
+                                             for x in json.loads(w["write_set_json"]))
+                    except ValueError:
+                        pass
+    # 归属 ≠ 记账（契约对齐）：本轮 proposed 的**全部非 source 页**（topic/comparison/synthesis/
+    # overview/concept/lesson）必须入本轮台账——ingest 只认本轮窗口 write_set（旧轮账不代新轮），
+    # kb-save 只认本会话 candidate 集（P1b：历史/未保存会话不得代记账）。不追溯 published 页。
+    # （concept/lesson 曾不受记账约束——不记账即可绕过读窗门禁，Codex 实跑复现后收口。）
+    accounted = session_set if session_mode else round_written
     for p in proposed:
-        if p["meta"].get("type") in ("topic", "comparison", "synthesis", "overview") and \
+        if p["meta"].get("type") in ("topic", "comparison", "synthesis", "overview",
+                                     "concept", "lesson") and \
                 not wiki_gate.is_accounted_write(p["rel_path"], accounted):
             violations.append({"path": p["rel_path"], "rule": "unaccounted-write",
-                               "detail": "本轮 proposed 的导航/综合层页未入处理台账——ingest 补"
-                                         "某窗口的 window-done --writes，kb-save 补 query-session"
-                                         " 的 candidate_write_set.json；source_refs 只定归属不算记账"})
+                               "detail": "本轮 proposed 的非 source 页未入本轮处理台账——ingest 补"
+                                         "某窗口的 window-done --writes（旧轮账不代新轮），kb-save 补"
+                                         " query-session 的 candidate_write_set.json；"
+                                         "source_refs 只定归属不算记账"})
     if session_mode:
         # 会话完整性（fail-closed）：candidate 每条路径都必须真实在批（存在、proposed、身份匹配）。
         # 路径拼错/页面未落盘/已被其他会话重写时绝不"promoted 0 还报成功"，也绝不代发他会话内容。
@@ -1524,6 +1570,43 @@ def cmd_lint(args):
         violations.append({"path": f"sources/{args.source}.md", "rule": "source-page-missing",
                            "detail": "本批产出 concept 但 sources/<src>.md 来源台账页不存在；"
                                      "收尾前须写来源摘要页（phase F 第 2 步）"})
+    # 窗口阅读证据（ingest 专属；kb-save 无窗口台账，session_mode 跳过）：本轮写了页的窗必须
+    # 在本轮读过。确定性层强制得了"跑完流程"，强制不了"LLM 真读了源"——读窗台账是唯一能机器
+    # 判定的替代证据（凭预训练知识写页时页面形式全部合规，只有它露馅）。window-done 已 fail-fast
+    # 同一规则，这里是防"绕过 CLI 直写 DB 记账"的兜底。同秒 start/done 刻意不阻断（写页不强制
+    # 发生在 start/done 之间），只作 ingest-stats 软信号。
+    if not session_mode:
+        violations += wiki_gate.window_evidence_violations(
+            round_rows, round_reads, scope_paths={p["rel_path"] for p in proposed})
+        wo_row = state_store.get_work_order(db, args.source)
+        if wo_row is not None:
+            import ingest_guards
+            import yaml as _yaml
+            wo = _yaml.safe_load(Path(wo_row["path"]).read_text(encoding="utf-8"))
+            # write_scope 兜底复检（2026-07-17 规格 5）：check-write 是写方自觉调用、可被跳过
+            # （Codex 实跑：DENY 后跳过直写照样发布）——lint 必拦。本轮 proposed ∪ 本轮 ledger
+            # 路径都必须在 workorder write_scope 内。
+            for rel in sorted({p["rel_path"] for p in proposed} | round_written):
+                if not ingest_guards.in_write_scope(rel, wo.get("write_scope") or []):
+                    violations.append({"path": rel, "rule": "write-scope-violation",
+                                       "detail": "路径在 workorder write_scope 之外（check-write 可被"
+                                                 "跳过，lint 兜底拦截）；独占域下仅 concepts/lessons，"
+                                                 "综合层与来源台账页只落顶层"})
+            # 首次完整入库全窗必读（2026-07-17 规格 2，100%，空写跳窗也须读）：sources/<src>.md
+            # 不在 workorder 页面快照 = 首次入库；reopen 增量轮只按本轮触及的窗检查（上面的
+            # window-unread-write）。
+            snap = {e.get("path") for e in (wo.get("other_pages_snapshot") or [])}
+            wfile = _staging_dir(args.source) / "windows.jsonl"
+            if f"sources/{args.source}.md" not in snap and wfile.exists():
+                all_ids = [json.loads(ln)["window_id"]
+                           for ln in wfile.read_text(encoding="utf-8").splitlines() if ln.strip()]
+                missing = [wid for wid in all_ids if wid not in round_reads]
+                if missing:
+                    violations.append({"path": "(windows)", "rule": "windows-unread",
+                                       "detail": f"首次完整入库须本轮读过全部 {len(all_ids)} 窗"
+                                                 f"（空写跳窗也须读）；缺 {len(missing)} 窗："
+                                                 f"{'、'.join(missing[:5])}"
+                                                 f"{'…' if len(missing) > 5 else ''}"})
     # Spec 2 渐进 risk lint：仅当本源 backend=mineru 且有风险窗时，要求 lesson 可追溯（旧源不受影响）。
     violations += _mineru_risk_violations(args.source, proposed, written_by[args.source])
     if violations:
@@ -1871,6 +1954,7 @@ def cmd_ingest_stats(args):
           f"{src['current_stage']}/{src['current_status']} ==")
     print(f"windows: total={w['total']} finished={w['finished']} failed={w['failed']}"
           f" running={w['running']} empty_writes_unread={w['empty_writes_unread']}"
+          f" instant_write_windows={w['instant_write_windows']}"
           f"  last-attempt secs: total={w['last_attempt_seconds_total']}"
           f" max={w['last_attempt_seconds_max']}")
     print(f"pages_estimate (write_set 去重): {stats['pages_estimate']}")

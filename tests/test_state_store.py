@@ -242,3 +242,90 @@ def test_fail_without_running_rejected_and_state_unchanged(tmp_path):
     with pytest.raises(state_store.InvalidTransition):
         state_store.fail_stage(db, "s1", "registered", error="x")
     assert state_store.get_source(db, "s1")["current_status"] == "done"  # 未被改成 failed
+
+
+def _seed_two_sources_ledgers(db):
+    state_store.init_db(db)
+    for sid in ("s1", "s2"):
+        state_store.register_source(db, sid, domain="d", fmt="md")
+        state_store.start_window(db, sid, "w0000", input_hash="h")
+        state_store.finish_window(db, sid, "w0000", write_set_json='["a.md"]')
+        state_store.record_window_read(db, sid, "w0000")
+        state_store.add_review_proposal(db, sid, target_path="x.md", kind="L1", reason="r")
+
+
+def test_export_source_rows_reads_all_tables_for_one_source(tmp_path):
+    # retract 证据包的 DB 侧：导出该源在全部相关表的行（只读），他源行不掺入
+    db = tmp_path / "study-kb.sqlite"
+    _seed_two_sources_ledgers(db)
+    rows = state_store.export_source_rows(db, "s1")
+    for table in ("sources", "source_stage_runs", "ingest_progress",
+                  "window_reads", "review_proposals", "work_orders", "artifacts"):
+        assert table in rows, table
+    assert len(rows["ingest_progress"]) == 1
+    assert rows["ingest_progress"][0]["write_set_json"] == '["a.md"]'
+    assert len(rows["window_reads"]) == 1 and len(rows["review_proposals"]) == 1
+    assert all(r["source_id"] == "s1" for t in rows.values() for r in t)
+
+
+def test_purge_source_ledgers_deletes_only_target_source(tmp_path):
+    # retract 清账：只清 ingest_progress/window_reads/review_proposals 三张账本表、只清本源
+    db = tmp_path / "study-kb.sqlite"
+    _seed_two_sources_ledgers(db)
+    counts = state_store.purge_source_ledgers(db, "s1")
+    assert counts == {"ingest_progress": 1, "window_reads": 1, "review_proposals": 1}
+    assert state_store.window_states(db, "s1") == []
+    assert state_store.window_read_ids(db, "s1") == set()
+    assert state_store.list_review_proposals(db, "s1") == []
+    # s2 完好；s1 的 sources/stage_runs 行保留（状态机身份不清除）
+    assert len(state_store.window_states(db, "s2")) == 1
+    assert state_store.get_source(db, "s1") is not None
+
+
+def test_round_token_isolates_rounds_even_within_same_second(tmp_path):
+    # P1-1（Codex 2026-07-18）：轮次隔离不得依赖时间戳跨秒。轮次 = work_orders.round 显式
+    # 计数器（record_work_order 递增），读/写行在落账时盖当轮 token——本测试全程同一秒内
+    # 制造碰撞（零 sleep），旧轮读仍必须被新轮排除。
+    db = tmp_path / "study-kb.sqlite"
+    state_store.init_db(db)
+    state_store.register_source(db, "s1", domain="d", fmt="md")
+    assert state_store.round_anchor(db, "s1") is None          # 无 workorder → 无轮次
+    state_store.record_window_read(db, "s1", "w_pre")          # workorder 前的读：无轮次章
+    state_store.record_work_order(db, "s1", path="p", registry_hash="r" * 64,
+                                  write_scope_json="[]")
+    r1 = state_store.round_anchor(db, "s1")
+    assert r1 == 1
+    assert state_store.window_reads_in_round(db, "s1", r1) == set()   # 同秒旧读不入新轮
+    state_store.record_window_read(db, "s1", "w_a")            # 本轮读 → 盖 round 1
+    assert state_store.window_reads_in_round(db, "s1", r1) == {"w_a"}
+    # 同一秒内 reopen（再记 workorder）→ round 2；round-1 的读立即失效
+    state_store.record_work_order(db, "s1", path="p", registry_hash="r" * 64,
+                                  write_scope_json="[]")
+    r2 = state_store.round_anchor(db, "s1")
+    assert r2 == 2
+    assert state_store.window_reads_in_round(db, "s1", r2) == set()
+    state_store.record_window_read(db, "s1", "w_a")            # 重读 → 盖 round 2
+    assert state_store.window_reads_in_round(db, "s1", r2) == {"w_a"}
+    assert state_store.window_reads_in_round(db, "s1", r1) == set()   # UPSERT 后旧轮视图不残留
+
+
+def test_start_window_clears_stale_ledger_and_stamps_round(tmp_path):
+    # P1-2（Codex 2026-07-18）：重启窗口必须清掉上一轮 write_set/proposal_set——否则
+    # start→fail 就能把旧轮账"带尸还魂"进新轮。行还要盖当轮 round token。
+    db = tmp_path / "study-kb.sqlite"
+    state_store.init_db(db)
+    state_store.register_source(db, "s1", domain="d", fmt="md")
+    state_store.record_work_order(db, "s1", path="p", registry_hash="r" * 64,
+                                  write_scope_json="[]")
+    state_store.start_window(db, "s1", "w0", input_hash="h")
+    state_store.finish_window(db, "s1", "w0", write_set_json='["old.md"]',
+                              proposal_set_json='["p.md"]')
+    state_store.record_work_order(db, "s1", path="p", registry_hash="r" * 64,
+                                  write_scope_json="[]")            # reopen → round 2
+    state_store.start_window(db, "s1", "w0", input_hash="h2")       # 新轮重启同窗
+    row = state_store.window_states(db, "s1")[0]
+    assert row["write_set_json"] is None and row["proposal_set_json"] is None  # 旧账清空
+    assert row["round"] == 2                                        # 盖新轮章
+    state_store.fail_window(db, "s1", "w0", error="boom")
+    row = state_store.window_states(db, "s1")[0]
+    assert row["write_set_json"] is None    # start→fail 不复活旧 write_set

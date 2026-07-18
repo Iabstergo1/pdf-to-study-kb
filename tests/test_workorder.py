@@ -34,7 +34,7 @@ def test_build_workorder_contract(tmp_path):
     wo = workorder.build_workorder(vault, source_id="wp", domain="game-theory",
                                    staging_dir=staging)
     assert wo["source_id"] == "wp" and wo["domain"] == "game-theory"
-    assert "domains/game-theory/**" in wo["write_scope"]
+    assert "domains/game-theory/concepts/**" in wo["write_scope"]
     assert "sources/wp.md" in wo["write_scope"]
     assert len(wo["registry"]["hash"]) == 64
     assert wo["registry"]["scope"] == ["domain:game-theory", "shared"]
@@ -74,6 +74,26 @@ def test_workorder_cross_domain_glob_is_concepts_only(tmp_path):
     assert not ig.in_write_scope("domains/research-method/lessons/x.md", ws)        # lessons 不放行
     assert not ig.in_write_scope("domains/research-method/topics/x.md", ws)         # topics 不放行
     assert not ig.in_write_scope("domains/statistics/concepts/x.md", ws)            # 未列白名单的域不放行
+
+
+def test_workorder_own_domain_scope_is_concepts_and_lessons_only(tmp_path):
+    # 本域写入边界与 G3 跨域一致收窄：域下只放行 concepts/lessons。综合层（topic/comparison/
+    # synthesis）与来源台账只落顶层——域下另建 sources/<src>.md 会与顶层台账页同 source_id，
+    # 撞 graph_model._page_id 的 "source:<id>" 节点 id，使 rebuild-graph fail-hard。
+    ig = _load("ingest_guards")
+    vault = _vault_with_concepts(tmp_path)
+    staging = tmp_path / "staging" / "wp"
+    staging.mkdir(parents=True)
+    ws = workorder.build_workorder(vault, source_id="wp", domain="game-theory",
+                                   staging_dir=staging)["write_scope"]
+    assert "domains/game-theory/**" not in ws                                 # 宽通配已撤
+    assert ig.in_write_scope("domains/game-theory/concepts/信号博弈.md", ws)   # 概念页放行
+    assert ig.in_write_scope("domains/game-theory/lessons/x.md", ws)          # lesson 放行
+    assert not ig.in_write_scope("domains/game-theory/topics/x.md", ws)       # 域下 topic 拒绝
+    assert not ig.in_write_scope("domains/game-theory/comparisons/x.md", ws)  # 域下 comparison 拒绝
+    assert not ig.in_write_scope("domains/game-theory/sources/wp.md", ws)     # 域下台账页拒绝
+    assert ig.in_write_scope("topics/x.md", ws)                               # 顶层综合层仍放行
+    assert ig.in_write_scope("sources/wp.md", ws)                             # 顶层台账仍放行
 
 
 def test_workorder_snapshots_home_domain_concepts(tmp_path):

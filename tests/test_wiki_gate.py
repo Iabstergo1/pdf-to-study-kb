@@ -593,3 +593,93 @@ def test_lint_blocks_bare_pipe_wikilink_in_table(tmp_path):
           "的正文长度稳超一百二十个字符，确保本测试只考察表格内裸竖线的检测行为本身。\n")
     vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
     assert [v for v in vs if v["rule"] == "table-wikilink-pipe"], vs
+
+
+def test_source_page_violations_flags_duplicate_and_misplaced():
+    # 两份同 source_id 的台账页 → graph_model._page_id 都给 "source:<id>"，撞 node id 使
+    # rebuild-graph fail-hard；图谱 publish-isolated，发布不会拦，图谱就此静默坏掉。
+    pages = [{"rel_path": "sources/mysql.md",
+              "meta": {"type": "source", "source_id": "mysql"}},
+             {"rel_path": "domains/database-systems/sources/mysql.md",
+              "meta": {"type": "source", "source_id": "mysql"}}]
+    vs = wiki_gate.source_page_violations(pages)
+    assert any(v["rule"] == "source-page-duplicate" for v in vs), vs
+    assert any(v["rule"] == "source-page-misplaced"
+               and v["path"] == "domains/database-systems/sources/mysql.md" for v in vs), vs
+
+
+def test_source_page_violations_accepts_canonical_ledger_pages():
+    pages = [{"rel_path": "sources/mysql.md",
+              "meta": {"type": "source", "source_id": "mysql"}},
+             {"rel_path": "sources/game-theory.md",
+              "meta": {"type": "source", "source_id": "game-theory"}}]
+    assert wiki_gate.source_page_violations(pages) == []
+
+
+def test_lint_blocks_duplicate_source_page(tmp_path):
+    # vault 级复检：域下台账页 published、顶层 proposed 也要抓——重复的两份哪份先发布都会撞
+    # 图谱 node id，只查本批 proposed 会漏。
+    _page(tmp_path, "sources/s.md",
+          {"type": "source", "status": "published", "managed_by": "pipeline",
+           "source_id": "s", "title": "S", "domain": "d", "format": "pdf"},
+          "来源台账页正文。\n")
+    _page(tmp_path, "domains/d/sources/s.md",
+          {"type": "source", "status": "proposed", "managed_by": "pipeline",
+           "source_id": "s", "title": "S", "domain": "d", "format": "pdf"},
+          "来源台账页正文。\n")
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert [v for v in vs if v["rule"] == "source-page-duplicate"], vs
+    assert [v for v in vs if v["rule"] == "source-page-misplaced"
+            and v["path"] == "domains/d/sources/s.md"], vs
+
+
+def test_lint_accepts_single_canonical_source_page(tmp_path):
+    _page(tmp_path, "sources/s.md",
+          {"type": "source", "status": "proposed", "managed_by": "pipeline",
+           "source_id": "s", "title": "S", "domain": "d", "format": "pdf"},
+          "来源台账页正文。\n")
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert [v for v in vs if v["rule"].startswith("source-page-")] == [], vs
+
+
+def test_window_evidence_violations_flags_write_in_unread_window():
+    # 写页的窗必须有 show-window 读窗记录。无阈值二值判据：不问覆盖率，只问"这一窗写了页，
+    # 它读过吗"。刻意不查 start==finish 的同秒刷窗——写页不强制发生在 start/done 之间，
+    # 秒级时间戳下合法的快速记账也会同秒（假阳性），且同秒刷窗的窗无一不是未读窗。
+    rows = [{"window_id": "w0000", "started_at": "2026-07-16T08:52:59+00:00",
+             "finished_at": "2026-07-16T08:53:14+00:00", "write_set_json": '["a.md"]'},
+            {"window_id": "w0009", "started_at": "2026-07-16T10:38:00+00:00",
+             "finished_at": "2026-07-16T10:38:22+00:00", "write_set_json": '["b.md"]'},
+            {"window_id": "w0066", "started_at": "2026-07-16T11:04:33+00:00",
+             "finished_at": "2026-07-16T11:04:33+00:00", "write_set_json": '["c.md","d.md"]'},
+            {"window_id": "w0010", "started_at": "t1", "finished_at": "t2",
+             "write_set_json": None}]
+    vs = wiki_gate.window_evidence_violations(rows, {"w0000", "w0066"})
+    assert [v["path"] for v in vs] == ["(window w0009)"], vs
+    assert {v["rule"] for v in vs} == {"window-unread-write"}, vs
+
+
+def test_window_evidence_violations_empty_write_windows_are_legal():
+    # 空写集跳窗合法（读了判定无可写内容 / 目录页），不因未读窗而阻断——只约束"写了页"的窗
+    rows = [{"window_id": "w1", "started_at": "t", "finished_at": "t", "write_set_json": None},
+            {"window_id": "w2", "started_at": "t", "finished_at": "t", "write_set_json": "[]"},
+            {"window_id": "w3", "started_at": "t", "finished_at": "t", "write_set_json": ""}]
+    assert wiki_gate.window_evidence_violations(rows, set()) == []
+
+
+def test_window_evidence_violations_clean_run():
+    rows = [{"window_id": "w0", "started_at": "2026-07-16T08:52:59+00:00",
+             "finished_at": "2026-07-16T08:53:14+00:00", "write_set_json": '["a.md"]'}]
+    assert wiki_gate.window_evidence_violations(rows, {"w0"}) == []
+
+
+def test_window_evidence_violations_scoped_to_current_batch():
+    # reopen/reset 都不清 ingest_progress（其 docstring 明确"一概不动"），上一轮的窗行会永久
+    # 留在台账里，其页早已 published、不在本批 proposed。lint 是本批发布门禁——不得为历史轮
+    # 的证据缺口阻断本批（window_reads 之前入库的旧源更是一条读窗记录都没有）。
+    rows = [{"window_id": "w_old", "started_at": "t1", "finished_at": "t2",
+             "write_set_json": '["published-last-round.md"]'},
+            {"window_id": "w_new", "started_at": "t1", "finished_at": "t2",
+             "write_set_json": '["this-batch.md"]'}]
+    vs = wiki_gate.window_evidence_violations(rows, set(), scope_paths={"this-batch.md"})
+    assert [v["path"] for v in vs] == ["(window w_new)"], vs
