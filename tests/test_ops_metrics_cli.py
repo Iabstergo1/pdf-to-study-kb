@@ -211,6 +211,7 @@ def test_ingest_stats_json_proxy_metrics(tmp_path):
     # 诚实口径：不伪造 token/费用字段。
     assert "token" not in json.dumps(stats).lower()
     assert "cost" not in json.dumps(stats).lower()
+    assert any("NOT delivery total" in note for note in stats["notes"])
 
 
 def test_ingest_stats_human_readable(tmp_path):
@@ -220,6 +221,8 @@ def test_ingest_stats_human_readable(tmp_path):
     out = r.stdout
     assert "s1" in out and "windows" in out
     assert "pages_estimate" in out or "页数" in out
+    assert "NOT delivery total" in out
+    assert "exact delivery inventory" in out
 
 
 def test_ingest_stats_unknown_source_exits_nonzero(tmp_path):
@@ -255,6 +258,37 @@ def test_ingest_stats_unsourced_identifiers_advisory(tmp_path):
     assert r2.returncode == 0, r2.stdout + r2.stderr
     assert "phantom_sym" in r2.stdout and "ghost_call()" in r2.stdout
     assert "未命中" in r2.stdout  # 口径提示：未命中≠违规
+
+
+def test_ingest_stats_scans_attributed_pages_missing_from_current_round_ledger(tmp_path):
+    """reopen 会重写窗口账本；统计仍须覆盖 vault 中归属本源的历史已发布页。"""
+    _seed_stats_db(tmp_path)
+    page = tmp_path / "wiki" / "domains" / "d" / "concepts" / "historical.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "---\n"
+        "type: concept\nstatus: published\n"
+        "source_refs:\n- sections: ['2.1']\n  source: s1\n"
+        "---\n"
+        "这是一张上一轮发布、但本轮未重写的页面；`historical_phantom` 应进入溯源探针。\n",
+        encoding="utf-8")
+    staging = tmp_path / "pipeline-workspace" / "staging" / "s1"
+    staging.mkdir(parents=True)
+    (staging / "source.md").write_text("原文没有该标识符。", encoding="utf-8")
+    ledger = tmp_path / "wiki" / "sources" / "s1.md"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(
+        "---\ntype: source\nstatus: published\nsource_id: s1\n---\n来源台账。\n",
+        encoding="utf-8")
+
+    r = _run(tmp_path, "ingest-stats", "--source", "s1", "--json")
+    assert r.returncode == 0, r.stdout + r.stderr
+    stats = json.loads(r.stdout)
+    assert stats["page_inventory"]["total"] == 2
+    assert stats["page_inventory"]["by_type"] == {"concept": 1, "source": 1}
+    assert stats["device_usage"]["pages_scanned"] == 2
+    assert stats["unsourced_identifiers"] == {
+        "domains/d/concepts/historical.md": ["historical_phantom"]}
 
 
 def test_ingest_stats_unsourced_identifiers_absent_without_staging(tmp_path):

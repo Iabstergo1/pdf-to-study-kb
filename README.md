@@ -283,7 +283,7 @@ pdf-to-study-kb/
 
 ### `ingest` 会话支撑（通常由 skill 内部调用）
 
-> **为什么有这组**：保证 LLM 写库这一步"**可断点续跑 + 不越界 + 不覆盖人工页**"。`ingest-start`/`ingest-done` 取/释放并发锁并校验 registry 是否过期；`window-start`/`window-done`/`window-fail` 做窗级记账（中断后能从下一个未完成 window 续跑，并维持锁心跳）；`resolve-concept` 是概念去重的**唯一入口**（命中合并、未命中新建，核心约束②）；`check-write` + `snapshot-page` 在写已存在页前强制覆盖保护（不在快照中 / 是 human 页 / hash 不符 → 拒写出 proposal，核心约束④）。
+> **为什么有这组**：保证 LLM 写库这一步"**可断点续跑 + 不越界 + 不覆盖人工页**"。`ingest-start`/`ingest-done` 取/释放并发锁并校验 registry 是否过期；`window-start`/`window-done`/`window-fail` 做窗级记账（中断后能从下一个未完成 window 续跑，并维持锁心跳）；`resolve-concept` 是概念去重的**唯一入口**（命中合并、未命中新建，核心约束②）；`check-write` 必须先于编辑，且会为既有页原子保存首份基线，`window-done` 与 `lint` 都会复核，因而“先改后补快照”不能过关（核心约束④）。
 
 | 命令 | 作用 | 关键参数 |
 |------|------|------|
@@ -291,8 +291,8 @@ pdf-to-study-kb/
 | `show-window` | 打印指定 window 的源文本 | `--source --window` |
 | `window-start` / `window-done` / `window-fail` | window 级记账（断点续跑 + 锁心跳）；`--writes-file` 从 UTF-8 文件读 JSON 数组（绕开 Windows 引号剥离坑，与 `--writes` 互斥） | `--source --window [--hash/--writes/--writes-file/--error]` |
 | `resolve-concept` | 概念归一唯一入口：命中合并 / 未命中新建 | `--mention --domain [--alias --ref-source --ref-sections]` |
-| `check-write` | 写前守卫：边界 + 覆盖保护（DENY 则 `exit 1`） | `--source --path` |
-| `snapshot-page` | 就地 merge 前快照该页 | `--source --path` |
+| `check-write` | 写前守卫：边界 + 覆盖保护；既有页自动保存首份写前基线（DENY 则 `exit 1`） | `--source --path` |
+| `snapshot-page` | 兼容命令：复用 `check-write`，幂等确认首份基线；不可写后补救 | `--source --path` |
 
 ### 收尾、提升与查询
 
@@ -309,7 +309,7 @@ pdf-to-study-kb/
 | `promotion-candidates` | 检测跨域提升候选（人工确认） | `--propose` |
 | `promote-concept` | 机械提升一个概念为 shared | `--id concept.<domain>.<slug>` |
 | `check-session` | query-session 目录契约检查（Q1） | `--id <run_id> [--saved]` |
-| `ingest-stats` | 只读代理指标：窗口成败/阶段耗时与重跑/lint 失败(≈回滚)/发布页数估算/违规按 kind 分布（不伪造 token/费用） | `--source [--json]` |
+| `ingest-stats` | 只读代理指标：窗口成败/阶段耗时与重跑/lint 失败/窗口账本估算 `pages_estimate` + 精确交付清单 `page_inventory`（报告总页数只认后者）/违规分布；不伪造 token/费用 | `--source [--json]` |
 
 ### skill 自进化（零 LLM 命令；唯一 LLM 是人触发的 `skill-evolve` skill）
 

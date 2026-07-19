@@ -13,8 +13,9 @@ python scripts/pipeline.py resolve-concept --mention "<mention in the body>" --d
     [--alias "<alias>" ...] [--ref-source <source_id> --ref-sections "5.2,12.2"]
 ```
 
-- `[merged] <canonical_id> -> <page path>`: edit that page to fill/extend the body (run check-write +
-  snapshot-page first).
+- `[merged] <canonical_id> -> <page path>`: during ingest, the command itself runs the write guard and saves
+  the existing page's first baseline **before** merging aliases/source refs. Run `check-write` again before
+  editing the body; it is idempotent and reuses that verified baseline. Do not run `snapshot-page` after editing.
 - `[created] <canonical_id> -> <page path>`: the skeleton page exists (`status: proposed`); fill the body
   (**purpose-driven structure — no mandatory section titles, D-4**), reaching a usable depth.
 - Each call **rescans the concept pages live** to rebuild the in-memory registry, so concepts created

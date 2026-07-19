@@ -1128,6 +1128,12 @@ def cmd_window_done(args):
                 f"--writes 记的页在磁盘上查无此文件：{'、'.join(missing)}\n"
                 "台账须与产出一致——按磁盘实际路径记账（resolve-concept 可能已把名字归一成 slug，"
                 "以它打印的 `-> <path>` 为准）。")
+        # 既有页必须先过 check-write 并留下不可覆盖的写前基线。否则“先编辑、后补快照”可把
+        # 已污染内容伪装成原版；window-done 在落账前 fail-fast，lint 还会再兜底一次。
+        violations = _prewrite_snapshot_violations(db, args.source, json.loads(args.writes))
+        if violations:
+            raise SystemExit("prewrite-snapshot 校验失败：\n" + "\n".join(
+                f"  {rel}: {reason}" for rel, reason in violations))
     # 本轮读窗校验（fail-fast，2026-07-17 规格）：任何 window-done（含空写集跳窗）都要求该窗在
     # 本轮（workorder 锚点之后）有 show-window 记录。批量通读合法——只看本轮内读过，不限制与
     # window-start 的先后；旧轮读不代新轮（reopen/重预处理会刷新锚点）。
@@ -1320,6 +1326,12 @@ def cmd_resolve_concept(args):
     if args.ref_source:
         source_ref = {"source": args.ref_source,
                       "sections": (args.ref_sections or "").split(",") if args.ref_sections else []}
+    # resolve-concept 本身会立即改 frontmatter；命中既有页时必须在这次 mutation 之前完成
+    # check-write + 快照，不能让调用方事后再补。
+    if args.ref_source and _source_is_running_ingest(db, args.ref_source):
+        hit = concept_store.resolve(args.mention, domain=args.domain, registry=registry)
+        if hit:
+            _prepare_write(db, args.ref_source, hit[1]["page_path"])
     cid, path, action = concept_store.resolve_or_create_concept(
         vault, mention=args.mention, domain=args.domain, registry=registry,
         aliases=args.alias or [], source_ref=source_ref)
@@ -1331,43 +1343,108 @@ def cmd_resolve_concept(args):
     print(f"[{action}] {cid} -> {path}")
 
 
-def cmd_check_write(args):
-    """写前守卫：写入边界 + 覆盖保护三条件，DENY 时 exit 1（spec §9）。"""
+def _workorder_data(db, source_id):
     import state_store
-    import ingest_guards
     import yaml as _yaml
-    db = _vault_state_db()
-    if _source_is_running_ingest(db, args.source):
-        _require_vault_lock(db, args.source)
-    wo_row = state_store.get_work_order(db, args.source)
+    wo_row = state_store.get_work_order(db, source_id)
     if wo_row is None:
         raise SystemExit("run workorder first")
-    wo = _yaml.safe_load(Path(wo_row["path"]).read_text(encoding="utf-8"))
-    rel = args.path.replace("\\", "/")
+    return _yaml.safe_load(Path(wo_row["path"]).read_text(encoding="utf-8"))
+
+
+def _snapshot_baselines(wo):
+    return {e.get("path"): e for e in
+            [*(wo.get("concept_pages_snapshot") or []), *(wo.get("other_pages_snapshot") or [])]
+            if e.get("path")}
+
+
+def _run_snapshot_context(db, source_id):
+    import state_store
+    rid = state_store.latest_run_id(db, source_id, "ingesting")
+    if rid is None:
+        raise SystemExit("run ingest-start first")
+    run_id = f"r{rid}"
+    manifest = (_workspace_root() / "pipeline-workspace/snapshots" /
+                source_id / run_id / "manifest.json")
+    return run_id, manifest
+
+
+def _prepare_write(db, source_id, rel_path):
+    """check-write 的单一实现：授权既有页时原子留下首份写前基线。"""
+    import state_store
+    import ingest_guards
+    import snapshots
+    if _source_is_running_ingest(db, source_id):
+        _require_vault_lock(db, source_id)
+    wo = _workorder_data(db, source_id)
+    rel = rel_path.replace("\\", "/")
     if not ingest_guards.in_write_scope(rel, wo["write_scope"]):
         print(f"DENY {rel}: outside write_scope")
         raise SystemExit(1)
-    snap = list(wo.get("concept_pages_snapshot") or []) + list(wo.get("other_pages_snapshot") or [])
-    ok, reason = ingest_guards.can_overwrite(_vault_dir(), rel, snap)
+    baselines = _snapshot_baselines(wo)
+    baseline = baselines.get(rel)
+    run_id, manifest = _run_snapshot_context(db, source_id)
+    if baseline:
+        prior = snapshots.verify_prewrite_entry(
+            manifest, source_id=source_id, run_id=run_id, base_dir=_vault_dir(),
+            rel_path=rel, expected_sha256=baseline["sha256"])
+        if prior is None:
+            return rel, "ok (prewrite snapshot already verified)", manifest
+    ok, reason = ingest_guards.can_overwrite(_vault_dir(), rel, list(baselines.values()))
     if not ok:
         print(f"DENY {rel}: {reason}; 改走 Review-Queue proposal")
         raise SystemExit(1)
+    if baseline:
+        snapshots.take_snapshot(
+            _workspace_root() / "pipeline-workspace/snapshots", source_id=source_id,
+            run_id=run_id, files=[_vault_dir() / rel], base_dir=_vault_dir())
+        problem = snapshots.verify_prewrite_entry(
+            manifest, source_id=source_id, run_id=run_id, base_dir=_vault_dir(),
+            rel_path=rel, expected_sha256=baseline["sha256"])
+        if problem:
+            raise SystemExit(f"prewrite snapshot verification failed for {rel}: {problem}")
+        reason += f"; snapshot={manifest}"
+    return rel, reason, manifest
+
+
+def _prewrite_snapshot_violations(db, source_id, rel_paths):
+    """只核验 workorder 开始前已存在的页；新建页仍由 scope/磁盘/记账规则负责。"""
+    import snapshots
+    wo = _workorder_data(db, source_id)
+    baselines = _snapshot_baselines(wo)
+    relevant = sorted({str(p).replace("\\", "/") for p in rel_paths} & set(baselines))
+    if not relevant:
+        return []
+    run_id, manifest = _run_snapshot_context(db, source_id)
+    out = []
+    for rel in relevant:
+        problem = snapshots.verify_prewrite_entry(
+            manifest, source_id=source_id, run_id=run_id, base_dir=_vault_dir(),
+            rel_path=rel, expected_sha256=baselines[rel]["sha256"])
+        if problem:
+            out.append((rel, problem))
+    return out
+
+
+def cmd_check_write(args):
+    """写前守卫：写入边界 + 覆盖保护 + 既有页自动快照，DENY 时 exit 1。"""
+    db = _vault_state_db()
+    rel, reason, _manifest = _prepare_write(db, args.source, args.path)
     print(f"ALLOW {rel}: {reason}")
 
 
 def cmd_snapshot_page(args):
-    """就地 merge 前的 pre-ingest 快照（spec §3.3，非 git）。"""
-    import state_store
+    """兼容命令：复用 check-write；既有页的首份基线已由它自动、幂等地保存。"""
     import snapshots
     db = _vault_state_db()
-    if _source_is_running_ingest(db, args.source):
-        _require_vault_lock(db, args.source)
-    rid = state_store.latest_run_id(db, args.source, "ingesting")
-    run_id = f"r{rid}" if rid else "manual"
+    rel, reason, manifest = _prepare_write(db, args.source, args.path)
+    # 新页/本轮新建页没有 workorder 基线；保留旧命令的显式快照能力。take_snapshot
+    # 会合并 manifest 且保留同路径第一份基线，因此这里无条件调用也是幂等的。
+    run_id = manifest.parent.name
     manifest = snapshots.take_snapshot(
         _workspace_root() / "pipeline-workspace/snapshots", source_id=args.source,
-        run_id=run_id, files=[_vault_dir() / args.path], base_dir=_vault_dir())
-    print(f"[OK] snapshot {args.path} -> {manifest}")
+        run_id=run_id, files=[_vault_dir() / rel], base_dir=_vault_dir())
+    print(f"[OK] snapshot {rel} -> {manifest} ({reason})")
 
 
 def _mineru_risk_violations(source_id, proposed, written):
@@ -1592,6 +1669,11 @@ def cmd_lint(args):
                                        "detail": "路径在 workorder write_scope 之外（check-write 可被"
                                                  "跳过，lint 兜底拦截）；独占域下仅 concepts/lessons，"
                                                  "综合层与来源台账页只落顶层"})
+            # window-done 可被绕过直接写 SQLite；lint 对本轮 ledger 再核验既有页的写前基线。
+            for rel, reason in _prewrite_snapshot_violations(db, args.source, round_written):
+                violations.append({"path": rel, "rule": "prewrite-snapshot-missing",
+                                   "detail": "本轮改写 workorder 既有页，但没有可核验的写前快照："
+                                             f"{reason}；必须按 check-write → 编辑 顺序重做"})
             # 首次完整入库全窗必读（2026-07-17 规格 2，100%，空写跳窗也须读）：sources/<src>.md
             # 不在 workorder 页面快照 = 首次入库；reopen 增量轮只按本轮触及的窗检查（上面的
             # window-unread-write）。
@@ -1935,17 +2017,36 @@ def cmd_ingest_stats(args):
                 src_pages.update(str(x).replace("\\", "/") for x in json.loads(w["write_set_json"]))
             except ValueError:
                 pass
+    # reopen 会刷新每窗 write_set；当前轮账本不是全书页面清单。把 vault 中明确以 source_refs
+    # 归属本源的 published/proposed 页并入，避免探针把“本轮没改”误报成“不存在/没扫描”。
+    if vault.exists():
+        for f in vault.rglob("*.md"):
+            rel = f.relative_to(vault).as_posix()
+            if rel.startswith(("Review-Queue/", "_meta/")):
+                continue
+            try:
+                meta, _body = mdpage.read_page(f)
+            except (OSError, ValueError):
+                continue
+            if meta.get("status") not in ("published", "proposed"):
+                continue
+            refs = meta.get("source_refs") or []
+            if any(isinstance(ref, dict) and ref.get("source") == args.source for ref in refs):
+                src_pages.add(rel)
     usage = {"propositions": 0, "derivation_folds": 0, "questions": 0, "pages_scanned": 0}
     # advisory 标识符溯源（B 组 2026-07-19）：反引号代码型 token 查无于 source_refs 语料 →
     # 软信号（kb-qa triage 排序用）。未命中≠违规（演示 schema 合法）；永不进 lint / 不改退出码。
     import fidelity_probe
     probe_pages = []
+    by_type: dict[str, int] = {}
     corpora: dict[str, str] = {}
     for rel in sorted(src_pages):
         f = vault / rel
         if not f.exists():
             continue
         meta, body = mdpage.read_page(f)
+        ptype = str(meta.get("type") or "unknown")
+        by_type[ptype] = by_type.get(ptype, 0) + 1
         for k, v in page_rules.device_usage(body).items():
             usage[k] += v
         usage["pages_scanned"] += 1
@@ -1958,6 +2059,8 @@ def cmd_ingest_stats(args):
                     corpora[s] = sm.read_text(encoding="utf-8", errors="ignore")
         probe_pages.append((rel, body, refs))
     stats["device_usage"] = usage
+    stats["page_inventory"] = {"total": usage["pages_scanned"],
+                               "by_type": dict(sorted(by_type.items()))}
     stats["unsourced_identifiers"] = {
         rel: missing for rel, missing in fidelity_probe.unsourced_identifiers(probe_pages, corpora)}
     if args.json:
@@ -1972,7 +2075,11 @@ def cmd_ingest_stats(args):
           f" instant_write_windows={w['instant_write_windows']}"
           f"  last-attempt secs: total={w['last_attempt_seconds_total']}"
           f" max={w['last_attempt_seconds_max']}")
-    print(f"pages_estimate (write_set 去重): {stats['pages_estimate']}")
+    print(f"pages_estimate (window-ledger estimate; NOT delivery total): {stats['pages_estimate']}")
+    inv = stats["page_inventory"]
+    inv_types = ", ".join(f"{k}={v}" for k, v in inv["by_type"].items()) or "none"
+    print(f"page_inventory (exact delivery inventory; vault source_refs + source ledger): "
+          f"total={inv['total']} {inv_types}")
     print(f"lint failures (≈回滚次数): {stats['lint_failures']}")
     u = stats["device_usage"]
     print(f"device_usage (装置使用/复盘信号): propositions={u['propositions']}"
@@ -2180,10 +2287,10 @@ def main():
     rcp.add_argument("--alias", action="append", default=[])
     rcp.add_argument("--ref-source", default=None)
     rcp.add_argument("--ref-sections", default=None)
-    cwp = subparsers.add_parser("check-write", help="写前守卫：边界 + 覆盖保护（DENY 则 exit 1）")
+    cwp = subparsers.add_parser("check-write", help="写前守卫：边界 + 覆盖保护；既有页自动留首份快照")
     cwp.add_argument("--source", required=True)
     cwp.add_argument("--path", required=True)
-    spp = subparsers.add_parser("snapshot-page", help="就地 merge 前快照该页")
+    spp = subparsers.add_parser("snapshot-page", help="兼容命令：复用 check-write 并幂等确认写前快照")
     spp.add_argument("--source", required=True)
     spp.add_argument("--path", required=True)
     lp = subparsers.add_parser("lint", help="收尾门禁：lint proposed → promote 或 回滚+Review-Queue")

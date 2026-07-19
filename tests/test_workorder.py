@@ -24,6 +24,13 @@ def _vault_with_concepts(tmp_path):
     concept_store.create_concept(vault, domain="shared", name="期望效用")
     concept_store.create_concept(vault, domain="other-domain", name="无关概念")
     (vault / "overview.md").write_text("# overview\n", encoding="utf-8")
+    for rel, ptype in (("topics/主题.md", "topic"),
+                       ("comparisons/甲 vs 乙.md", "comparison"),
+                       ("synthesis/综合.md", "synthesis")):
+        page = vault / rel
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(f"---\ntype: {ptype}\nmanaged_by: pipeline\nstatus: published\n---\n正文\n",
+                        encoding="utf-8")
     return vault
 
 
@@ -44,9 +51,10 @@ def test_build_workorder_contract(tmp_path):
     assert "concept.shared.期望效用" in cids
     assert all("other-domain" not in c for c in cids)
     assert all(len(e["sha256"]) == 64 and e["managed_by"] for e in wo["concept_pages_snapshot"])
-    # 其它目标页快照：已存在的 overview.md
+    # 其它目标页快照：已存在的 overview + 全部可写综合层，避免既有 topic 等绕过写前基线。
     other_paths = {e["path"] for e in wo["other_pages_snapshot"]}
-    assert "overview.md" in other_paths
+    assert {"overview.md", "topics/主题.md", "comparisons/甲 vs 乙.md", "synthesis/综合.md"} \
+        <= other_paths
     assert wo["on_failure"] == "route_to_review_queue"
     assert wo["source"]["processing_windows"].endswith("windows.jsonl")
 

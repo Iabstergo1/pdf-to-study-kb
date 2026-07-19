@@ -129,10 +129,13 @@ Sub-unit command detail:
 
 ## Phase D: writing discipline (applies to every write)
 
-- **Write guard:** `python scripts/pipeline.py check-write --source <src> --path <vault-rel-path>`. DENY
-  (out of scope / not in snapshot / hash changed / `managed_by: human`) → do not write; put the proposed
-  change in `wiki/Review-Queue/<page>-proposal.md`.
-- **Snapshot before overwriting an existing page:** `python scripts/pipeline.py snapshot-page --source <src> --path <rel-path>`.
+- **Write guard comes before the edit:** `python scripts/pipeline.py check-write --source <src> --path
+  <vault-rel-path>`. For an existing work-order page, ALLOW atomically preserves its first pre-edit baseline;
+  `window-done` and `lint` both reject a ledgered existing page without that verified baseline. DENY (out of
+  scope / not in snapshot / hash changed / `managed_by: human`) → do not write; put the proposed change in
+  `wiki/Review-Queue/<page>-proposal.md`. Never edit first and run the guard or `snapshot-page` afterward.
+- **`snapshot-page` is compatibility-only:** it reuses the same guard and idempotently confirms the first
+  baseline; normal writing needs only `check-write → edit`.
 - **Every new/edited page is `status: proposed` + `managed_by: pipeline`;** templates in `templates/` are suggested scaffolds — structure is purpose-driven, per-type frontmatter must be complete.
 - **Concepts only via resolve-concept** (merge on hit, never create a duplicate); aliases only in the concept page's `aliases:` frontmatter.
 - **Never hand-write derived files:** `concepts/_registry.yaml`, `index.generated.md` are rebuilt by the finishing CLI (`aliases.md` is retired — aliases live in concept frontmatter).

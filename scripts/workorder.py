@@ -64,9 +64,19 @@ def build_workorder(vault, *, source_id: str, domain: str, staging_dir) -> dict:
     candidates = [vault / rel for rel in fixed]
     if lessons_dir.exists():
         candidates += sorted(lessons_dir.glob("*.md"))
+    # 所有可写的既有综合层页面也必须入 hash 快照。旧实现漏掉 topic/comparison/synthesis，
+    # 导致它们虽在 write_scope 内，却无法证明 check-write 发生在编辑之前。
+    for dirname in ("topics", "comparisons", "synthesis"):
+        d = vault / dirname
+        if d.exists():
+            candidates += sorted(d.rglob("*.md"))
+    seen = set()
     for p in candidates:
         if p.exists():
             rel = p.relative_to(vault).as_posix()
+            if rel in seen:
+                continue
+            seen.add(rel)
             other_snap.append({"path": rel, "sha256": _sha256_file(p), "managed_by": _managed_by(p)})
 
     # G3：跨域概念写入窄放行——每个 ≠ 当前域的 home 追加精确到 concepts/** 一条（不放行其 lessons/topics）

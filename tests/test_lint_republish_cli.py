@@ -377,6 +377,10 @@ def test_lint_scopes_to_own_source_pages(tmp_path):
     # a 自己收尾后照常发布（新规范：补本轮读窗与记账再 lint；ingested/proposed 态经 reopen 回开）
     assert _run(["reopen", "--source", "a"], tmp_path).returncode == 0
     assert _run(["ingest-start", "--source", "a"], tmp_path).returncode == 0
+    # reopen 后 a.md 已是既有页；本轮重新纳入写账前须先让 check-write 固化基线。
+    guarded = _run(["check-write", "--source", "a",
+                    "--path", "domains/misc/lessons/a.md"], tmp_path)
+    assert guarded.returncode == 0, guarded.stdout + guarded.stderr
     _account(tmp_path, "a", ["domains/misc/lessons/a.md"])
     assert _run(["ingest-done", "--source", "a"], tmp_path).returncode == 0
     r2 = _run(["lint", "--source", "a"], tmp_path)
@@ -535,6 +539,29 @@ def test_lint_fail_blocks_rolls_back_and_queues(tmp_path):
     # 回流：lint failed 后状态机允许回 ingest_waiting
     state_store.start_stage(db, "note", "ingest_waiting", input_hash="retry")
     assert state_store.get_source(db, "note")["current_stage"] == "ingest_waiting"
+
+
+def test_lint_rechecks_prewrite_snapshot_after_direct_ledger_bypass(tmp_path):
+    """即使绕过 window-done 直接写 DB，lint 仍须拦住先改后记账的既有页。"""
+    db = _ingest_ready(tmp_path)
+    vault = tmp_path / "wiki"
+    target = vault / "overview.md"
+    meta, _ = mdpage.read_page(target)
+    meta.update({"type": "overview", "status": "proposed", "managed_by": "pipeline",
+                 "source_refs": [{"source": "note", "sections": ["A"]}]})
+    mdpage.write_page(
+        target, meta,
+        "## 学习入口\n\n这是一段长度足够的导航正文，用来模拟跳过 check-write 后直接改写既有页，"
+        "再绕过 window-done 直接往 SQLite 填入 finished 账本的路径。\n")
+
+    state_store.record_window_read(db, "note", "w0000")
+    state_store.start_window(db, "note", "w0000", input_hash="h-bypass")
+    state_store.finish_window(db, "note", "w0000", write_set_json='["overview.md"]')
+    assert _run(["ingest-done", "--source", "note"], tmp_path).returncode == 0
+    r = _run(["lint", "--source", "note"], tmp_path)
+    assert r.returncode != 0
+    out = r.stdout + r.stderr
+    assert "prewrite-snapshot-missing" in out and "overview.md" in out, out
 
 
 # ---------------------------------------------------------------------------

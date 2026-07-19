@@ -55,3 +55,26 @@ def test_rollback_recreates_deleted_parent_dir(tmp_path):
     shutil.rmtree(vault / "domains")  # 目录也被删
     snapshots.rollback(mani)  # 必须重建父目录再恢复
     assert page.read_text(encoding="utf-8") == "ORIGINAL"
+
+
+def test_repeated_snapshot_calls_merge_and_preserve_first_baseline(tmp_path):
+    """同一 run 分批 check-write 时不得覆盖 manifest，更不得把已编辑版当成新基线。"""
+    vault = tmp_path / "wiki"
+    vault.mkdir()
+    a = vault / "a.md"
+    b = vault / "b.md"
+    a.write_text("A-ORIGINAL", encoding="utf-8")
+    b.write_text("B-ORIGINAL", encoding="utf-8")
+
+    mani = snapshots.take_snapshot(tmp_path / "snapshots", source_id="s1", run_id="r1",
+                                   files=[a], base_dir=vault)
+    a.write_text("A-EDITED", encoding="utf-8")
+    snapshots.take_snapshot(tmp_path / "snapshots", source_id="s1", run_id="r1",
+                            files=[b, a], base_dir=vault)
+    b.write_text("B-EDITED", encoding="utf-8")
+
+    data = json.loads(mani.read_text(encoding="utf-8"))
+    assert [e["rel_path"] for e in data["entries"]] == ["a.md", "b.md"]
+    snapshots.rollback(mani)
+    assert a.read_text(encoding="utf-8") == "A-ORIGINAL"
+    assert b.read_text(encoding="utf-8") == "B-ORIGINAL"

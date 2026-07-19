@@ -667,7 +667,8 @@ def resolve_review_proposals(db_path, *, ids: list[int] | None = None, kind: str
 def source_stats(db_path, source_id: str) -> dict | None:
     """只读代理指标聚合（ingest-stats 用），不改任何行。诚实口径：
     窗口耗时=最后一次尝试（start_window UPSERT 覆盖 started_at，非累计）；
-    pages_estimate=finished 窗 write_set_json 去重计数（估算）；拿不到的（token/费用）不伪造。"""
+    pages_estimate=finished 窗 write_set_json 去重计数（仅运行账本估算，不能作交付总数）；
+    拿不到的（token/费用）不伪造。"""
     import json
     con = connect(db_path)
     try:
@@ -752,7 +753,7 @@ def source_stats(db_path, source_id: str) -> dict | None:
             "proposals_by_kind": proposals,
             "notes": [
                 "窗口耗时=最后一次尝试（重启同窗会覆盖 started_at，非累计）",
-                "pages_estimate=finished 窗 write_set 去重计数（估算）",
+                "pages_estimate=finished 窗 write_set 去重计数（运行账本估算；NOT delivery total）",
                 "empty_writes_unread=空写集且从未 show-window 读过的窗（静默遗漏信号；旧源无读窗记录会偏高）",
                 "instant_write_windows=start==done 同秒且有写入的窗（软信号不阻断；连片出现值得复盘）",
             ],

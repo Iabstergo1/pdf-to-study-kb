@@ -231,8 +231,8 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | `show-window` | 打印某窗源文本（含难页资产头） | `--source --window` | `--plain` `--verbose` |
 | `window-start` / `window-done` / `window-fail` | 窗口记账 | `--source --window`（done 另 `--writes/--proposals`；fail 另 `--error`；start 另 `--hash`） | — |
 | `resolve-concept` | 概念归一唯一入口（`--mention` 用中文规范名；英文/缩写放 `--alias`，`canonical_id` 才有稳定 ASCII 去重键） | `--mention --domain` | `--alias`（可重复）`--ref-source --ref-sections` |
-| `check-write` | 写前守卫（DENY 则 exit 1） | `--source --path` | — |
-| `snapshot-page` | 就地 merge 前快照 | `--source --path` | — |
+| `check-write` | 写前守卫；既有页 ALLOW 时自动保存首份写前基线（必须先检查、后编辑） | `--source --path` | — |
+| `snapshot-page` | 兼容命令：幂等确认首份基线，不能为已经发生的编辑补票 | `--source --path` | — |
 
 **收尾、提升、查询、增量、自进化：**
 
@@ -246,7 +246,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | `promote-concept` | 机械提升一个概念为 shared | `--id concept.<domain>.<slug>` | — |
 | `check-session` | query-session 目录契约检查 | `--id <run_id>` | `--saved` |
 | `skill-mine` / `skill-gate` / `skill-stage` / `skill-adopt` | skill 自进化四步 | gate/stage/adopt 需 `--candidate` | `--base HEAD` |
-| `ingest-stats` | 只读"体检单"：一本书的窗口数/耗时/返工次数/违规分布（不含 token/费用，拿不到不瞎编） | `--source` | `--json` |
+| `ingest-stats` | 只读"体检单"：窗口/返工、窗口账本估算 `pages_estimate`，以及按 vault `source_refs` 重建的精确交付清单 `page_inventory`（报告总页数只认后者；不含 token/费用） | `--source` | `--json` |
 | `proposals-resolve` | **给已修复的错误销账**（不然 `skill-mine` 的 backlog 会越攒越脏）；**默认只列清单不改库**，看清楚了再加 `--apply` | `--id <行号>` 或 `--signature <类型>` | `--source`（配合 `--signature` 限定某源）`--all-matching`（批量落库必须加）`--apply` |
 | `reset-source` | **状态机"倒带键"**：某一步卡死重跑不了时，安全回退到更早的阶段。**默认只打印计划不改库**，确认后加 `--apply` | `--source --to {registered,profiled,converted,windowed,workorder_ready}` | `--apply` |
 | `staging-clean` | **清理一本书处理时留下的临时文件**（可能几百 MB）。**默认只列清单不删**；`--apply` 前会自动检查"这本书是否已发布""图片是否已同步进 vault"，两条不满足直接拒绝执行 | `--source` | `--apply` |

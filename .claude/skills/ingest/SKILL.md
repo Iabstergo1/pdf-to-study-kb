@@ -120,6 +120,10 @@ on a stale RESUME instead of emitting a half-true packet); otherwise auto-advanc
   for PDFs, `source-audit` produced `reconciliation.json` + `evidence.json`, every dual-audit disagreement was
   arbitrated + materialized, and strict `preflight-eval` passes both `dual_audit` and `check_evidence_bundle`
   (the windows carry the source images for arbitrated pages).
-- Writing: every page `check-write` ALLOW, page_rules self-check 0 violations, every non-source page in a `window-done --writes`.
+- Writing: every page follows `check-write → edit` (existing-page ALLOW atomically preserves the first baseline;
+  `window-done` and `lint` verify it), page_rules self-check 0 violations, every non-source page in a
+  `window-done --writes`.
 - Synthesis (phase E mandatory): overview updated (not a bare link list) + at least one topic/comparison/synthesis, all in `--writes`; otherwise `lint` reports `L7-synthesis-missing` and rolls back.
 - Finish: `lint` passes (promoted into the index), or failures land in `Review-Queue/` and the round is rolled back.
+- Reporting: quote the promoted count from `lint` separately; use `ingest-stats --json`
+  `page_inventory.total/by_type` for the complete delivered inventory — never use `pages_estimate` as the delivery total.

@@ -59,7 +59,7 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 | `page_rules.py` | 页正文确定性文本规则（纯函数原语） | `REQUIRED_SECTIONS`（键保留值已清空）、`REQUIRED_FRONTMATTER`、`missing_frontmatter`、`missing_sections`、`bare_pipe_wikilink_in_table`、`leading_h1_duplicates_filename`、`extract_question_stems`、`extract_propositions`、`footnote_*` |
 | `mdpage.py` | Markdown 页 frontmatter 读写（round-trip） | `read_page`、`write_page` |
 | `ingest_guards.py` | 写前守卫（写入边界 glob + 覆盖保护三条件 + registry 新鲜度） | `in_write_scope`、`can_overwrite`、`registry_fresh` |
-| `snapshots.py` | 就地 merge 前的文件快照 + 回滚（非 git） | `take_snapshot`、`rollback`、`cleanup` |
+| `snapshots.py` | 就地 merge 前的首份基线快照 + 核验 + 回滚（非 git） | `take_snapshot`、`verify_prewrite_entry`、`rollback`、`cleanup` |
 | `graph_model.py` | Knowledge Graph v2.0：published 页 → 图模型（topic_membership 骨架） | `build_graph_model`、`GRAPH_VERSION=2` |
 | `graph_analysis.py` | Knowledge Graph v2.0：Louvain 社区分析 | `analyze_graph` |
 | `graph_data.py` | Knowledge Graph v2.0：graph-data.generated.json 契约 | `to_graph_data`、`GRAPH_DATA_FILE` |
@@ -134,8 +134,8 @@ content-routing.md` 定义的 5 分类：理论型/方法型/案例型/参考型
 `skill-evolve` 修订路由表本身的证据来源）→ 按章逐窗 `show-window` 读取（难页带 `route-b-assets` 资产头）
 → 写 `status: proposed` 页（正文默认零装置，**推导折叠**不计预算、鼓励使用，其余装置——案例解剖/定位段/
 具名命题/误区 warning/图——一页至多启用一种，详见 §8）→ 经 `resolve-concept` 归一概念 → 阶段 E 写综合层
-（overview/topic/comparison/synthesis）。每次真实写盘前调 `check-write`（边界 + 覆盖保护）与
-`snapshot-page`（就地 merge 前快照）。
+（overview/topic/comparison/synthesis）。每次真实写盘前调 `check-write`（边界 + 覆盖保护；既有页
+自动保存首份基线）；`snapshot-page` 只保留为兼容命令，不能在编辑后补票。
 
 ### 1.7 校验 / 质量门流程
 
@@ -324,8 +324,8 @@ pdf-to-study-kb/
 | 打印窗口文本 | `show-window --source --window [--plain] [--verbose]` | `cmd_show_window` | windows + source.md + pages.jsonl | 终端（含 `route-b-assets` 资产头） | 窗不存在 → 报错 | `test_ingest_orchestration_cli.py` | 已实现（含 `--plain/--verbose`） |
 | 窗口记账 | `window-start --source --window --hash` / `window-done [--writes\|--writes-file --proposals]` / `window-fail --error` | `cmd_window_*` → `state_store.*_window` | 锁 | `ingest_progress` 行 + 锁心跳 | 未持锁 → 拒；`--writes` 与 `--writes-file` 同给 → 报错互斥 | `test_ingest_progress.py`、`test_doctor_cli.py` | 准确（`--writes-file` 为 2026-07-09 新增，见 §3.7b） |
 | 概念归一 | `resolve-concept --mention --domain [--alias --ref-source --ref-sections]` | `cmd_resolve_concept` → `concept_store.resolve_or_create_concept` | 概念页 | merge 或新建概念页 | 概念页损坏 → 报错 | `test_concept_store.py` | 准确 |
-| 写前守卫 | `check-write --source --path` | `cmd_check_write` → `ingest_guards.in_write_scope` + `can_overwrite` | workorder | ALLOW / DENY(exit 1) | 越界/human 页/hash 不符 → DENY | `test_ingest_guards.py` | 准确 |
-| 页快照 | `snapshot-page --source --path` | `cmd_snapshot_page` → `snapshots.take_snapshot` | vault 页 | `snapshots/<src>/<run>/` | — | `test_snapshots.py` | 准确 |
+| 写前守卫 | `check-write --source --path` | `cmd_check_write` → `_prepare_write` → scope/overwrite + 首份基线快照 | workorder + vault 页 | ALLOW / DENY(exit 1) | 越界/human/hash 不符拒绝；既有页由 window-done/lint 双重复核 | `test_ingest_orchestration_cli.py` | 准确 |
+| 页快照 | `snapshot-page --source --path` | 兼容入口，同样复用 `_prepare_write`；`take_snapshot` 合并 manifest 且不覆盖首份同路径基线 | vault 页 | `snapshots/<src>/<run>/` | 写后调用仍被 workorder hash 拒绝 | `test_snapshots.py` | 准确 |
 
 ### 3.5 收尾、提升与查询命令
 
@@ -362,7 +362,7 @@ pdf-to-study-kb/
 
 | 命令 | 实现函数 | 作用 | 测试 |
 |---|---|---|---|
-| `ingest-stats --source [--json]` | `cmd_ingest_stats` → `state_store.source_stats` | 只读代理指标：窗口成败/阶段耗时与重跑次数（同 stage 多行 = 重跑）/`lint_failures`（stage=lint 且 status=failed 的行数，≈回滚次数）/`pages_estimate`（finished 窗 write_set_json 去重计数）/`proposals_by_kind`（open/resolved 分布）。窗口耗时口径是**最后一次尝试**（`start_window` UPSERT 覆盖 `started_at`，非累计）；token/费用拿不到不伪造 | `test_ops_metrics_cli.py` |
+| `ingest-stats --source [--json]` | `cmd_ingest_stats` → `state_store.source_stats` + vault 归属扫描 | 只读代理指标：`pages_estimate` 仍是窗口账本估算，**不得当成交付总页数**；`page_inventory` 才是精确交付清单，它合并当前账本、来源台账与 vault 中 `source_refs` 指向本源的 published/proposed 页，reopen 后不会漏掉本轮未改的旧页。另含窗口成败/阶段重跑/`lint_failures`/`proposals_by_kind`。窗口耗时是**最后一次尝试**；token/费用拿不到不伪造 | `test_ops_metrics_cli.py` |
 | `proposals-resolve --id/--signature [--source] [--all-matching] [--apply]` | `cmd_proposals_resolve` → `state_store.resolve_review_proposals` | 失败信号退场：`--id`（可重复）精确选行，或 `--signature` 按 kind 批量（批量落库须显式 `--all-matching`，防误伤同类未修复的行）；只把 `status='open'` 的行改成 `'resolved'`；`--apply` 成功后自动重跑一次 `_refresh_skill_backlog` 让已修复簇立即退场 | `test_ops_metrics_cli.py` |
 | `reset-source --source --to {registered,profiled,converted,windowed,workorder_ready} [--apply]` | `cmd_reset_source` → `state_store.reset_source` | forward-only 状态机的确定性回退出口：只删 `source_stage_runs` 中回退目标之后阶段的行（这是 `should_run_stage` 的缓存来源，不删则同 `input_hash` 永远 `[skip]`）+ 插一条 `stage='reset'` 审计行；**不动** `ingest_progress`/`artifacts`/`work_orders`/`review_proposals`/staging 文件；拒绝 `running` 状态或持锁的 source；回退目标限定在预处理段（`RESETTABLE_TARGETS`），ingest 段请用既有的 `reopen` | `test_doctor_cli.py` |
 | `window-done ... --writes-file <path.json>` | `cmd_window_done`（新增分支） | 从 UTF-8 文件读 JSON 数组写入 `write_set_json`，绕开 Windows `conda run` 吞双引号导致 `--writes '[...]'` 变成非法 JSON 的老坑；与 `--writes` 显式互斥（同给报错，不静默优先） | `test_doctor_cli.py` |

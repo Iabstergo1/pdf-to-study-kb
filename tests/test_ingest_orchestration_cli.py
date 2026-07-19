@@ -55,6 +55,10 @@ def test_ingest_core_lifecycle_scenario(tmp_path):
     db = _prep_source(tmp_path)
 
     # workorder：推进状态 + 落 yaml + 状态库行 + 幂等 [skip]。
+    overview = tmp_path / "wiki" / "overview.md"
+    overview.parent.mkdir(parents=True, exist_ok=True)
+    overview.write_text("---\ntype: overview\nmanaged_by: pipeline\nstatus: published\n---\nOLD\n",
+                        encoding="utf-8")
     r = _run(["workorder", "--source", "note"], tmp_path)
     assert r.returncode == 0, r.stderr
     assert (tmp_path / "pipeline-workspace/staging/note/workorder.yaml").exists()
@@ -85,9 +89,6 @@ def test_ingest_core_lifecycle_scenario(tmp_path):
     assert ok.returncode == 0 and "ALLOW" in ok.stdout
     deny = _run(["check-write", "--source", "note", "--path", "index.generated.md"], tmp_path)
     assert deny.returncode != 0 and "DENY" in deny.stdout
-    page = tmp_path / "wiki" / "overview.md"
-    page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text("OLD", encoding="utf-8")
     r = _run(["snapshot-page", "--source", "note", "--path", "overview.md"], tmp_path)
     assert r.returncode == 0, r.stderr
     snaps = list((tmp_path / "pipeline-workspace/snapshots/note").rglob("manifest.json"))
@@ -104,6 +105,66 @@ def test_ingest_core_lifecycle_scenario(tmp_path):
     src = state_store.get_source(db, "note")
     assert (src["current_stage"], src["current_status"]) == ("ingested", "proposed")
     assert _run(["ingest-start", "--source", "note2"], tmp_path).returncode == 0
+
+
+def test_window_done_rejects_existing_page_edited_before_check_write(tmp_path):
+    """写后再补 check-write/snapshot 不得洗白；恢复基线后按正确顺序可通过。"""
+    db = _prep_source(tmp_path)
+    target = tmp_path / "wiki" / "overview.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original = "---\ntype: overview\nmanaged_by: pipeline\nstatus: published\n---\nORIGINAL\n"
+    target.write_text(original, encoding="utf-8")
+    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["show-window", "--source", "note", "--window", "w0000"], tmp_path).returncode == 0
+    assert _run(["window-start", "--source", "note", "--window", "w0000", "--hash", "h1"],
+                tmp_path).returncode == 0
+
+    target.write_text(original.replace("ORIGINAL", "EDITED-BEFORE-GUARD"), encoding="utf-8")
+    late = _run(["check-write", "--source", "note", "--path", "overview.md"], tmp_path)
+    assert late.returncode != 0 and "disk hash changed" in (late.stdout + late.stderr)
+    denied = _run(["window-done", "--source", "note", "--window", "w0000",
+                   "--writes", '["overview.md"]'], tmp_path)
+    assert denied.returncode != 0
+    assert "prewrite-snapshot" in (denied.stdout + denied.stderr)
+    assert state_store.window_states(db, "note")[0]["status"] == "running"
+
+    target.write_text(original, encoding="utf-8")
+    allowed = _run(["check-write", "--source", "note", "--path", "overview.md"], tmp_path)
+    assert allowed.returncode == 0 and "snapshot" in allowed.stdout
+    target.write_text(original.replace("ORIGINAL", "EDITED-AFTER-GUARD"), encoding="utf-8")
+    done = _run(["window-done", "--source", "note", "--window", "w0000",
+                 "--writes", '["overview.md"]'], tmp_path)
+    assert done.returncode == 0, done.stdout + done.stderr
+
+
+def test_resolve_concept_snapshots_before_merging_existing_page(tmp_path):
+    """resolve-concept 自己会改 frontmatter，不能把快照责任推给它之后的调用方。"""
+    db = _prep_source(tmp_path)
+    concept = tmp_path / "wiki" / "domains" / "misc" / "concepts" / "既有概念.md"
+    concept.parent.mkdir(parents=True, exist_ok=True)
+    original = (
+        "---\ntype: concept\ncanonical_id: concept.misc.existing\ncanonical_name: 既有概念\n"
+        "aliases: []\nscope: domain\ndomain: misc\nsource_refs: []\n"
+        "page_path: domains/misc/concepts/既有概念.md\nmanaged_by: pipeline\nstatus: published\n---\n"
+        "这是一张已经发布的既有概念页，正文在本轮 merge 之前必须保持可回滚。\n")
+    concept.write_text(original, encoding="utf-8")
+    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+
+    r = _run(["resolve-concept", "--mention", "既有概念", "--domain", "misc",
+              "--ref-source", "note", "--ref-sections", "A"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert concept.read_text(encoding="utf-8") != original
+    manifests = list((tmp_path / "pipeline-workspace/snapshots/note").rglob("manifest.json"))
+    assert len(manifests) == 1
+    data = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert [e["rel_path"] for e in data["entries"]] == [
+        "domains/misc/concepts/既有概念.md"]
+
+    snapshots = _load("snapshots")
+    snapshots.rollback(manifests[0])
+    assert concept.read_text(encoding="utf-8") == original
 
 
 def test_stale_lock_resume_and_recovery_scenario(tmp_path):

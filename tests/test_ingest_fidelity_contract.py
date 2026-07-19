@@ -77,3 +77,15 @@ def test_a3_skill_md_section9_scoped_to_pipeline_completion():
             f"[{tree_name}] SKILL.md §9 must scope itself to pipeline completion, not content acceptance"
         assert "kb-qa" in flat9, \
             f"[{tree_name}] SKILL.md §9 must point content acceptance at an independent kb-qa pass"
+
+
+def test_delivery_counts_use_exact_page_inventory_not_window_estimate():
+    """Reopen rounds can leave old pages outside this round's write ledger; delivery counts stay exact."""
+    for tree_name, tree in TREES.items():
+        finish = _flat(_read(tree, "references/finish-lint.md"))
+        skill = _flat(_read(tree, "SKILL.md"))
+        for name, text in (("finish-lint.md", finish), ("SKILL.md", skill)):
+            assert "page_inventory" in text, \
+                f"[{tree_name}] {name} must require the exact source-attributed page inventory"
+            assert "never use `pages_estimate` as the delivery total" in text, \
+                f"[{tree_name}] {name} must forbid reporting the window-ledger estimate as total pages"

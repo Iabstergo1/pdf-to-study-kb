@@ -18,8 +18,9 @@
   the "model family comparison". overview is a living
   synthesis and **must not degrade into a chapter list** — it navigates by concept/topic (chapters.json is a
   navigation aid, not the organizing spine) and its learning routes state **what the reader can do after each
-  leg**, not just the reading order. Before updating: `check-write` + `snapshot-page` (it is an existing
-  published seed), set `status: proposed`, add `source_refs`, and put it in `--writes`.
+  leg**, not just the reading order. Before updating: run `check-write` **before the edit** (ALLOW now
+  atomically preserves the existing seed's first baseline; no separate snapshot step), set `status: proposed`,
+  add `source_refs`, and put it in `--writes`.
 - **topic (mandatory for concept-heavy sources, else lint `topics-missing` blocks):** when a source yields
   many concepts (~≥6), **group them by topic into `topics/<中文主题名>.md`** (把同一主题下的若干相关概念聚成一组），each with a core synthesis + a per-source
   contribution table + open questions, wikilinking the related concepts — the categorization/navigation

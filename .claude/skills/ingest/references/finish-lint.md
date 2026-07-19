@@ -20,6 +20,11 @@
      or reopen its source) and simply re-run `lint`; do not redo this batch's work.
    - **Pass** → proposed promotes to `published`, folds into `index.generated.md`, rebuilds `_registry.yaml` (`aliases.md` is retired — aliases stay in concept frontmatter) + the derived reading layer (knowledge graph + `quiz-index.generated.md` + `propositions.generated.md`, publish-isolated: their failure never blocks publish), and cleans this source's stale `<src>-lint-*.md` failure reports. Report which pages were published.
    - **Fail（current-batch violations only）** → in-place merges are rolled back, the violation list goes to `wiki/Review-Queue/<src>-lint-*.md`; **stop** and give the user the violations + fix suggestions (edit pages and re-run `lint`, or use kb-review). **⚠ Rollback restores in-place-merged pages (`overview.md` / existing concept merges) to their pre-edit state — after fixing the violations you MUST re-apply those in-place edits before re-running `lint`, or the "updated overview" silently reverts to the seed (happened on two consecutive books; the `overview-seed` / `source-page-missing` gates now fail-closed on this).**
+5. After a publish pass, run `python scripts/pipeline.py ingest-stats --source <src> --json` and report two
+   counts separately: the exact promoted count printed by `lint`, and the source's complete vault inventory
+   from `page_inventory.total` / `page_inventory.by_type`. **Always use `page_inventory` for the delivered
+   page total; never use `pages_estimate` as the delivery total.** `pages_estimate` is a window-ledger estimate
+   retained for operational history; after reopen/partial rework it can omit unchanged pages from older rounds.
 
 ## Skipping phase E → lint blocks (no longer a soft warning)
 
@@ -43,6 +48,8 @@ acceptance for its own writing (2026-07-17/19 postmortems: the executor's own "a
 wrong twice).
 
 - Publish pass: `pipeline status` shows the source `lint / published`; `index.generated.md` includes the new pages (published only); **synthesis exists (no `L7-synthesis-missing`)**.
+- Delivery report: gives `lint`'s promoted count separately, then uses `ingest-stats --json`
+  `page_inventory.total/by_type` as the complete source-attributed inventory; never use `pages_estimate` as the delivery total.
 - Fail (current-batch violations): rolled back to pre-ingest, violations in Review-Queue, the source sits at `lint/failed` (the state machine allows a return to `ingest_waiting` to re-run after fixes).
 - Blocked by vault preflight (old published pages' render-safety): **no rollback and no `lint/failed` state** — the batch stays proposed intact; fix the old page(s) listed in `Review-Queue/vault-health-*.md`, then simply re-run `lint`.
 
