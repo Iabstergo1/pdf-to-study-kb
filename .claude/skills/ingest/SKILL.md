@@ -111,6 +111,11 @@ on a stale RESUME instead of emitting a half-true packet); otherwise auto-advanc
 
 ## 9. Acceptance criteria
 
+> Scope: these are **pipeline completion** criteria (structure / order / safety / provenance-accounting).
+> Content acceptance is not this session's call: it requires an independent kb-qa content-fidelity pass
+> plus a human decision on its report (`references/finish-lint.md`); the ingesting session reports
+> "published, pending content acceptance" and never declares acceptance for its own writing.
+
 - Preprocess: `workorder.yaml` generated; `ingest-start` took the lock + the stale-registry check passed;
   for PDFs, `source-audit` produced `reconciliation.json` + `evidence.json`, every dual-audit disagreement was
   arbitrated + materialized, and strict `preflight-eval` passes both `dual_audit` and `check_evidence_bundle`

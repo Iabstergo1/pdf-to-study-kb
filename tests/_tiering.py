@@ -37,6 +37,7 @@ FILE_TIERS = {
     "test_resume_ingest_smoke.py": ("cli",),
     # ---- skill 协议 / 文档契约 ----
     "test_command_docs.py": ("skill",),
+    "test_ingest_fidelity_contract.py": ("skill",),
     "test_skill_standard.py": ("skill",),
     # ---- fast：纯函数 / 直接模块 ----
     "test_arbitration.py": ("fast",),

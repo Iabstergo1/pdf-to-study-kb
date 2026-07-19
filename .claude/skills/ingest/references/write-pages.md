@@ -19,7 +19,27 @@ registry. If it aborts, regenerate the work order as prompted — **do not bypas
    绝不嵌入源图。
 6. 记账：每个非 source 页必须进本窗 `window-done --writes`（漏记 `unaccounted-write` 阻断）；
    最后一窗完成后必须先做阶段 E 综合层再 `ingest-done → lint`。
+7. 来源忠实：只写本源窗口文本实际支持的内容——本源无实质覆盖就不新建页、不扩写，断链改散文；
+   通用领域知识绝不冒充本源内容（详见 `## Source-fidelity contract`）。
 <!-- resume-critical:end -->
+
+## Source-fidelity contract (what "writing from the source" means)
+
+Every claim on a page attributed to this source (`source_refs: <src>`) must be supported by **this
+source's window text**. A number, parameter default, symbol name, or mechanism you cannot point to in
+`show-window` output does not belong on the page — however true it is in the wider world. Hard rules:
+
+- When there is **no substantive coverage in the current source → no new page, no padding.** Do not
+  create a concept page, and do not pad an existing one, from general knowledge the book itself doesn't cover.
+  (2026-07-19 postmortem: a complete `死锁` page was published for a book whose 389 pages never mention
+  the word — formally flawless, entirely source-less.)
+- **general domain knowledge must never be presented as this source's content** — writing it under this
+  source's `source_refs` launders provenance, the one thing lint can never catch. A fact that feels
+  "obviously true" but isn't in the window text stays out.
+- **Knowledge from another ingested source keeps its original attribution**: reference the existing page
+  with a wikilink; never restate it under this source's `source_refs`.
+- Tiebreaker when unsure: *would a reader auditing this page against the book find every claim?*
+  A thinner faithful page outranks a fuller laundered one.
 
 ## Phase C prelude: build whole-book understanding first (`chapters.json` = deterministic chapter map / navigation spine)
 
@@ -84,8 +104,10 @@ Sub-unit command detail:
 - U5: self-check primitives in `scripts/page_rules.py` (see "lint hard rules" below). **Also verify every
   `[[full-path]]` wikilink target in this window's pages actually exists on disk (or is written in this same
   window)** — CJK long filenames are easy to mistype, and linking a page you *plan* to write later is a
-  recurring way `broken-link` violations get introduced. If the target is missing: create it via
-  `resolve-concept` now, or rephrase as plain text — never account a page with a dangling link.
+  recurring way `broken-link` violations get introduced. If the target is missing: **rephrase as plain
+  text first** — only create the page via `resolve-concept` when this source's text has real coverage of
+  it (Source-fidelity contract above). Never create a page just to satisfy `broken-link` — that turns a
+  lint rule into a source-less page generator. Never account a page with a dangling link.
 - U6: `python scripts/pipeline.py window-done --source <src> --window <id> --writes '["<page>"]'` (on failure use `window-fail --error "<reason>"`). If the shell strips quotes from the JSON (Windows `conda run` gotcha), write the array to a UTF-8 file and pass `--writes-file <path.json>` instead.
 - U7: refresh the `## RESUME` block at the **top** of `digest.md` each window (the resume anchor; on
   resume say "continue" or run `scripts/resume-ingest.ps1`, both relocate via the RESUME block + `pipeline.py

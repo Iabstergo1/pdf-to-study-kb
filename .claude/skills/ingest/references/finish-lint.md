@@ -32,9 +32,17 @@ comparison / topic / synthesis (re-express needs_vision formulas as native KaTeX
 add worked examples to key concepts, trim redundant wikilinks to strong relations only), then
 `ingest-done → lint`. Incremental lint only promotes this round's pages; existing published pages are untouched.
 
-## Acceptance
+## Pipeline completion (not content acceptance)
 
-- Pass: `pipeline status` shows the source `lint / published`; `index.generated.md` includes the new pages (published only); **synthesis exists (no `L7-synthesis-missing`)**.
+`lint` passing means **structural publish only** — the order/safety/provenance gates held. It is NOT
+content acceptance: lint cannot verify that page content actually comes from the source (CLAUDE.md §7's
+stated audit limit). **Content acceptance requires an independent kb-qa content-fidelity pass** — run by
+a different session/agent than the one that wrote the pages — and a human decision on its report. The
+ingesting session reports its outcome as **"published, pending content acceptance"**; it never declares
+acceptance for its own writing (2026-07-17/19 postmortems: the executor's own "acceptable" verdict was
+wrong twice).
+
+- Publish pass: `pipeline status` shows the source `lint / published`; `index.generated.md` includes the new pages (published only); **synthesis exists (no `L7-synthesis-missing`)**.
 - Fail (current-batch violations): rolled back to pre-ingest, violations in Review-Queue, the source sits at `lint/failed` (the state machine allows a return to `ingest_waiting` to re-run after fixes).
 - Blocked by vault preflight (old published pages' render-safety): **no rollback and no `lint/failed` state** — the batch stays proposed intact; fix the old page(s) listed in `Review-Queue/vault-health-*.md`, then simply re-run `lint`.
 
