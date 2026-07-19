@@ -43,6 +43,7 @@ FILE_TIERS = {
     "test_arbitration.py": ("fast",),
     "test_chaptering.py": ("fast",),
     "test_concept_store.py": ("fast",),
+    "test_fidelity_probe.py": ("fast",),
     "test_graph_analysis.py": ("fast",),
     "test_graph_data.py": ("fast",),
     "test_graph_html.py": ("fast",),

@@ -229,6 +229,42 @@ def test_ingest_stats_unknown_source_exits_nonzero(tmp_path):
     assert "unknown source" in (r.stdout + r.stderr)
 
 
+def test_ingest_stats_unsourced_identifiers_advisory(tmp_path):
+    """B 组（2026-07-19）：反引号标识符查无于本源语料 → advisory 软信号；exit code 不变。"""
+    _seed_stats_db(tmp_path)
+    page = tmp_path / "wiki" / "domains" / "d" / "concepts" / "a.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "---\n"
+        "type: concept\nstatus: published\n"
+        "source_refs:\n- sections: ['1.1']\n  source: s1\n"
+        "---\n"
+        "参数 `covered_param` 有据；`phantom_sym` 与 `ghost_call()` 书里查无。\n",
+        encoding="utf-8")
+    staging = tmp_path / "pipeline-workspace" / "staging" / "s1"
+    staging.mkdir(parents=True)
+    (staging / "source.md").write_text("书原文只提到 covered_param 这一个参数。", encoding="utf-8")
+
+    r = _run(tmp_path, "ingest-stats", "--source", "s1", "--json")
+    assert r.returncode == 0, r.stdout + r.stderr
+    stats = json.loads(r.stdout)
+    ui = stats["unsourced_identifiers"]
+    assert ui == {"domains/d/concepts/a.md": ["ghost_call()", "phantom_sym"]}
+
+    r2 = _run(tmp_path, "ingest-stats", "--source", "s1")
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    assert "phantom_sym" in r2.stdout and "ghost_call()" in r2.stdout
+    assert "未命中" in r2.stdout  # 口径提示：未命中≠违规
+
+
+def test_ingest_stats_unsourced_identifiers_absent_without_staging(tmp_path):
+    """语料缺失（如 md 快路径无 staging source.md）→ 字段为空、不误报、exit 0。"""
+    _seed_stats_db(tmp_path)
+    r = _run(tmp_path, "ingest-stats", "--source", "s1", "--json")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads(r.stdout)["unsourced_identifiers"] == {}
+
+
 def test_ingest_stats_counts_empty_writes_unread(tmp_path):
     """静默遗漏信号：finished 且空写集、又从未经 show-window 读过的窗计数。"""
     db = _seed_stats_db(tmp_path)

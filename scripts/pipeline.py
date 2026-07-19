@@ -1936,15 +1936,30 @@ def cmd_ingest_stats(args):
             except ValueError:
                 pass
     usage = {"propositions": 0, "derivation_folds": 0, "questions": 0, "pages_scanned": 0}
+    # advisory 标识符溯源（B 组 2026-07-19）：反引号代码型 token 查无于 source_refs 语料 →
+    # 软信号（kb-qa triage 排序用）。未命中≠违规（演示 schema 合法）；永不进 lint / 不改退出码。
+    import fidelity_probe
+    probe_pages = []
+    corpora: dict[str, str] = {}
     for rel in sorted(src_pages):
         f = vault / rel
         if not f.exists():
             continue
-        _m, body = mdpage.read_page(f)
+        meta, body = mdpage.read_page(f)
         for k, v in page_rules.device_usage(body).items():
             usage[k] += v
         usage["pages_scanned"] += 1
+        refs = [r.get("source") for r in (meta.get("source_refs") or []) if isinstance(r, dict)]
+        refs = [s for s in refs if s]
+        for s in refs:
+            if s not in corpora:
+                sm = _staging_dir(s) / "source.md"
+                if sm.exists():
+                    corpora[s] = sm.read_text(encoding="utf-8", errors="ignore")
+        probe_pages.append((rel, body, refs))
     stats["device_usage"] = usage
+    stats["unsourced_identifiers"] = {
+        rel: missing for rel, missing in fidelity_probe.unsourced_identifiers(probe_pages, corpora)}
     if args.json:
         print(json.dumps(stats, ensure_ascii=False, indent=2))
         return
@@ -1971,6 +1986,10 @@ def cmd_ingest_stats(args):
         print("violations by kind (review_proposals):")
         for kind, k in sorted(stats["proposals_by_kind"].items()):
             print(f"  {kind}: total={k['total']} open={k['open']} resolved={k['resolved']}")
+    if stats["unsourced_identifiers"]:
+        print("unsourced_identifiers (advisory 溯源信号；未命中≠违规——演示 schema 等合法，供 kb-qa triage):")
+        for rel, missing in sorted(stats["unsourced_identifiers"].items()):
+            print(f"  {rel}: {', '.join(missing)}")
     for n in stats["notes"]:
         print(f"note: {n}")
 
