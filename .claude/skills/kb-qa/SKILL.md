@@ -57,6 +57,22 @@ This skill never promotes, rolls back, or edits content pages; fixes go to `kb-r
 | QA4 spot-check | page/formula/evidence samples | spot-check results | samples and conclusions traceable | report | sample missing |
 | QA5 file findings | actionable findings | Review-Queue proposal | no content-page edits | kb-qa proposal | duplicate proposal |
 
+### Evidence discipline (two rules that cost real rework when broken)
+
+**A "not in the source" verdict requires an exhaustive search, and the search must be shown.** Before
+writing that a term/number/mechanism is absent, search the source for the Chinese rendering, the English
+name, the abbreviation, and case/hyphen variants — then **record every search term** in the finding. A
+`single-language search` is the documented way this goes wrong: a 2026-07-19 audit declared "the book
+never mentions History 链表" after searching only `history list`, while the book used the Chinese form
+four times. The cost is asymmetric — a missed finding leaves one clause unfixed, but a **false** finding
+triggers a rewrite of a correct page, and every rewrite is a fresh chance to introduce an error.
+
+**A sampling PASS is not a clean bill for the page.** When you spot-check assertions rather than reading
+the page whole, the verdict covers **only the assertions actually sampled** — say so in the report, and
+later rounds must **never inherit** it as evidence that the page is clean. Three consecutive rounds on
+one source overturned pages that an earlier sampling round had marked clean; only an integral,
+per-assertion pass supports a page-level conclusion.
+
 ## 8. Failure stops / recovery
 
 vault/index missing; scope unclear; the request is really a semantic-health check (switch to

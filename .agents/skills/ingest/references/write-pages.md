@@ -41,6 +41,21 @@ source's window text**. A number, parameter default, symbol name, or mechanism y
 - Tiebreaker when unsure: *would a reader auditing this page against the book find every claim?*
   A thinner faithful page outranks a fuller laundered one.
 
+## No audit scars (writing a correction)
+
+When you fix a claim an audit flagged, **write the corrected knowledge and stop there** — the page is
+read by someone learning the subject, not by someone reviewing your rework. Concretely:
+
+- **Never narrate the correction.** No "this was corrected in the audit", "the previous version said",
+  "note the earlier error". The page has no version history a reader can see.
+- **Do not argue with the wrong version.** "X must be stated precisely: it is not Y" and "don't call this
+  Z" read as a rebuttal of a draft **the reader never saw the wrong version** of. State what is true.
+  (A genuine, source-supported "common misconception" note is fine — but only when the *source itself*
+  raises the confusion, not when the confusion was yours.)
+- Rationale from the 2026-07-19/20 postmortem: one rework round left audit narration on **14 pages**;
+  the next round removed the explicit references but left rebuttal phrasing at exactly the three
+  corrected spots — a fingerprint of the rework, visible to every future reader.
+
 ## Phase C prelude: build whole-book understanding first (`chapters.json` = deterministic chapter map / navigation spine)
 
 Before writing windows, read `staging/<src>/chapters.json` — produced **deterministically** by

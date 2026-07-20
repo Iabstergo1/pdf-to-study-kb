@@ -53,5 +53,24 @@ wrong twice).
 - Fail (current-batch violations): rolled back to pre-ingest, violations in Review-Queue, the source sits at `lint/failed` (the state machine allows a return to `ingest_waiting` to re-run after fixes).
 - Blocked by vault preflight (old published pages' render-safety): **no rollback and no `lint/failed` state** — the batch stays proposed intact; fix the old page(s) listed in `Review-Queue/vault-health-*.md`, then simply re-run `lint`.
 
+## Fixing audit findings (and knowing when a rework round is finished)
+
+A content audit hands back findings; how you fix each one decides what it costs to verify. **The two
+repair shapes have different risk, so treat them differently:**
+
+- **Deleting an unsupported clause** (drop the sentence, drop the parenthetical, drop the borrowed term)
+  **cannot introduce new unsupported content** — there is no new prose to be wrong. A diff showing that
+  only the disputed clause disappeared is sufficient verification, and the round closes there.
+- **Rewriting** replaces the clause with new sentences, and new prose is a fresh chance to introduce a
+  claim the source does not support. A rewritten page **needs a fresh independent pass** — the same
+  standard as any newly written page.
+
+So: **prefer the smallest diff-verifiable fix.** Delete or re-attribute against explicit source text
+before you reach for a rewrite; reserve full rewrites for pages whose substance is wrong, not pages
+carrying one unsupported clause. This is also the loop's termination condition — without it every small
+correction triggers another full audit and the rework never ends. (2026-07-20: the four final findings
+were fixed with three deletions and one re-attribution; the diff was verified once and the source was
+accepted. Every earlier regression in that book came from rewriting.)
+
 After publish, optionally run the `kb-postmortem` skill: proxy metrics + digest deviations + backlog delta
 into one retrospective report, so this book's lessons feed the skill-evolution loop instead of evaporating.
