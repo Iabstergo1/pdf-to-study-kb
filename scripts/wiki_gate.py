@@ -47,14 +47,52 @@ def collect_proposed(vault) -> list[dict]:
     return out
 
 
-def concepts_without_synthesis(pages: list[dict]) -> int:
-    """软提醒原语（非阻断）：本批 proposed 里产出了 concept 却没有任何综合层页
-    （overview/topic/comparison/synthesis）时，返回 concept 数；否则 0。阶段 E（综合层）是
-    一等产物，跳过它多半是漏做；但纯 lesson 的小源（如几行笔记）无综合层属正常，故只提醒不阻断。"""
+def _sources_with_synthesis(vault) -> frozenset[str]:
+    """已发布综合层页（overview/topic/comparison/synthesis）已覆盖过的 source id 集合。
+    供 concepts_without_synthesis 判断"这个来源的阶段 E 义务是否已被满足过"——首次入库
+    仍必须在本批带综合层页，但对已有综合层覆盖的来源做窄范围返工（只改既有 concept 的
+    局部措辞）不必每次重触综合层，否则会逼着写无实质内容的综合层编辑（历史教训：
+    broken-link 规则曾用同一逻辑逼出一整页无来源的"死锁"概念）。"""
+    vault = Path(vault)
+    out: set[str] = set()
+    for f in sorted(vault.rglob("*.md")):
+        rel = f.relative_to(vault).as_posix()
+        if rel in _DERIVED or rel.split("/")[0] in _EXCLUDE_TOP:
+            continue
+        meta, _ = mdpage.read_page(f)
+        if meta.get("type") not in ("overview", "topic", "comparison", "synthesis") \
+                or meta.get("status") != "published":
+            continue
+        for r in (meta.get("source_refs") or []):
+            if isinstance(r, dict) and r.get("source"):
+                out.add(r["source"])
+    return frozenset(out)
+
+
+def concepts_without_synthesis(pages: list[dict], *,
+                                covered_sources: frozenset[str] = frozenset()) -> int:
+    """本批 proposed 里产出了 concept 却没有任何综合层页（overview/topic/comparison/
+    synthesis）时，返回仍需追责的 concept 数；否则 0。阶段 E（综合层）是一等产物，跳过它
+    多半是漏做；但纯 lesson 的小源（如几行笔记）无综合层属正常，不计入。
+
+    covered_sources：已有已发布综合层页覆盖过的 source id 集合（见 _sources_with_synthesis）。
+    一个 concept 只有在"本批没带综合层页"且"它的 source_refs 里有来源不在 covered_sources
+    内"时才计入——已经满足过阶段 E 义务的来源，窄范围返工不必每次重触综合层；没有
+    source_refs 的 concept（无法判断来源是否已覆盖）保守计入，维持原有阻断。"""
     types = [p.get("meta", {}).get("type") for p in pages]
     n_concept = sum(t == "concept" for t in types)
     has_synth = any(t in ("overview", "topic", "comparison", "synthesis") for t in types)
-    return n_concept if (n_concept and not has_synth) else 0
+    if not n_concept or has_synth:
+        return 0
+    uncovered = 0
+    for p in pages:
+        if p.get("meta", {}).get("type") != "concept":
+            continue
+        srcs = {r.get("source") for r in (p.get("meta", {}).get("source_refs") or [])
+                if isinstance(r, dict) and r.get("source")}
+        if not srcs or not srcs.issubset(covered_sources):
+            uncovered += 1
+    return uncovered
 
 
 # 概念多的源必须有 topic 主题页做分类层（扁平概念之上的导航）；阈值以下的小源不强制。
@@ -421,8 +459,9 @@ def lint_pages(vault, pages: list[dict], *, phase_e: bool = True) -> list[dict]:
                     "散文组织（D-4 无强制小节；单个自然标题合法，成套旧骨架阻断）")
     # ── 阶段 E 概念批义务（ingest 专属；kb-save 会话模式 phase_e=False 跳过）──
     if phase_e:
-        # 综合层缺失（阶段 E 是一等产物，spec §3）：本批产出 concept 却无任何综合层页 → fail-closed
-        n_skip = concepts_without_synthesis(pages)
+        # 综合层缺失（阶段 E 是一等产物，spec §3）：本批产出 concept 却无任何综合层页 → fail-closed，
+        # 除非该 concept 的来源已有已发布综合层页覆盖过（窄返工轮不必每次重触综合层）
+        n_skip = concepts_without_synthesis(pages, covered_sources=_sources_with_synthesis(vault))
         if n_skip:
             hit("(synthesis-layer)", "L7-synthesis-missing",
                 f"本批产出 {n_skip} 个 concept 但无综合层页（overview/topic/comparison/synthesis）；"

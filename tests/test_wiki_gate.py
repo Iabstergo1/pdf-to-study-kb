@@ -253,6 +253,31 @@ def test_lint_blocks_concept_without_synthesis(tmp_path):
     assert not any(v["rule"] == "L7-synthesis-missing" for v in vs2)
 
 
+def test_lint_l7_skips_when_source_already_has_published_synthesis(tmp_path):
+    # 窄返工轮：来源 s1 早已有已发布 topic 综合层页覆盖；本轮只改一个既有 concept 的一句话，
+    # 批次里不带任何综合层页 → 不该触发 L7（阶段 E 义务对 s1 已被满足过，不必每次重触）
+    _page(tmp_path, "topics/t.md",
+          {"type": "topic", "status": "published", "source_refs": [{"source": "s1"}]},
+          "# T\n\n## 核心综合\n\nx\n\n## 各来源贡献\n\nx\n\n## 未解决问题\n\nx\n")
+    _page(tmp_path, "domains/d/concepts/x.md",
+          {"type": "concept", "status": "proposed", "canonical_id": "concept.d.x",
+           "canonical_name": "X", "domain": "d",
+           "source_refs": [{"source": "s1", "sections": ["1.1"]}]},
+          "# X\n\n## 一句话\n\nx\n\n## 直觉\n\nx\n\n## 形式化\n\nx\n\n"
+          "## 各章如何处理\n\nx\n\n## 与其他概念的关系\n\nx\n\n## 自测\n\n1?\n")
+    vs = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert not any(v["rule"] == "L7-synthesis-missing" for v in vs)
+    # 对照组：来源 s2 从未有任何已发布综合层页覆盖过 → 仍须阻断（保留首次入库的原有保护）
+    _page(tmp_path, "domains/d/concepts/y.md",
+          {"type": "concept", "status": "proposed", "canonical_id": "concept.d.y",
+           "canonical_name": "Y", "domain": "d",
+           "source_refs": [{"source": "s2", "sections": ["2.1"]}]},
+          "# Y\n\n## 一句话\n\ny\n\n## 直觉\n\ny\n\n## 形式化\n\ny\n\n"
+          "## 各章如何处理\n\ny\n\n## 与其他概念的关系\n\ny\n\n## 自测\n\n1?\n")
+    vs2 = wiki_gate.lint_pages(tmp_path, wiki_gate.collect_proposed(tmp_path))
+    assert any(v["rule"] == "L7-synthesis-missing" for v in vs2)
+
+
 def test_lint_blocks_concept_heavy_without_topic(tmp_path):
     # ≥6 concept 却无 topic 主题页 → 阻断（扁平概念缺分类导航层）
     CSEC = ("## 一句话\n\nx\n\n## 直觉\n\nx\n\n## 形式化\n\nx\n\n"
