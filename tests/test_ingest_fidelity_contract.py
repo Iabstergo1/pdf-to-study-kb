@@ -151,6 +151,26 @@ def test_c_zero_hit_verdict_requires_bilingual_search():
             f"[{tree_name}] kb-qa SKILL.md must name the single-language search as the failure"
 
 
+def test_c_search_normalizes_pdf_extraction_deformations():
+    """C 加固：判"来源中没有"前，检索须先归一 PDF 抽取形变，否则字面查无是假阳性。
+
+    2026-07-21 llm-fundamentals 复核实证：不做归一会把"其实在源里"的词误判为缺失，
+    触发对正确页面的重写。抽样阶段撞到 3 种（连字/断行/空格），全量通读又撞到 2 种
+    （逗号千分位 1,000、中文数字"连续三个"）——五种各需一种归一动作。
+    """
+    for tree_name, tree in TREES.items():
+        md = _kb_qa(tree)
+        for marker in (
+            "ligatures to their ASCII",   # 连字 ﬃ/ﬀ/ﬁ：Efficiency 存成 Eﬀiciency
+            "split across a line break",  # 断行连字符：Ac-⏎curately
+            "CJK",                        # 中英文间空格：Encoder-only架构 存成 Encoder-only 架构
+            "grouped form",               # 逗号千分位：页面 1000 → 源文 1,000
+            "Chinese numeral",            # 中文数字：页面"连续 3 个" → 源文"连续三个"
+        ):
+            assert marker in md, \
+                f"[{tree_name}] kb-qa SKILL.md missing the PDF-deformation normalization marker: {marker!r}"
+
+
 def test_d_sampling_pass_is_not_inheritable():
     """D：抽样 PASS 只覆盖被抽查的断言，后续轮次不得继承为整页结论。"""
     for tree_name, tree in TREES.items():

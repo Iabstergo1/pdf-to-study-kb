@@ -67,6 +67,26 @@ never mentions History 链表" after searching only `history list`, while the bo
 four times. The cost is asymmetric — a missed finding leaves one clause unfixed, but a **false** finding
 triggers a rewrite of a correct page, and every rewrite is a fresh chance to introduce an error.
 
+**Normalize five PDF extraction deformations before you conclude a term is absent.** A page's word can be
+verbatim in the source yet fail a naive string search because the extracted `source.md` mangled it. The
+2026-07-21 llm-fundamentals audit hit the first three at once (**20 false "not in source" candidates**),
+then the full page-by-page read surfaced two more — each of which, if believed, would have rewritten a
+correct page. Apply all five before the search, not after:
+
+1. **Ligatures** — the PDF stores `ﬃ`/`ﬀ`/`ﬁ`/`ﬂ` (single code points, e.g. U+FB03) so `Efficiency` is
+   `Eﬀiciency`, `Parameter-Efficient` is `Parameter-Eﬀicient`. Expand ligatures to their ASCII letters.
+2. **Line-break hyphenation** — a word split across a line break keeps its hyphen: `Accurately` becomes
+   `Ac-`⏎`curately`, `Prefixes` becomes `Pre-`⏎`fixes`. Rejoin `-`⏎ before searching.
+3. **CJK–Latin spacing** — the extractor inserts a space between CJK and Latin runs, so `Encoder-only架构`
+   is stored as `Encoder-only 架构`. Collapse all whitespace (this also covers the plain
+   Chinese/English/abbreviation/case/hyphen variants above).
+4. **Thousands separator** — the page writes `1000` but the source prints the grouped form `1,000`
+   (ROME's "1000 条知识" is `1,000` in the source). Strip `,` from digit runs before matching numbers.
+5. **Chinese numerals** — the page writes an Arabic digit but the source uses the Chinese numeral
+   (T5's "连续 3 个" is `连续三个` in the source). Try the 一/二/三… form of any small integer.
+
+Record the normalized form you searched, not just the raw term.
+
 **A sampling PASS is not a clean bill for the page.** When you spot-check assertions rather than reading
 the page whole, the verdict covers **only the assertions actually sampled** — say so in the report, and
 later rounds must **never inherit** it as evidence that the page is clean. Three consecutive rounds on
