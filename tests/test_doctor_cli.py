@@ -380,3 +380,32 @@ def test_retract_seeds_missing_overview_and_rebuilds(tmp_path):
     r3 = _run(["retract-source", "--source", "gone", "--apply"], tmp_path)
     assert r3.returncode == 0, r3.stdout + r3.stderr
     assert ov.read_bytes() == before                                   # 幂等：不重复覆盖
+
+
+# ---- profile UX：docx/pptx 不再打印误导性 "0 pages" ----
+
+def test_profile_docx_no_misleading_zero_pages(tmp_path):
+    # docx/pptx 无页概念，profile 返回空 pages；用户输出不再显示 "0 pages"，改说页数由 source-convert 确定。
+    assert _run(["init-vault"], tmp_path).returncode == 0
+    doc = tmp_path / "raw" / "d.docx"
+    doc.parent.mkdir(parents=True, exist_ok=True)
+    doc.write_bytes(b"PK\x03\x04 dummy")                              # profile 对 docx 返回 []，无需真 docx
+    assert _run(["add-source", "--source", "d1", "--domain", "misc",
+                 "--path", str(doc), "--fmt", "docx"], tmp_path).returncode == 0
+    r = _run(["profile", "--source", "d1"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "0 pages" not in r.stdout                                  # 不再误导
+    assert "source-convert" in r.stdout                              # 说明页数何时确定
+    assert (tmp_path / "pipeline-workspace/staging/d1/pages.jsonl").exists()  # 语义不变：仍落 pages.jsonl
+
+
+def test_profile_md_still_reports_page_count(tmp_path):
+    # Markdown/PDF 原有页数输出不变。
+    assert _run(["init-vault"], tmp_path).returncode == 0
+    note = tmp_path / "raw" / "n.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# A\n\naaa\n", encoding="utf-8")
+    assert _run(["add-source", "--source", "m1", "--domain", "misc",
+                 "--path", str(note), "--fmt", "md"], tmp_path).returncode == 0
+    r = _run(["profile", "--source", "m1"], tmp_path)
+    assert "1 pages" in r.stdout and "needs_vision" in r.stdout       # md 页数输出不变

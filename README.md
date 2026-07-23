@@ -81,7 +81,7 @@ python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yam
 > **Claude Code 与 Codex 二选一即可**：两者各读自己的项目真值（[`CLAUDE.md`](CLAUDE.md) / [`AGENTS.md`](AGENTS.md)）与各自的 skill 树（[`.claude/skills/`](.claude/skills/) 与 [`.agents/skills/`](.agents/skills/)，两树**协议 / 语义对等**——仅各自的 project-truth 指针不同），且**调用同一套 CLI、操作同一个 `wiki/`**，因此确定性行为一致；调用界面、权限与写作质量因 agent 而异。你**无需两个都装**。
 
 > [!NOTE]
-> 必需依赖只有 **PyMuPDF + PyYAML**（见 [`requirements.txt`](requirements.txt)）。
+> **基础/开发依赖**：**PyMuPDF + PyYAML**（+ pytest 供测试；见 [`requirements.txt`](requirements.txt)）——覆盖 Markdown 与 PDF fast path。**生产格式依赖**：strict PDF 双审、扫描 PDF、DOCX、PPTX **必须装 MinerU**（见下方 TIP，未装则 fail-closed、不伪装成功）。
 > 默认 fast path 视觉保真走 route B：`source-convert` 用 PyMuPDF 抽文本，**难页（公式 / 矢量图 / 表 / 图表标题）高召回渲染整页 PNG**，由 ingest **读图**保真（公式写 KaTeX）。fast path 不依赖重型 OCR/ML。
 
 > [!TIP]
@@ -192,7 +192,7 @@ pdf-to-study-kb/
 ├── CLAUDE.md                 # Claude Code 的项目真值（架构 / 约束 / 协作）
 ├── AGENTS.md                 # Codex 的项目真值（与 CLAUDE.md 对等）
 ├── README.md                 # 本文件
-├── requirements.txt          # 仅 PyMuPDF + PyYAML + pytest
+├── requirements.txt          # 基础依赖 PyMuPDF + PyYAML + pytest（生产格式另需 MinerU，见末尾可选段）
 ├── scripts/
 │   ├── pipeline.py           # ⭐ 唯一 CLI 入口（46 子命令，全部业务逻辑在此）
 │   ├── state_store.py / locks.py                # 业务 SQLite 状态机 / 单-ingest 并发锁

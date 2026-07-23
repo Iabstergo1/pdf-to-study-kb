@@ -32,8 +32,9 @@
 | 必需 | 说明 | 证据 |
 |------|------|------|
 | Python 3.12+ | 跑确定性 CLI | `requirements.txt`、README §安装 |
-| PyMuPDF + PyYAML | 唯一必需的 Python 依赖（pytest 供测试） | `requirements.txt` |
-| Claude Code 或 Codex | 对话接口，**二选一即可**（行为对等） | README §安装 |
+| PyMuPDF + PyYAML（+ pytest） | **基础/开发依赖**：Markdown 与 PDF fast path 抽取、测试 | `requirements.txt` |
+| MinerU | **生产格式依赖**：strict PDF 双审、扫描 PDF、DOCX、PPTX 必须安装（未装则 fail-closed） | `requirements.txt` 末尾 MinerU 段 / `scripts/install_mineru.py` |
+| Claude Code 或 Codex | 对话接口，**二选一即可**（确定性行为一致） | README §安装 |
 | 项目本体 | 克隆到本地（示例：`D:\pdf-to-study-kb`） | — |
 | Obsidian（可选） | 阅读成品 vault | README §安装 |
 | MinerU（可选） | PDF 严格验收的复核后端 + 扫描/低文本 PDF、DOCX/PPTX 的主解析器 | `requirements.txt` 末尾、README §安装 |

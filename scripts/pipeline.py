@@ -109,7 +109,12 @@ def cmd_profile(args):
             print(f"[WARN] scanned_source / requires_ocr：{len(pages)} 页近乎整本零文本+图像——"
                   f"route B 不适用（不让 LLM 临场 OCR 上千整页图）；source-convert 将 fail-closed，需 OCR route。",
                   file=_sys.stderr)
-        print(f"[OK] profiled → {len(pages)} pages ({n_vision} needs_vision)")
+        if src_row["format"] in ("docx", "pptx"):
+            # docx/pptx 无页概念：profile 不逐页扫（返回空 pages，语义正常）。不打印误导性 "0 pages"。
+            print(f"[OK] profiled → 页数在 profile 阶段不适用（{src_row['format']} 无页概念，"
+                  f"由 MinerU source-convert 确定）")
+        else:
+            print(f"[OK] profiled → {len(pages)} pages ({n_vision} needs_vision)")
     except Exception as e:
         state_store.fail_stage(db, args.source, "profiled", error=str(e))
         raise
@@ -155,7 +160,7 @@ def cmd_source_convert(args):
         state_store.record_artifact(db, args.source, kind="chapters", path=res["chapters_path"], sha256=res["chapters_sha"])
         state_store.record_artifact(db, args.source, kind="blocks", path=res["blocks_path"], sha256=res["blocks_sha"])
         state_store.record_artifact(db, args.source, kind="parse_report", path=res["parse_report_path"], sha256=res["parse_report_sha"])
-        n_assets = _sync_assets(args.source)  # 难页 PNG 入 vault（公式嵌图依赖；任意源通用）
+        n_assets = _sync_assets(args.source)  # 难页 PNG 入 vault（难页源图作为可追溯证据；发布正文绝不嵌源图 D-1；任意源通用）
         state_store.complete_stage(db, args.source, "converted", output_hash=res["sha256"])
         print(f"[OK] converted → {res['source_md']} (backend={res['backend']}; "
               f"needs_vision pages: {res['needs_vision_pages']}; synced {n_assets} PNG → vault assets)")
@@ -166,10 +171,11 @@ def cmd_source_convert(args):
 
 def _sync_assets(source_id: str) -> int:
     """把 staging 难页 PNG 复制进 wiki/assets/<src>/（确定性、幂等）。
-    公式 lesson/concept 嵌入 `![[assets/<src>/pXXXX.png]]` 需图在 vault 内才不断链——
+    难页源图作为**可追溯证据**随来源留存在 vault（供审计/回源核对）——**发布正文绝不嵌入源图**
+    （D-1：route B 下公式写原生 KaTeX、表 Markdown/散文、图 mermaid/散文重建）。
     对任意有 needs_vision 页的来源通用（不止某本书）。返回本次复制/更新的文件数。
     C2：源目录含 staging/<src>/assets（PyMuPDF/MinerU 难页图）**与 staging/<src>/arbitration
-    （仲裁 render 决策补渲染的整页图）**——后者曾被漏同步，导致引用 arbitration 渲染页的 lesson 断链。"""
+    （仲裁 render 决策补渲染的整页图）**——两处都须完整同步（后者曾被漏同步）。"""
     import shutil
     import hashlib
     staging = _staging_dir(source_id)
@@ -198,7 +204,7 @@ def _sync_assets(source_id: str) -> int:
 
 
 def cmd_sync_assets(args):
-    """把本源 staging 难页 PNG 同步进 vault（供公式页嵌图）。预处理/重开会自动调用，亦可单独跑。"""
+    """把本源 staging 难页 PNG 同步进 vault（难页源图作为可追溯证据留存）。预处理/重开会自动调用，亦可单独跑。"""
     n = _sync_assets(args.source)
     print(f"[OK] synced {n} source-page PNG(s) -> wiki/assets/{args.source}/")
 
@@ -940,7 +946,7 @@ def cmd_reopen(args):
     except state_store.InvalidTransition as e:
         raise SystemExit(str(e))
     path, wo, _ohash = _record_workorder(db, args.source, src_row, staging)
-    n_assets = _sync_assets(args.source)  # 幂等：确保公式页源图已在 vault，供增量嵌图
+    n_assets = _sync_assets(args.source)  # 幂等：确保难页源图作为可追溯证据已在 vault
     print(f"[OK] reopened '{args.source}' for incremental ingest "
           f"(workorder 重建 → {path}, registry {wo['registry']['hash'][:12]}, synced {n_assets} PNG); "
           "next: ingest-start → window-start/写页/window-done → ingest-done → lint（增量 promote）")
@@ -1778,7 +1784,8 @@ def cmd_lint(args):
     concept_store.write_registry(vault, registry)
     concept_store.remove_stale_aliases(vault)
     wiki_gate.write_index(vault)
-    # 派生阅读层（publish-isolated，不阻断发布）：发布/registry/aliases/index 已成功，再建知识图谱
+    # 派生阅读层（publish-isolated，不阻断发布）：发布/registry/index 已成功（aliases.md 已退休，
+    # remove_stale_aliases 只清残留、不再重建），再建知识图谱
     # （graph-data + 力导向 HTML）；任何失败只 warn、保留旧产物，不改 lint 退出码。
     try:
         _rebuild_graph_artifacts(vault)
@@ -1806,11 +1813,11 @@ def cmd_lint(args):
     if snap_dir.exists():
         shutil.rmtree(snap_dir)
     if session_mode:
-        print(f"[OK] lint passed: promoted {n} pages; index/registry/aliases rebuilt;"
+        print(f"[OK] lint passed: promoted {n} pages; index/registry rebuilt;"
               f" kb-save session {args.session} published")
     else:
         state_store.complete_stage(db, args.source, "lint", output_hash=ihash)
-        print(f"[OK] lint passed: promoted {n} pages; index/registry/aliases rebuilt; source published")
+        print(f"[OK] lint passed: promoted {n} pages; index/registry rebuilt; source published")
 
 
 def cmd_promotion_candidates(args):

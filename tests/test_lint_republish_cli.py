@@ -69,6 +69,8 @@ def test_lint_pass_publishes_and_builds_all_derived_layers(tmp_path):
     assert _run(["ingest-done", "--source", "note"], tmp_path).returncode == 0
     r = _run(["lint", "--source", "note"], tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
+    # UX：lint 成功输出须与实际行为一致——重建 index/registry；`aliases.md` 已退休，不再谎报 rebuilt。
+    assert "index/registry rebuilt" in r.stdout and "aliases" not in r.stdout
 
     # ① 两阶段发布收尾：状态机 published、页 promote、index/log 更新。
     src = state_store.get_source(db, "note")
