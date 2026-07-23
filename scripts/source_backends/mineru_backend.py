@@ -20,7 +20,9 @@ from source_backends import BackendUnavailable
 # v2：middle.json 深解析（per-page 识别置信度 → ocr_low_confidence 旗标 + parse_report.pages）。
 # v3：table 块并入 caption/footnote + 复制表区域源图 asset（HTML 可能有误，留源图供 LLM 核验）。
 # v4：table→t{n} / image·chart→f{n} 稳定 element_id；相邻跨页表片段共享 element_id（保守链接）。
-MINERU_ADAPTER_VERSION = "4"
+# v5：list/index 条目读 list_items（Office 后端列表/目录正文无 text 键，旧版只读 text→归一成空块、
+#     静默丢正文）。归一逻辑实质变化→升版使存量 DOCX/PPTX/扫描 converted 缓存自动失效、强制重转换。
+MINERU_ADAPTER_VERSION = "5"
 DEFAULT_TIMEOUT_SECONDS = 1800
 
 
@@ -68,6 +70,33 @@ def _join_caption(cap) -> str:
     return str(cap or "")
 
 
+def _join_list_items(items) -> str:
+    """MinerU content_list 的 list/index 条目正文（list_items）→ 保序、保层级缩进的多行文本（空 → ""）。
+
+    MinerU 3.x Office 后端（DOCX/PPTX）对 list/index 产 {type, list_items:[...]}，条目**无 text 键**：
+    - v1（make_blocks_to_content_list，项目默认读的 *_content_list.json）：list_items 是已带缩进 +
+      `- `/`N. ` 前缀的字符串 → 原样保留（仅去尾空白，前导缩进不动）。
+    - v2（make_blocks_to_content_list_v2，防御性支持）：{prefix, item_content} dict，缩进在 prefix 内
+      → 保留 prefix 前导缩进后拼接（不 strip 前导，否则丢层级）。
+    只拼非空条目；缺失/非 list → ""（调用方 text 兜底）。
+    """
+    if not isinstance(items, list):
+        return ""
+    lines = []
+    for x in items:
+        if isinstance(x, dict):
+            prefix = str(x.get("prefix", "")).rstrip()        # 保留前导缩进，仅去尾空白
+            content = str(x.get("item_content") or x.get("text") or "").strip()
+            if not content:
+                continue
+            s = f"{prefix} {content}" if prefix.strip() else prefix + content
+        else:
+            s = str(x).rstrip()
+        if s.strip():
+            lines.append(s)
+    return "\n".join(lines)
+
+
 def normalize_content_list(items, *, assets_src_dir, assets_out_dir):
     """MinerU content_list.json items（按阅读顺序）→ (list[SourceBlock], discarded_count)。
 
@@ -94,8 +123,13 @@ def normalize_content_list(items, *, assets_src_dir, assets_out_dir):
             blocks.append(sa.SourceBlock(type="heading", text=it.get("text", ""),
                                          text_level=int(it.get("text_level")), risk_flags=[], **common))
             prev_table = None
-        elif t in ("text", "list"):
+        elif t == "text":
             blocks.append(sa.SourceBlock(type="text", text=it.get("text", ""), risk_flags=[], **common))
+            prev_table = None
+        elif t in ("list", "index"):
+            # Office 后端列表/目录正文在 list_items（条目无 text 键）；读 list_items，text 兜底，防静默丢正文。
+            text = _join_list_items(it.get("list_items")) or it.get("text", "")
+            blocks.append(sa.SourceBlock(type="text", text=text, risk_flags=[], **common))
             prev_table = None
         elif t == "table":
             body = it.get("table_body") or it.get("html") or it.get("text") or ""

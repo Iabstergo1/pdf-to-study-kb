@@ -395,7 +395,21 @@ def test_converted_input_hash_includes_versions(tmp_path):
     h = source_convert.converted_input_hash(src)
     import source_profile as _sp
     import source_artifacts as _sa
+    from source_backends import mineru_backend as _mb
+    # profiler/artifact/adapter 三版本都折进缓存键（归一逻辑改版必须 cache-bust 存量产物）。
     assert _sp.PROFILER_VERSION in h and _sa.ARTIFACT_VERSION in h
+    assert _mb.MINERU_ADAPTER_VERSION in h
+
+
+def test_converted_input_hash_changes_with_adapter_version(tmp_path, monkeypatch):
+    # adapter 版本变化 → 缓存键变化 → 存量 DOCX/PPTX converted 自动失效、强制按新归一重转换。
+    src = tmp_path / "n.md"
+    src.write_text("x", encoding="utf-8")
+    from source_backends import mineru_backend as _mb
+    h_before = source_convert.converted_input_hash(src)
+    monkeypatch.setattr(_mb, "MINERU_ADAPTER_VERSION", _mb.MINERU_ADAPTER_VERSION + "-bumped")
+    h_after = source_convert.converted_input_hash(src)
+    assert h_before != h_after
 
 
 def test_pymupdf_backend_raises_backendunavailable_when_fitz_missing(tmp_path, monkeypatch):

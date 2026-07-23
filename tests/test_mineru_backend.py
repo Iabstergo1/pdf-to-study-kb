@@ -133,6 +133,43 @@ def test_normalize_separate_tables_text_between_get_different_ids(tmp_path):
     assert [b.element_id for b in blocks if b.type == "table"] == ["t0001", "t0002"]
 
 
+def test_normalize_reads_list_items_not_text(tmp_path):
+    # MinerU 3.4.0 的 Office(DOCX/PPTX) 后端对列表/目录产 {type:'list'/'index', list_items:[...]}，
+    # 条目**无 text 键**（output_builders.make_blocks_to_content_list）；归一必须读 list_items，
+    # 否则列表/目录正文归一成空块、正文静默丢失而 strict 仍误判通过（本轮 P0）。
+    items = [
+        {"type": "list", "list_items": ["- Evidence", "- State", "- Publication"], "page_idx": 0},
+        {"type": "index", "list_items": ["1. 前言", "2. 正文"], "page_idx": 0},
+    ]
+    blocks, _ = mb.normalize_content_list(items, assets_src_dir=tmp_path,
+                                          assets_out_dir=tmp_path / "o" / "assets")
+    assert [b.type for b in blocks] == ["text", "text"]
+    assert blocks[0].text.splitlines() == ["- Evidence", "- State", "- Publication"]  # 保序逐条成行
+    assert "前言" in blocks[1].text and "正文" in blocks[1].text                       # 目录(index)同样保全
+
+
+def test_normalize_list_falls_back_to_text_when_no_items(tmp_path):
+    # 兜底：list_items 缺失/为空时仍读 text（不因新逻辑回退丢内容）。
+    items = [{"type": "list", "text": "单行列表正文", "page_idx": 0},
+             {"type": "list", "list_items": [], "text": "空 list_items 回退", "page_idx": 0}]
+    blocks, _ = mb.normalize_content_list(items, assets_src_dir=tmp_path,
+                                          assets_out_dir=tmp_path / "o" / "assets")
+    assert blocks[0].type == "text" and "单行列表正文" in blocks[0].text
+    assert "空 list_items 回退" in blocks[1].text
+
+
+def test_normalize_list_items_v2_dict_preserves_indent(tmp_path):
+    # 防御性支持 MinerU v2 list_items（{prefix,item_content} dict，缩进在 prefix 内）：层级缩进须保留。
+    items = [{"type": "list", "page_idx": 0, "list_items": [
+        {"prefix": "-", "item_content": "顶层"},
+        {"prefix": "    -", "item_content": "嵌套一层"},
+        {"prefix": "1.", "item_content": "有序项"},
+    ]}]
+    blocks, _ = mb.normalize_content_list(items, assets_src_dir=tmp_path,
+                                          assets_out_dir=tmp_path / "o" / "assets")
+    assert blocks[0].text.splitlines() == ["- 顶层", "    - 嵌套一层", "1. 有序项"]  # 前导缩进保留
+
+
 def test_render_source_md_assigns_char_spans(tmp_path):
     blocks, _ = mb.normalize_content_list(_fake_content_list(),
                                           assets_src_dir=tmp_path, assets_out_dir=tmp_path / "a")

@@ -1,7 +1,7 @@
 """L4 调用与评测层：确定性预处理产物验收（零-LLM，纯函数 + check_*）。
 
 读 staging/<source>/ 的 blocks.jsonl / windows.jsonl / parse_report.json / reconciliation.json /
-evidence.json（+ 可选 pages.jsonl / arbitration/decisions.json / assets/），对预处理产物做 12 项确定性
+evidence.json（+ 可选 pages.jsonl / arbitration/decisions.json / assets/），对预处理产物做 13 项确定性
 结构检查，产出可 CI 化的 JSON 报告。验收的不是"双审跑没跑"，而是"交给 ingest LLM 的证据是否完整闭环"。
 
 只在既有确定性产物上做结构断言：不调用任何模型、不做任何召回式查询，纯逐项检查。每个 check_* 是独立纯函数
@@ -23,7 +23,8 @@ import arbitration   # 分歧闭环验收（check_closure）
 __all__ = ["evaluate", "check_artifact_schema", "check_page_coverage",
            "check_window_monotonic", "check_window_contract", "check_asset_traceability",
            "check_dual_audit", "check_evidence_bundle", "check_risk_coverage", "check_risk_signals",
-           "check_orphan_blocks", "check_source_ref_integrity", "check_detection_distribution"]
+           "check_orphan_blocks", "check_source_ref_integrity", "check_content_retention",
+           "check_detection_distribution"]
 
 # 四层必备字段契约（artifact contract gate）：
 _REQUIRED_REPORT = ("source_type", "selected_backend", "backend_reason")   # L1
@@ -308,6 +309,35 @@ def check_source_ref_integrity(blocks: list, windows: list) -> dict:
     return _check("source_ref_integrity", "high", "ok", "source_ref 全部规范且被窗覆盖")
 
 
+def check_content_retention(report: dict, blocks: list) -> dict:
+    """内容保全（结构化后端）：mineru 归一后 text/heading 块正文不应为空 → high/fail。
+
+    mineru 的块是语义单元——空 text/heading（且无 asset 兜底）意味着归一化把源正文丢了：典型是
+    MinerU 对 DOCX/PPTX 列表/目录产 list_items（无 text 键），旧适配器只读 text → 空块，而结构齐全、
+    strict 全绿，正文却已从 LLM 输入消失。此门把"结构齐全 ≠ 内容完整"从事后反例变成可 CI 化硬门。
+    pymupdf 是页粒度块（空白/扫描页空文本合法，扫描页另有源图 asset），逐块判空不适用 → info/ok。
+    带 asset_path 的空文本块豁免（内容在源图里，由 check_asset_traceability 另行校验）。"""
+    if report.get("selected_backend") != "mineru":
+        return _check("content_retention", "info", "ok",
+                      f"backend={report.get('selected_backend', 'unknown')}，结构化逐块内容保全不适用")
+    empty = []
+    for b in blocks:
+        if b.get("type") not in ("text", "heading"):
+            continue
+        if (b.get("text") or "").strip():
+            continue
+        if b.get("asset_path"):
+            continue
+        empty.append(b.get("source_ref") or b.get("block_id") or "?")
+    if empty:
+        shown = ", ".join(str(x) for x in empty[:20])
+        return _check("content_retention", "high", "fail",
+                      f"{len(empty)} 个 text/heading 块正文为空且无 asset 兜底（疑归一化丢正文，"
+                      f"如 MinerU 列表/目录 list_items 未读）：{shown}")
+    return _check("content_retention", "high", "ok",
+                  f"mineru {len(blocks)} 块内容保全（无空 text/heading 块）")
+
+
 def check_detection_distribution(pages: list, *, ratio_high=None) -> dict:
     """观测：难页(needs_vision)比例异常高 → 疑检测阈值在本文档上过召回（warn，不阻断）。
 
@@ -333,7 +363,7 @@ def _read_jsonl(path: Path) -> list:
 
 
 def evaluate(staging_dir) -> dict:
-    """对一个 staging/<source>/ 目录跑 12 项检查，返回 CI 化 JSON 报告（纯函数 + I/O 读取）。
+    """对一个 staging/<source>/ 目录跑 13 项检查，返回 CI 化 JSON 报告（纯函数 + I/O 读取）。
 
     形状：{source_id, source_type, selected_backend, generated_by:"preflight-eval",
            checks:[...], summary:{ok,warn,fail}}。
@@ -376,6 +406,7 @@ def evaluate(staging_dir) -> dict:
         check_risk_signals(report, low_confidence_pages=report.get("low_confidence_pages", [])),
         check_orphan_blocks(blocks, windows),
         check_source_ref_integrity(blocks, windows),
+        check_content_retention(report, blocks),
         check_detection_distribution(pages),
     ]
     summary = {
