@@ -699,8 +699,9 @@ python -m pytest tests --collect-only -q --basetemp=$bt   # 只看分层收集
 `check_artifact_schema` / `check_page_coverage` / `check_window_monotonic` / `check_window_contract` /
 `check_asset_traceability` / `check_dual_audit` / `check_evidence_bundle` / `check_risk_coverage` /
 `check_risk_signals`（扫描·OCR） / `check_orphan_blocks`（孤儿块） / `check_source_ref_integrity` /
-`check_content_retention`（仅 mineru 后端：空 text/heading 块且无 asset = 归一丢正文，如 Office 列表
-`list_items` 未读） / `check_detection_distribution`。`--strict` 遇 high/fail → exit 2。
+`check_content_retention`（读 mineru 报告的 `content_dropped` = `count_content_drops`：源条目在**未读的
+list 字段**带内容却归一成空文本的条目数，如 Office 列表 `list_items` 未读；凭 provenance 区分真空白 vs
+漏读——真空白页/扫描空白页 `content_dropped=0`，不误伤） / `check_detection_distribution`。`--strict` 遇 high/fail → exit 2。
 
 **lint 发布门禁规则集 = 33 个违规标识**（`wiki_gate.lint_pages`/`render_safety_violations`/
 `lint_risk_traceability` + `pipeline.cmd_lint` 自身，order/safety/provenance；2026-07-12 静态提取核对）：

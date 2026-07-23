@@ -309,33 +309,23 @@ def check_source_ref_integrity(blocks: list, windows: list) -> dict:
     return _check("source_ref_integrity", "high", "ok", "source_ref 全部规范且被窗覆盖")
 
 
-def check_content_retention(report: dict, blocks: list) -> dict:
-    """内容保全（结构化后端）：mineru 归一后 text/heading 块正文不应为空 → high/fail。
+def check_content_retention(report: dict) -> dict:
+    """内容保全（结构化后端）：MinerU 归一漏读源正文 → high/fail。
 
-    mineru 的块是语义单元——空 text/heading（且无 asset 兜底）意味着归一化把源正文丢了：典型是
-    MinerU 对 DOCX/PPTX 列表/目录产 list_items（无 text 键），旧适配器只读 text → 空块，而结构齐全、
-    strict 全绿，正文却已从 LLM 输入消失。此门把"结构齐全 ≠ 内容完整"从事后反例变成可 CI 化硬门。
-    pymupdf 是页粒度块（空白/扫描页空文本合法，扫描页另有源图 asset），逐块判空不适用 → info/ok。
-    带 asset_path 的空文本块豁免（内容在源图里，由 check_asset_traceability 另行校验）。"""
-    if report.get("selected_backend") != "mineru":
+    信号是 mineru 后端在 normalize 时算出的 `content_dropped`（`count_content_drops`）：源条目在**未读的
+    list 字段**（如 DOCX/PPTX 列表/目录的 `list_items`）里带内容却归一成空文本块的条目数。此门把"结构齐全
+    ≠ 内容完整"从事后反例变成可 CI 化硬门（strict 阻断），并杜绝"正文丢了但 13 项全绿"。
+    **凭 provenance 区分真空白 vs 漏读**：真空白页（MinerU 产 {type:text,text:''}，只有 bbox 数值 list）
+    `content_dropped=0`，扫描件/空白页不会被误伤；非 mineru 报告无此字段 → 视为 0 → info/ok。"""
+    if "content_dropped" not in report:
         return _check("content_retention", "info", "ok",
-                      f"backend={report.get('selected_backend', 'unknown')}，结构化逐块内容保全不适用")
-    empty = []
-    for b in blocks:
-        if b.get("type") not in ("text", "heading"):
-            continue
-        if (b.get("text") or "").strip():
-            continue
-        if b.get("asset_path"):
-            continue
-        empty.append(b.get("source_ref") or b.get("block_id") or "?")
-    if empty:
-        shown = ", ".join(str(x) for x in empty[:20])
+                      f"backend={report.get('selected_backend', 'unknown')}，无 content_dropped 信号（不适用）")
+    dropped = int(report.get("content_dropped") or 0)
+    if dropped > 0:
         return _check("content_retention", "high", "fail",
-                      f"{len(empty)} 个 text/heading 块正文为空且无 asset 兜底（疑归一化丢正文，"
-                      f"如 MinerU 列表/目录 list_items 未读）：{shown}")
-    return _check("content_retention", "high", "ok",
-                  f"mineru {len(blocks)} 块内容保全（无空 text/heading 块）")
+                      f"{dropped} 个源条目在未读 list 字段带内容却归一成空文本（疑归一漏读正文，"
+                      f"如 MinerU 列表/目录 list_items 未读）；真空白页不计")
+    return _check("content_retention", "high", "ok", "内容保全（content_dropped=0，无归一漏读）")
 
 
 def check_detection_distribution(pages: list, *, ratio_high=None) -> dict:
@@ -406,7 +396,7 @@ def evaluate(staging_dir) -> dict:
         check_risk_signals(report, low_confidence_pages=report.get("low_confidence_pages", [])),
         check_orphan_blocks(blocks, windows),
         check_source_ref_integrity(blocks, windows),
-        check_content_retention(report, blocks),
+        check_content_retention(report),
         check_detection_distribution(pages),
     ]
     summary = {

@@ -170,6 +170,27 @@ def test_normalize_list_items_v2_dict_preserves_indent(tmp_path):
     assert blocks[0].text.splitlines() == ["- 顶层", "    - 嵌套一层", "1. 有序项"]  # 前导缩进保留
 
 
+def test_count_content_drops_blank_page_not_flagged():
+    # 真空白页 MinerU 产 {type:text, text:'', bbox:[…]}：内容字段皆空、只有 bbox 数值 list → 不计丢失
+    # （否则扫描件/空白页的合法空块会被内容保全门误伤 → 阻断生产）。
+    items = [{"type": "text", "text": "正文", "bbox": [0, 0, 10, 10], "page_idx": 0},
+             {"type": "text", "text": "", "bbox": [0, 0, 1000, 1000], "page_idx": 1}]
+    assert mb.count_content_drops(items) == 0
+
+
+def test_count_content_drops_reads_list_ok():
+    # list/index 正常读出 list_items → 归一非空 → 不计丢失。
+    items = [{"type": "list", "list_items": ["- a", "- b"], "page_idx": 0},
+             {"type": "index", "list_items": ["1. 章一"], "page_idx": 0}]
+    assert mb.count_content_drops(items) == 0
+
+
+def test_count_content_drops_flags_unread_list_field():
+    # 未知类型把正文放在未读的 list 字段、text 为空 → 归一成空块 → 计为漏读丢失（未来 format 漂移的护栏）。
+    items = [{"type": "codeblock", "text": "", "code_lines": ["x = 1", "y = 2"], "page_idx": 0}]
+    assert mb.count_content_drops(items) == 1
+
+
 def test_render_source_md_assigns_char_spans(tmp_path):
     blocks, _ = mb.normalize_content_list(_fake_content_list(),
                                           assets_src_dir=tmp_path, assets_out_dir=tmp_path / "a")

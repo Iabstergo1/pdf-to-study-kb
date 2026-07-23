@@ -97,6 +97,47 @@ def _join_list_items(items) -> str:
     return "\n".join(lines)
 
 
+_ASSET_TYPES = ("table", "equation", "formula", "image", "figure", "chart")
+
+
+def _item_has_unsurfaced_content(it) -> bool:
+    """条目是否在某个 **list 形态字段** 里携带正文（如 list_items 那样）——归一漏读的高置信信号。
+
+    只认 list-of-(非空 str / 带 item_content|text 的 dict)，刻意避开 bbox 等数值 list 与零散字符串
+    元数据：真空白页（MinerU 产 {type:text, text:'', bbox:[…]}）只有 bbox 数值 list → 判 False，
+    不误伤；而 list_items 这类被漏读的正文列表 → 判 True。"""
+    for k, v in it.items():
+        if k == "bbox" or not isinstance(v, list):
+            continue
+        for x in v:
+            if isinstance(x, str) and x.strip():
+                return True
+            if isinstance(x, dict) and str(x.get("item_content") or x.get("text") or "").strip():
+                return True
+    return False
+
+
+def count_content_drops(items) -> int:
+    """归一后得到空文本块、但源条目其实在未读的 list 字段里带内容的条目数——内容静默丢失信号。
+
+    供 preflight 内容保全门（读 parse_report.content_dropped）。**区分真空白 vs 漏读**：真空白页
+    （type=text 且 text 空、无 list 正文）不计；list/index 读 list_items 后正常也不计——仅当 list_items
+    有内容却归一成空（如 `_join_list_items` 回归、或未来新出的 list 形态内容类型落到 else 分支）才计。
+    与 normalize_content_list 的分支路由保持一致（asset 类另有 asset/latex 兜底，不在此门范围）。"""
+    n = 0
+    for it in items or []:
+        t = (it.get("type") or "").lower()
+        if t in _DISCARD_TYPES or t in _ASSET_TYPES:
+            continue
+        if t in ("list", "index"):
+            produced = _join_list_items(it.get("list_items")) or it.get("text", "")
+        else:                                   # text / heading / 未知类型 → 读 text
+            produced = it.get("text", "")
+        if not (produced or "").strip() and _item_has_unsurfaced_content(it):
+            n += 1
+    return n
+
+
 def normalize_content_list(items, *, assets_src_dir, assets_out_dir):
     """MinerU content_list.json items（按阅读顺序）→ (list[SourceBlock], discarded_count)。
 
@@ -261,10 +302,12 @@ def build_chapters(blocks, page_count):
 
 def build_mineru_report(blocks, *, input_hash, discarded_count, mineru_version="unknown",
                         ocr_used=False, scan_suspected=False, routing_advice=None,
-                        consumed_by_auto_router=False, warnings=None, page_signals=None):
+                        consumed_by_auto_router=False, warnings=None, page_signals=None,
+                        content_dropped=0):
     """MinerU parse_report：selected_backend=mineru、mineru_status=used、pipeline、各类 counts。
 
     page_signals（middle.json 深解析，可选）→ 报告附 `pages`(逐页结构信号) + `low_confidence_pages`。
+    content_dropped（count_content_drops）：源条目在未读 list 字段带内容却归一成空的条目数（内容保全门读它）。
     """
     counts = {}
     for b in blocks:
@@ -284,6 +327,7 @@ def build_mineru_report(blocks, *, input_hash, discarded_count, mineru_version="
         text_block_count=counts.get("text", 0), heading_count=counts.get("heading", 0),
         table_count=counts.get("table", 0), equation_count=counts.get("equation", 0),
         image_count=counts.get("image", 0), discarded_count=discarded_count,
+        content_dropped=int(content_dropped),
         ocr_used=bool(ocr_used), scan_suspected=bool(scan_suspected), **structural)
 
 
@@ -359,7 +403,8 @@ def convert(src_path, *, out_dir, input_hash, timeout=DEFAULT_TIMEOUT_SECONDS):
     page_count = max((b.page for b in blocks), default=0)
     chapters = build_chapters(blocks, page_count)
     report = build_mineru_report(blocks, input_hash=input_hash, discarded_count=discarded,
-                                 mineru_version=_mineru_version(), page_signals=page_signals)
+                                 mineru_version=_mineru_version(), page_signals=page_signals,
+                                 content_dropped=count_content_drops(items))
     needs_vision_pages = sorted({b.page for b in blocks if b.risk_flags})
     return sa.BackendResult(source_md=source_md, blocks=blocks, chapters=chapters,
                             pages=[], report=report, needs_vision_pages=needs_vision_pages)

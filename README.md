@@ -279,7 +279,7 @@ pdf-to-study-kb/
 | `arbitration-resolve` | 把某 `needs_human` 页改判为 `render`/`ignore`（人工 / agent 闭环，`--reason` 必填、审计） | → `decisions.json` | `--source --page --decision --reason` |
 | `windows` | 生成确定性 processing windows（block-aware，长表不切）；PDF 须先双审且分歧闭环，否则 fail-closed | source.md → `windows.jsonl` | `--source [--dev-bypass]` |
 | `workorder` | 生成 ingest 事务契约 | → `staging/<src>/workorder.yaml` | `--source` |
-| `preflight-eval` | **L4 确定性验收门**：**13 项**结构检查（字段契约 / 页码覆盖 / 窗口单调 / 窗口契约 / asset 可追溯 / `dual_audit` / `evidence_bundle` / `risk_coverage` / 扫描·OCR / 孤儿块 / source_ref 完整 / **内容保全**（mineru 空块 = 归一丢正文） / 检测分布）→ JSON；验收的是“证据是否闭环进 LLM 输入” | staging → `preflight_eval.json` | `--source [--strict] [--json <path>]` |
+| `preflight-eval` | **L4 确定性验收门**：**13 项**结构检查（字段契约 / 页码覆盖 / 窗口单调 / 窗口契约 / asset 可追溯 / `dual_audit` / `evidence_bundle` / `risk_coverage` / 扫描·OCR / 孤儿块 / source_ref 完整 / **内容保全**（mineru 归一漏读源正文，凭 provenance 区分、不误伤空白页） / 检测分布）→ JSON；验收的是“证据是否闭环进 LLM 输入” | staging → `preflight_eval.json` | `--source [--strict] [--json <path>]` |
 
 ### `ingest` 会话支撑（通常由 skill 内部调用）
 

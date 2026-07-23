@@ -442,53 +442,54 @@ def test_evaluate_includes_detection_distribution_warn(tmp_path):
     assert rep["summary"]["warn"] >= 1 and rep["summary"]["fail"] == 0    # 观测 warn 不阻断
 
 
-# ---- check_content_retention（mineru 归一后空块 = 内容静默丢失；本轮 P0 门禁）----
+# ---- check_content_retention（读 report.content_dropped：归一漏读源正文 = 内容静默丢失）----
 
 def _mineru_report(**extra):
     r = {"selected_backend": "mineru", "source_type": "docx",
-         "backend_reason": "docx→mineru primary", "page_count": 1}
+         "backend_reason": "docx→mineru primary", "page_count": 1, "content_dropped": 0}
     r.update(extra)
     return r
 
 
 _CONTENT_RETENTION_CASES = [
-    # mineru 空 text 块（无 asset 兜底）→ high/fail（如列表 list_items 未读、归一成空块）
-    ("mineru_empty_text_fail", _mineru_report(),
-     [{**_block("b1", 1, 0, 10), "text": ""}], "fail", "high"),
-    # mineru 空 heading 块（纯空白）→ 同样 fail
-    ("mineru_empty_heading_fail", _mineru_report(),
-     [{**_block("b1", 1, 0, 10, typ="heading"), "text": "   "}], "fail", "high"),
-    # mineru 空 text 但有 asset 兜底（内容在源图里，asset_traceability 另查）→ ok
-    ("mineru_empty_but_asset_ok", _mineru_report(),
-     [{**_block("b1", 1, 0, 10, asset="assets/p1.png"), "text": ""}], "ok", "high"),
-    # mineru 正常非空 → ok
-    ("mineru_nonempty_ok", _mineru_report(), [_block("b1", 1, 0, 10)], "ok", "high"),
-    # 空 image 块（非 text/heading）不归本检查（由 asset_traceability 负责）→ ok
-    ("mineru_empty_image_na", _mineru_report(),
-     [{**_block("b1", 1, 0, 10, typ="image", asset="assets/p1.png"), "text": ""}], "ok", "high"),
-    # pymupdf 页粒度块（空白/扫描页空文本合法）→ 逐块判空不适用 info/ok
-    ("pymupdf_empty_not_applicable", _ok_report(),
-     [{**_block("b1", 1, 0, 10), "text": ""}], "ok", "info"),
+    # 归一漏读（content_dropped>0，如列表 list_items 未读）→ high/fail
+    ("dropped_one_fail", _mineru_report(content_dropped=1), "fail", "high"),
+    ("dropped_many_fail", _mineru_report(content_dropped=3), "fail", "high"),
+    # mineru 无漏读 → high/ok
+    ("no_drop_ok", _mineru_report(content_dropped=0), "ok", "high"),
+    # 非 mineru 报告无 content_dropped 字段 → 不适用 info/ok（真空白页/扫描页不会误伤）
+    ("no_field_not_applicable", _ok_report(), "ok", "info"),
 ]
 
 
-@pytest.mark.parametrize("cid,report,blocks,status,severity", _CONTENT_RETENTION_CASES,
+@pytest.mark.parametrize("cid,report,status,severity", _CONTENT_RETENTION_CASES,
                          ids=[c[0] for c in _CONTENT_RETENTION_CASES])
-def test_check_content_retention(cid, report, blocks, status, severity):
-    c = pe.check_content_retention(report, blocks)
+def test_check_content_retention(cid, report, status, severity):
+    c = pe.check_content_retention(report)
     _assert_check(c, "content_retention", status, severity)
 
 
-def test_evaluate_mineru_empty_content_block_fails(tmp_path):
-    # mineru 后端出现空 text 块（列表/目录内容静默丢失）→ evaluate 汇总 fail（strict 会阻断）。
-    blocks = [{**_block("b1", 1, 0, 100), "text": ""}]
+def test_evaluate_mineru_content_dropped_fails(tmp_path):
+    # mineru 报告 content_dropped>0（归一漏读源正文）→ evaluate 汇总 fail（strict 会阻断）。
+    blocks = [_block("b1", 1, 0, 100)]
     ws = [_window("w0", 0, 100, ["b1"], ps=1, pe_=1, refs=["p0001#b1"])]
     d = _write_staging(tmp_path / "mn", blocks=blocks, windows=ws,
-                       report=_mineru_report(page_count=1, dual_audit_required=False))
+                       report=_mineru_report(page_count=1, dual_audit_required=False, content_dropped=1))
     rep = pe.evaluate(d)
     cr = next(c for c in rep["checks"] if c["name"] == "content_retention")
     assert cr["status"] == "fail" and cr["severity"] == "high"
     assert rep["summary"]["fail"] >= 1
+
+
+def test_evaluate_mineru_blank_page_not_flagged(tmp_path):
+    # 真空白页：mineru 产空 text 块但 content_dropped=0 → content_retention 不误伤（扫描/空白页保护）。
+    blocks = [{**_block("b1", 1, 0, 100), "text": "正文"}, {**_block("b2", 2, 100, 120), "text": ""}]
+    ws = [_window("w0", 0, 120, ["b1", "b2"], ps=1, pe_=2, refs=["p0001#b1", "p0002#b2"])]
+    d = _write_staging(tmp_path / "blank", blocks=blocks, windows=ws,
+                       report=_mineru_report(page_count=2, dual_audit_required=False, content_dropped=0))
+    rep = pe.evaluate(d)
+    cr = next(c for c in rep["checks"] if c["name"] == "content_retention")
+    assert cr["status"] == "ok"          # 空 text 块存在但 content_dropped=0 → 不判丢失
 
 
 # ---- evaluate（端到端组装 + summary） ----
