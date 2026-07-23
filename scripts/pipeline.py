@@ -592,6 +592,34 @@ def _vault_dir() -> Path:
     return _workspace_root() / "wiki"
 
 
+def _overview_template() -> str:
+    """templates/overview.md 原文——overview seed 的单一来源（init-vault 与 retract-source 共用读取）。"""
+    return (Path(__file__).resolve().parents[1] / "templates" / "overview.md").read_text(encoding="utf-8")
+
+
+def _seed_overview(vault) -> bool:
+    """幂等落 overview.md seed（published / managed_by: pipeline，原样取自模板）；返回是否新写。
+
+    overview 是 vault 的**永久基础设施**：任何时候都应作为 Obsidian 首页存在。已存在的页**绝不覆盖**
+    （human 编辑、shared 页、正常 seed 一律原样保留），仅在缺失时从模板重建。init-vault 与
+    retract-source 共用本 helper，避免复制模板读取逻辑。"""
+    target = Path(vault) / "overview.md"
+    if target.exists():
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(_overview_template(), encoding="utf-8", newline="\n")
+    return True
+
+
+def _overview_retract_action(cls: dict, vault) -> str:
+    """撤库后 overview 的处置：'reseed'（独占本源被删 / 撤前已缺失 → 删后从模板重建 seed）或
+    'keep'（shared / human / 无关且在场 → 保留不动、字节不变）。仅读，供 dry-run 与 apply 一致展示。"""
+    for key in ("delete", "keep_shared", "keep_human"):
+        if any(e["path"] == "overview.md" for e in cls.get(key, [])):
+            return "reseed" if key == "delete" else "keep"
+    return "keep" if (Path(vault) / "overview.md").exists() else "reseed"
+
+
 def cmd_init_vault(args):
     """建 wiki/ 脚手架（spec §4）+ overview/log/purpose 种子 + Obsidian 图谱配置。
     幂等：已存在的文件/目录绝不覆盖。Obsidian 配置随每库自动落地（任意领域通用），
@@ -616,9 +644,9 @@ def cmd_init_vault(args):
         "nodeSizeMultiplier": 1.3, "lineSizeMultiplier": 1,
         "centerStrength": 0.3, "repelStrength": 12, "linkStrength": 1, "linkDistance": 250, "scale": 1,
     }
+    # overview 经共享的幂等 seed helper（retract-source 复用同一 helper，避免复制模板读取逻辑）。
+    print("[OK] seeded overview.md" if _seed_overview(vault) else "[keep] overview.md exists")
     seeds = {
-        "overview.md": (Path(__file__).resolve().parents[1] / "templates" / "overview.md"
-                        ).read_text(encoding="utf-8"),
         "log.md": "# 操作日志（append-only：/ingest 与收尾 lint 各自追加）\n",
         "_meta/purpose.md": ("# 学习目标与偏好（用户维护）\n\n"
                              "<写下你的学习目标、当前重点、偏好的讲解风格——/ingest 会参考>\n"),
@@ -1244,6 +1272,11 @@ def cmd_retract_source(args):
             for e in cls[key]:
                 print(f"  {e['path']}  [{e['type']}] "
                       f"{e['reason'] if key != 'delete' else ''}".rstrip())
+        # overview 是 vault 永久基础设施（产品决策 2026-07-23）：dry-run 与 apply 一致展示其去留。
+        ov_action = _overview_retract_action(cls, vault)
+        ov_note = {"reseed": "撤后从 templates/overview.md 重建 published seed（vault 永久入口）",
+                   "keep": "shared/human 或无关且在场，保留不动（字节不变）"}[ov_action]
+        print(f"overview.md: {ov_action}（{ov_note}）")
         print("DB 账本行: " + ", ".join(
             f"{t}={len(rows[t])}" for t in ("ingest_progress", "window_reads", "review_proposals")))
         print(f"证据包: {dest}")
@@ -1256,7 +1289,7 @@ def cmd_retract_source(args):
         plan = {"source_id": args.source, "generated_at": ts,
                 "from_state": f"{src['current_stage']}/{src['current_status']}",
                 "to_stage": args.to, "delete": cls["delete"], "keep_shared": cls["keep_shared"],
-                "keep_human": cls["keep_human"]}
+                "keep_human": cls["keep_human"], "overview_action": ov_action}
         delete_paths = [e["path"] for e in cls["delete"]]
         summary = retraction.export_evidence(vault, dest, delete_paths, db_rows=rows, plan=plan)
         bad = retraction.verify_evidence(dest)
@@ -1282,6 +1315,14 @@ def cmd_retract_source(args):
         except ValueError:
             rel_ev = str(dest)
         retraction.append_log(vault, args.source, n, rel_ev, date.today().isoformat())
+
+        # overview 是 vault 永久基础设施（产品决策）：独占本源已随 delete 进证据并删除、撤前缺失亦然
+        # → 此处从模板重建 published seed；shared/human/在场则 _seed_overview 见其在场即不动（字节不变）。
+        # **必须在派生层重建之前**（req6），且绝不靠保留旧来源正文满足"overview 必须存在"（req7）。
+        if _seed_overview(vault):
+            print("[OK] overview.md reseeded from template (published, managed_by: pipeline)")
+        else:
+            print("[keep] overview.md preserved unchanged")
 
         failures: list[str] = []
         import wiki_gate

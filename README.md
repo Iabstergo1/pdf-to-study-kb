@@ -304,7 +304,7 @@ pdf-to-study-kb/
 | `vault-lint` | 全库渲染安全健康门禁（published∪proposed 已知渲染陷阱，只读、违规非零退出、可 CI） | — |
 | `reopen` | 重开已收尾来源做增量补充（重建 workorder + 状态机回 `workorder_ready`） | `--source` |
 | `reset-source` | **维护**：确定性重置到某预处理阶段刚完成（forward-only 状态机的回退出口；**默认 dry-run**，只删下游 stage-run 缓存行 + 插 reset 审计行，不动 ingest_progress/artifacts/work_orders/review_proposals/staging） | `--source --to {registered,profiled,converted,windowed,workorder_ready} [--apply]` |
-| `retract-source` | **证据先行撤库**（**默认 dry-run**）：先导出证据包（页字节 + SHA256 manifest + 全部账本行）并核验，才删该源独占页、清账本、重置状态、重建派生层；共享页与 `managed_by: human` 页只报告不删 | `--source [--to {workorder_ready,registered}] [--apply]` |
+| `retract-source` | **证据先行撤库**（**默认 dry-run**）：先导出证据包（页字节 + SHA256 manifest + 全部账本行）并核验，才删该源独占页、清账本、重置状态、重建派生层；共享页与 `managed_by: human` 页只报告不删。**`overview.md` 是 vault 永久入口**：独占本源则旧版进证据包并在删后从 `templates/overview.md` 原样重建 seed（派生层重建之前）、shared/human 则字节不变保留；apply 后 overview 必定存在 | `--source [--to {workorder_ready,registered}] [--apply]` |
 | `sync-assets` | 把本源 staging 难页 PNG 同步进 `wiki/assets/<src>/`（预处理 / reopen 会自动调用） | `--source` |
 | `staging-clean` | **磁盘治理**：staging 三分类报告（审计保留 / 可再生可删 mineru_raw·audit·diag·dump_* / unknown 一律保留）；**默认 dry-run**，`--apply` 双护栏（source 已 published + assets 同步核对通过） | `--source [--apply]` |
 | `promotion-candidates` | 检测跨域提升候选（人工确认） | `--propose` |

@@ -128,6 +128,14 @@ and merged only by a human `skill-adopt`. Protocols: `docs/skill-runtime/{routin
   bytes + SHA256 manifest + every DB ledger row) and verifies it **before** deleting a source's exclusively
   owned pages, then purges ledgers, resets state, and rebuilds all derived layers. Shared-ref and
   human-managed pages are reported, never deleted. Disposal must never destroy its own audit trail.
+  **`overview.md` is permanent vault infrastructure:** every successful `--apply` guarantees it exists.
+  If it is exclusively owned by the retracted source and non-human, the old page goes into the evidence
+  package, is deleted, then **reseeded verbatim from `templates/overview.md`** (published, `managed_by:
+  pipeline`, carrying no retracted `source_refs`); if it is shared or `managed_by: human` it is kept
+  **byte-for-byte** and only reported for manual de-referencing; if it was already missing, apply seeds
+  it. Reseed happens **before** derived-layer rebuild and **never** satisfies "overview must exist" by
+  keeping old source content. init-vault and retract-source share one idempotent `_seed_overview` helper
+  (never overwrites an existing page). dry-run shows `overview.md: keep|reseed` and writes nothing.
 - **Reading evidence is the one thing the CLI can only audit, never enforce.** It can force the flow to be
   run; it cannot force the LLM to actually read the source (nor rule out reads that bypass `show-window`).
   `window_reads` is the machine-checkable proxy — pages written from pretrained knowledge plus the

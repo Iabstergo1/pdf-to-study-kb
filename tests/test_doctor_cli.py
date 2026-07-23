@@ -271,3 +271,112 @@ def test_retract_source_refuses_running_or_locked(tmp_path):
     assert r2.returncode != 0
     assert "lock" in (r2.stdout + r2.stderr).lower()
     assert (tmp_path / "wiki").exists()  # 双拒绝下 vault 未被动过
+
+
+# ---- retract-source: overview 是 vault 永久基础设施（产品决策 2026-07-23）----
+
+pipeline_mod = _load("pipeline")
+_OVERVIEW_TEMPLATE = (ROOT / "templates" / "overview.md").read_text(encoding="utf-8")
+
+
+def _set_overview(tmp_path, **meta_updates):
+    """改 init-vault 落的 overview.md frontmatter（模拟 /ingest 维护后的归属/管理者）。"""
+    ov = tmp_path / "wiki" / "overview.md"
+    meta, body = mdpage.read_page(ov)
+    meta.update(meta_updates)
+    mdpage.write_page(ov, meta, body)
+    return ov
+
+
+def test_seed_overview_helper_idempotent(tmp_path):
+    # req8：共享的 seed helper 幂等——首次写出 templates/overview.md，已存在则永不覆盖。
+    v = tmp_path / "wiki"
+    v.mkdir()
+    assert pipeline_mod._seed_overview(v) is True
+    assert (v / "overview.md").read_text(encoding="utf-8") == _OVERVIEW_TEMPLATE
+    (v / "overview.md").write_text("HUMAN EDIT", encoding="utf-8")
+    assert pipeline_mod._seed_overview(v) is False          # 已存在 → 不覆盖
+    assert (v / "overview.md").read_text(encoding="utf-8") == "HUMAN EDIT"
+
+
+def test_retract_reseeds_exclusive_pipeline_overview(tmp_path):
+    # 独占 pipeline overview：旧版进证据包 → 删除 → apply 后重建为 templates seed
+    # （published/managed_by:pipeline、不含被撤 source_refs）。
+    db = _preprocessed(tmp_path, sid="gone")
+    _publish_lesson(tmp_path, "gone", "domains/misc/lessons/gone.md")
+    _set_overview(tmp_path, status="published", managed_by="pipeline",
+                  source_refs=[{"source": "gone"}])
+    r = _run(["retract-source", "--source", "gone"], tmp_path)          # dry-run 显示 reseed
+    assert r.returncode == 0 and "overview.md" in r.stdout and "reseed" in r.stdout
+    r2 = _run(["retract-source", "--source", "gone", "--apply"], tmp_path)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    ov = tmp_path / "wiki" / "overview.md"
+    assert ov.read_text(encoding="utf-8") == _OVERVIEW_TEMPLATE         # 原样模板 seed
+    meta, _ = mdpage.read_page(ov)
+    assert meta["status"] == "published" and meta["managed_by"] == "pipeline"
+    assert not meta.get("source_refs")                                 # 不含被撤 refs
+    ev = list((tmp_path / "pipeline-workspace/evidence").glob("retract-gone-*"))[0]
+    assert (ev / "pages/overview.md").exists()                         # 旧 overview 进证据
+    old_meta, _ = mdpage.read_page(ev / "pages/overview.md")
+    assert old_meta.get("source_refs") == [{"source": "gone"}]         # 证据是旧版（带归属）
+
+
+def test_retract_keeps_shared_overview_byte_identical(tmp_path):
+    # shared overview（source_refs 含他源）：apply 前后字节不变，只报告人工去引。
+    _preprocessed(tmp_path, sid="gone")
+    _publish_lesson(tmp_path, "gone", "domains/misc/lessons/gone.md")
+    _set_overview(tmp_path, status="published", managed_by="pipeline",
+                  source_refs=[{"source": "gone"}, {"source": "other"}])
+    ov = tmp_path / "wiki" / "overview.md"
+    before = ov.read_bytes()
+    r = _run(["retract-source", "--source", "gone"], tmp_path)
+    assert "overview.md" in r.stdout and "keep" in r.stdout
+    r2 = _run(["retract-source", "--source", "gone", "--apply"], tmp_path)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    assert ov.read_bytes() == before                                   # shared → 字节不变
+
+
+def test_retract_keeps_human_overview_byte_identical(tmp_path):
+    # managed_by:human overview：apply 前后字节不变（永不覆盖/重建）。
+    _preprocessed(tmp_path, sid="gone")
+    _publish_lesson(tmp_path, "gone", "domains/misc/lessons/gone.md")
+    _set_overview(tmp_path, status="published", managed_by="human",
+                  source_refs=[{"source": "gone"}])
+    ov = tmp_path / "wiki" / "overview.md"
+    before = ov.read_bytes()
+    r2 = _run(["retract-source", "--source", "gone", "--apply"], tmp_path)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    assert ov.read_bytes() == before                                   # human → 字节不变
+
+
+def test_retract_dry_run_leaves_overview_state_evidence_unchanged(tmp_path):
+    # req5：dry-run 绝不写文件——overview、状态库、证据目录均不变（但输出显示 reseed/keep）。
+    db = _preprocessed(tmp_path, sid="gone")
+    _publish_lesson(tmp_path, "gone", "domains/misc/lessons/gone.md")
+    _set_overview(tmp_path, status="published", managed_by="pipeline",
+                  source_refs=[{"source": "gone"}])
+    ov = tmp_path / "wiki" / "overview.md"
+    before = ov.read_bytes()
+    r = _run(["retract-source", "--source", "gone"], tmp_path)
+    assert r.returncode == 0 and "overview.md" in r.stdout
+    assert ov.read_bytes() == before                                   # overview 不变
+    assert len(state_store.window_states(db, "gone")) == 1             # 状态库不变
+    assert not list((tmp_path / "pipeline-workspace/evidence").glob("retract-gone-*"))  # 无证据目录
+
+
+def test_retract_seeds_missing_overview_and_rebuilds(tmp_path):
+    # req4/req7：撤库前 overview 已意外缺失 → apply 补 seed；派生层照常重建；再次 apply 幂等不覆盖。
+    _preprocessed(tmp_path, sid="gone")
+    _publish_lesson(tmp_path, "gone", "domains/misc/lessons/gone.md")
+    (tmp_path / "wiki" / "overview.md").unlink()
+    r = _run(["retract-source", "--source", "gone"], tmp_path)
+    assert "reseed" in r.stdout
+    r2 = _run(["retract-source", "--source", "gone", "--apply"], tmp_path)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    ov = tmp_path / "wiki" / "overview.md"
+    assert ov.read_text(encoding="utf-8") == _OVERVIEW_TEMPLATE
+    assert (tmp_path / "wiki/index.generated.md").exists()             # 派生层重建正常
+    before = ov.read_bytes()
+    r3 = _run(["retract-source", "--source", "gone", "--apply"], tmp_path)
+    assert r3.returncode == 0, r3.stdout + r3.stderr
+    assert ov.read_bytes() == before                                   # 幂等：不重复覆盖

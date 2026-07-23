@@ -406,9 +406,10 @@ pdf-to-study-kb/
 ### 4.2 初始化流程（`init-vault`，幂等）
 
 `cmd_init_vault` 建目录 `_meta / domains / concepts / topics / comparisons / synthesis / sources /
-assets / Review-Queue / .obsidian`，落种子：`overview.md`（取自 `templates/overview.md`，
-`status: published`）、`log.md`、`_meta/purpose.md`、`.obsidian/graph.json`（按页面 type 着色）、
-`.obsidian/app.json`。**已存在文件绝不覆盖**（`if not target.exists()`）。`templates/` 目录现在**只有
+assets / Review-Queue / .obsidian`，落种子：`overview.md`（经幂等 helper `_seed_overview` 取自
+`templates/overview.md`，`status: published` / `managed_by: pipeline`——该 helper **init-vault 与
+retract-source 共用**，避免复制模板读取）、`log.md`、`_meta/purpose.md`、`.obsidian/graph.json`
+（按页面 type 着色）、`.obsidian/app.json`。**已存在文件绝不覆盖**（`if not target.exists()`）。`templates/` 目录现在**只有
 `concept.md`（`resolve-concept` 建概念页时读）与 `overview.md`（这里读）两个运行时会读的模板**；原
 source/lesson/topic/comparison/synthesis 五个模板已在 `c52d1ab` 删除（D-4 后不再有强制小节标题，这些
 文件早已只剩测试对象、无运行时消费者）。
@@ -547,7 +548,7 @@ ingest_waiting → ingesting → ingested → lint`。完成 `ingested` 置 `pro
 | `comparisons/*.md` | ingest（LLM） | `comparison` | 横向对比；同上，无运行时模板 |
 | `synthesis/*.md` | ingest / kb-save | `synthesis` | 深度综合；同上，无运行时模板 |
 | `sources/<src>.md` | ingest（LLM） | `source` | 每来源摘要；同上，无运行时模板；**必须存在**，缺失阻断发布（`source-page-missing`） |
-| `overview.md` | init-vault 种子（`templates/overview.md`）→ ingest 增量 | `overview` | vault 入口综合页；仍含占位符时新概念产出会阻断发布（`overview-seed`） |
+| `overview.md` | init-vault 种子（`templates/overview.md`）→ ingest 增量 | `overview` | vault 入口综合页；仍含占位符时新概念产出会阻断发布（`overview-seed`）。**永久基础设施**：`retract-source --apply` 后必定存在——独占本源则旧版进证据包、删后经 `_seed_overview` 从模板重建（派生层重建前），shared/human 字节不变 |
 | `index.generated.md` | 收尾 CLI 派生 | — | 只收录 published，按 type 分组 |
 | `graph-data.generated.json` | lint / rebuild-graph（graph_model/graph_data） | Knowledge Graph v2.0 | 节点/边/社区（Louvain）；topic_membership 骨架 |
 | `knowledge-graph.generated.html` | lint / rebuild-graph（graph_html） | 力导向交互 HTML | 点击节点跳 `obsidian://` 对应笔记；publish-isolated（失败不阻断发布） |
