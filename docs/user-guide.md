@@ -221,7 +221,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | `arbitration-resolve` | 改判 needs_human 页 | `--source --page --decision {render,ignore} --reason` | — |
 | `windows` | 生成 processing windows | `--source` | `--dev-bypass` |
 | `workorder` | 生成 ingest 事务契约 | `--source` | — |
-| `preflight-eval` | L4 确定性验收（**12 项**结构检查） | `--source` | `--strict` `--json <path>` |
+| `preflight-eval` | L4 确定性验收（**13 项**结构检查） | `--source` | `--strict` `--json <path>` |
 
 **ingest 会话支撑（通常 skill 内部调用）：**
 
@@ -249,6 +249,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | `ingest-stats` | 只读"体检单"：窗口/返工、窗口账本估算 `pages_estimate`，以及按 vault `source_refs` 重建的精确交付清单 `page_inventory`（报告总页数只认后者；不含 token/费用） | `--source` | `--json` |
 | `proposals-resolve` | **给已修复的错误销账**（不然 `skill-mine` 的 backlog 会越攒越脏）；**默认只列清单不改库**，看清楚了再加 `--apply` | `--id <行号>` 或 `--signature <类型>` | `--source`（配合 `--signature` 限定某源）`--all-matching`（批量落库必须加）`--apply` |
 | `reset-source` | **状态机"倒带键"**：某一步卡死重跑不了时，安全回退到更早的阶段。**默认只打印计划不改库**，确认后加 `--apply` | `--source --to {registered,profiled,converted,windowed,workorder_ready}` | `--apply` |
+| `retract-source` | **证据先行撤库**：把一本已入库的书连页带账本安全卸下。**默认只打印计划不改库**——加 `--apply` 才会先导出证据包（页字节 + SHA256 manifest + 全部账本行）并核验，再删该源独占页、清账本、重置状态、重建派生层；共享页与人工页只报告不删 | `--source` | `--to {workorder_ready,registered}` `--apply` |
 | `staging-clean` | **清理一本书处理时留下的临时文件**（可能几百 MB）。**默认只列清单不删**；`--apply` 前会自动检查"这本书是否已发布""图片是否已同步进 vault"，两条不满足直接拒绝执行 | `--source` | `--apply` |
 
 ### 5.4 主流程之外、你仍会接触的场景

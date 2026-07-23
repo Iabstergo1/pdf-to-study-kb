@@ -23,8 +23,8 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
   门禁、覆盖保护、索引重建、运营维护（复盘指标/失败信号退场/状态机回退/磁盘清理）。**全部业务逻辑在此**，
   由 `tests/` 当作可执行规格覆盖。
 - **对话编排层（唯一 LLM）**：`.claude/skills/<name>/SKILL.md`（Claude Code 读）与
-  `.agents/skills/<name>/SKILL.md`（Codex 读）。两套 skill 树**字节对等**，只用自然语言编排，
-  通过 shell 调用同一套 CLI，**不含任何业务 Python**。
+  `.agents/skills/<name>/SKILL.md`（Codex 读）。两套 skill 树**协议 / 语义对等**（仅各自的 project-truth
+  指针不同），只用自然语言编排，通过 shell 调用同一套 CLI，**不含任何业务 Python**。
 
 ### 1.2 主要入口
 
@@ -52,7 +52,7 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 | `arbitration.py` | L4 分歧仲裁的确定性半（证据模型/候选/物化/闭环门） | `build_evidence_model`、`select_candidates`、`materialize_*`、`windows_blockers`、`check_closure`、`assess_risks` |
 | `windowing.py` | L3 确定性 processing windows（block-aware / char fallback） | `build_windows_from_blocks`、`build_windows`、`page_char_ranges`、`WINDOWING_VERSION="5"` |
 | `workorder.py` | L3/L4 ingest 事务契约（写入边界 + registry hash + 页快照） | `build_workorder`、`write_workorder` |
-| `preflight_eval.py` | L4 确定性验收门（**12 项** check） | `evaluate`、`check_*` 函数族（见 §8） |
+| `preflight_eval.py` | L4 确定性验收门（**13 项** check） | `evaluate`、`check_*` 函数族（见 §8） |
 | `concept_store.py` | 概念归一唯一入口 + registry/aliases 派生 | `resolve_or_create_concept`、`build_registry`、`canonical_id`、`scan_concept_pages` |
 | `promotion.py` | 跨域提升（候选检测 + 人工确认后机械提升） | `find_candidates`、`promote_to_shared` |
 | `wiki_gate.py` | 收尾 lint 门禁 + promote + index 重建 + **quiz/命题两个派生阅读层** | `lint_pages`、`collect_proposed`、`promote`、`write_index`、`lint_risk_traceability`、`build_quiz_index`/`write_quiz_index`、`collect_propositions`/`build_propositions_index`/`write_propositions_index`/`duplicate_proposition_names` |
@@ -67,7 +67,7 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 | `graph_html.py` | Knowledge Graph v2.0：力导向交互 HTML（点击跳 obsidian://） | `write_html`、`HTML_FILE` |
 | `graph_lint.py` | Knowledge Graph v2.0：graph-data/HTML 校验（fail-hard + warn-only） | `validate_graph_data`、`validate_html`、`write_report` |
 | `query_session.py` | query-session 目录契约（kb-query/kb-save 用） | `check_session` |
-| `thresholds.py` | 集中阈值配置（**27 个** `STUDY_KB_*` 常量，18 个折进缓存指纹 + 9 个门禁/观测/审计专用不折进） | 各常量、`_CACHE_KEYED`、`fingerprint()` |
+| `thresholds.py` | 集中阈值配置（**28 个** `STUDY_KB_*` 常量，18 个折进缓存指纹 + 10 个门禁/观测/审计专用不折进） | 各常量、`_CACHE_KEYED`、`fingerprint()` |
 | `install_mineru.py` | 可选 MinerU 安装器（选 torch CUDA wheel） | `candidate_cu_tags`、`select_wheel`、`detect_driver_cuda`、`main` |
 
 > **不在 `scripts/` 里的"内容路由"与"写作装置"**：这两个是 2026-07-08 引入的 advisory 写作协议，**零 CLI 参与**——
@@ -92,7 +92,7 @@ windows.jsonl              （windows：block-aware 读取单位）        （L3
   │  workorder
   ▼
 workorder.yaml             （写入边界 + registry 快照 + 页快照）     （L4）
-  │  preflight-eval --strict   （12 项确定性验收）
+  │  preflight-eval --strict   （13 项确定性验收）
   ▼  ───────────────────── 以上零 LLM ─────────────────────
 ingest-start → 读 chapters.json 建全书理解 → 按章判断内容路由（advisory，写进 digest.md）
   → 逐窗 show-window / 写 proposed 页（按装置预算克制用写作装置） / resolve-concept / window-done   （LLM）
@@ -123,7 +123,7 @@ kb-postmortem：先存旧 backlog 快照 → ingest-stats → skill-mine 重扫 
 - **L3 读取窗口与导航**：`windowing.build_windows_from_blocks` 按 section 切窗、原子块（table/image/
   chart）整块打包**长表不切**，回挂块元数据。
 - **L4 仲裁与验收**：`arbitration` 把分歧整理成队列、物化裁决、闭环门；`preflight_eval.evaluate`
-  跑 12 项 check，`--strict` 遇 high/fail 退出码 2。
+  跑 13 项 check，`--strict` 遇 high/fail 退出码 2。
 
 ### 1.6 产物生成流程（LLM 写库）
 
@@ -142,7 +142,7 @@ content-routing.md` 定义的 5 分类：理论型/方法型/案例型/参考型
 - **预处理验收门**：`preflight-eval --strict`（`check_dual_audit` + `check_evidence_bundle` 等）。
 - **收尾发布门**：`lint`——fail-closed，两段事务隔离：vault preflight（published 渲染旧伤 → 阻断
   promote + Review-Queue 去重登记，**不回滚当前批**）→ batch lint（当前批违规才回滚 + Review-Queue；
-  共 27 个违规标识，见 §7）。同一渲染安全扫描可用 `vault-lint` 独立跑。
+  共 33 个违规标识，见 §7）。同一渲染安全扫描可用 `vault-lint` 独立跑。
 - **写前守卫**：`check-write`（`ingest_guards.in_write_scope` + `can_overwrite`）。
 - **概念去重门**：`resolve-concept`（唯一入口）+ lint 的 `duplicate-canonical`。
 - **并发门**：`source_locks`（单 vault 锁）+ `ingest-start` 的 stale registry 校验。
@@ -219,7 +219,7 @@ pdf-to-study-kb/
 │   ├── arbitration.py           # L4 仲裁确定性半（证据/候选/物化/闭环）
 │   ├── windowing.py             # L3 processing windows
 │   ├── workorder.py             # L3/L4 ingest 事务契约
-│   ├── preflight_eval.py        # L4 验收门（12 项 check）
+│   ├── preflight_eval.py        # L4 验收门（13 项 check）
 │   ├── concept_store.py         # 概念归一唯一入口 + registry 派生（aliases.md 退休/清理）
 │   ├── promotion.py             # 跨域提升
 │   ├── wiki_gate.py             # 收尾 lint（order/safety/provenance）+ promote + index
@@ -236,12 +236,12 @@ pdf-to-study-kb/
 │   ├── graph_html.py            # ⭐ KG v2.0：力导向交互 HTML（点击节点跳 obsidian://）
 │   ├── graph_lint.py            # ⭐ KG v2.0：graph-data/HTML 校验（fail-hard + warn-only）
 │   ├── query_session.py         # query-session 契约
-│   ├── thresholds.py            # 集中阈值（27 个 STUDY_KB_*，env 可覆盖）
+│   ├── thresholds.py            # 集中阈值（28 个 STUDY_KB_*，env 可覆盖）
 │   ├── install_mineru.py        # 可选 MinerU 安装器
 │   └── resume-ingest.ps1        # 无人值守续跑（OS 调度）
 │
 ├── .claude/skills/<name>/SKILL.md   # 11 个对话式 skill（Claude 读）
-├── .agents/skills/<name>/SKILL.md   # 同 11 个（Codex 读，与上者字节对等）
+├── .agents/skills/<name>/SKILL.md   # 同 11 个（Codex 读，与上者协议/语义对等，仅 truth 指针不同）
 │       skill 列表（CLAUDE.md §5 顺序）：ingest / kb-query / kb-save / kb-review / kb-qa /
 │                  kb-postmortem / pipeline-doctor / wiki-lint-semantic /
 │                  source-preflight / source-xray / skill-evolve
@@ -313,7 +313,7 @@ pdf-to-study-kb/
 | 改判 needs_human | `arbitration-resolve --source --page --decision {render,ignore} --reason` | `cmd_arbitration_resolve` | decisions.json | 改 decisions + audit.jsonl | reason 必填、非 needs_human 拒 | `test_arbitration.py` | 准确 |
 | 生成窗口 | `windows --source [--dev-bypass]` | `cmd_windows` → `windowing.build_windows_from_blocks` | source.md/blocks/chapters | `windows.jsonl` | PDF 未双审/分歧未闭环 → fail-closed（除非 `--dev-bypass`） | `test_windowing.py` | 准确 |
 | 生成 work order | `workorder --source` | `cmd_workorder` → `workorder.build_workorder` | windows + vault | `workorder.yaml` + registry 快照 | 概念页损坏 → ValueError | `test_workorder.py` | 准确 |
-| L4 验收 | `preflight-eval --source [--strict] [--json <path>]` | `cmd_preflight_eval` → `preflight_eval.evaluate` | staging 全产物 | `preflight_eval.json` | strict 遇 high/fail → exit 2 | `test_preflight_eval.py` | 已实现（`evaluate()` 跑 **12 项** check，见 §8） |
+| L4 验收 | `preflight-eval --source [--strict] [--json <path>]` | `cmd_preflight_eval` → `preflight_eval.evaluate` | staging 全产物 | `preflight_eval.json` | strict 遇 high/fail → exit 2 | `test_preflight_eval.py` | 已实现（`evaluate()` 跑 **13 项** check，见 §8） |
 
 ### 3.4 ingest 会话支撑命令
 
@@ -331,7 +331,7 @@ pdf-to-study-kb/
 
 | 操作 | 命令 | 实现函数 | 输入 | 输出/产物 | 失败处理 | 测试 | 实现状态 |
 |---|---|---|---|---|---|---|---|
-| 收尾门禁 | `lint --source <src>`；kb-save 会话发布：`lint --source kb-save --session <run_id>` | `cmd_lint` → vault preflight（`wiki_gate.vault_render_safety`）→ `wiki_gate.lint_pages` + `promote` + `_rebuild_graph_artifacts` + `write_quiz_index` + `write_propositions_index` | proposed 页 | promote→published + 重建 index/registry + 知识图谱 v2.0 + quiz-index + propositions（后三者各自 publish-isolated） + log | preflight 旧伤 → 阻断不回滚（vault-health 队列）；当前批违规 → 回滚快照 + Review-Queue + exit 非零（27 个违规标识，见 §7） | `test_lint_republish_cli.py`、`test_wiki_gate.py` | 准确 |
+| 收尾门禁 | `lint --source <src>`；kb-save 会话发布：`lint --source kb-save --session <run_id>` | `cmd_lint` → vault preflight（`wiki_gate.vault_render_safety`）→ `wiki_gate.lint_pages` + `promote` + `_rebuild_graph_artifacts` + `write_quiz_index` + `write_propositions_index` | proposed 页 | promote→published + 重建 index/registry + 知识图谱 v2.0 + quiz-index + propositions（后三者各自 publish-isolated） + log | preflight 旧伤 → 阻断不回滚（vault-health 队列）；当前批违规 → 回滚快照 + Review-Queue + exit 非零（33 个违规标识，见 §7） | `test_lint_republish_cli.py`、`test_wiki_gate.py` | 准确 |
 | 全库渲染安全门禁 | `vault-lint` | `cmd_vault_lint` → `wiki_gate.vault_render_safety(published∪proposed)` | 全 vault | 违规清单，非零退出（可 CI） | 只读，零写入 | `test_lint_republish_cli.py` | 准确 |
 | 跨域提升候选 | `promotion-candidates [--propose]` | `cmd_promotion_candidates` → `promotion.find_candidates` | registry | 终端 + (可选)Review-Queue | — | `test_promotion.py` | 准确 |
 | 机械提升概念 | `promote-concept --id concept.<domain>.<slug>` | `cmd_promote_concept` → `promotion.promote_to_shared` | 概念页 | 移动到 `concepts/` + 全 vault 链接重写 | 目标冲突 → 中止 | `test_concept_promotion_cli.py` | 准确 |
@@ -390,7 +390,7 @@ pdf-to-study-kb/
 | 「概念去重唯一入口 resolve-concept」 | `concept_store.resolve_or_create_concept`（准确） |
 | 「两阶段发布」 | proposed → lint → published（准确） |
 | 「覆盖保护三条件」 | `ingest_guards.can_overwrite`（准确） |
-| 「fail-closed lint（order/safety/provenance，共 27 个违规标识）」 | `wiki_gate.lint_pages`/`render_safety_violations` + `lint_risk_traceability` + `pipeline.cmd_lint` 自身；vault preflight 与当前批回滚事务隔离；**正文小节标题不是门禁**（D-4） |
+| 「fail-closed lint（order/safety/provenance，共 33 个违规标识）」 | `wiki_gate.lint_pages`/`render_safety_violations` + `lint_risk_traceability` + `pipeline.cmd_lint` 自身；vault preflight 与当前批回滚事务隔离；**正文小节标题不是门禁**（D-4） |
 
 ---
 
@@ -449,7 +449,7 @@ source/lesson/topic/comparison/synthesis 五个模板已在 `c52d1ab` 删除（D
    闸门 A（`arbitration.windows_blockers`：任一候选未仲裁 / render 未物化 / needs_human / ignore 缺因 → 拒构窗）。
    过闸后 `build_windows_from_blocks` 按 section 切窗、原子块整块打包。
 5. `workorder`：`build_workorder` 重建 registry（保证新鲜）、算 `write_scope` glob、快照概念页/overview/log/source/lessons。
-6. `preflight-eval --strict`：`evaluate` 跑 12 项 check，`check_dual_audit` + `check_evidence_bundle` 是 strict 关键门。
+6. `preflight-eval --strict`：`evaluate` 跑 13 项 check，`check_dual_audit` + `check_evidence_bundle` 是 strict 关键门。
 
 ### 4.6 切块 / windowing 流程
 
@@ -617,7 +617,7 @@ lint 违规 `frontmatter-incomplete`）。
 |------|------|-----------|
 | `STUDY_KB_ROOT` | 重定向状态库/staging/vault 锚点 | 默认仓库根 |
 | `STUDY_KB_PYTHON` | resume-ingest.ps1 优先用的解释器路径 | 留空则用 PATH 上的 python |
-| `STUDY_KB_*`（**27 个**，见 `thresholds.py`） | 覆盖检测/路由/门禁阈值；其中 **18 个**折进 `_CACHE_KEYED`（缓存指纹）、**9 个**（`TOPIC_THRESHOLD`/`LESSON_MIN_BODY`/`CONTENT_MIN_BODY`/`DETECT_RATIO_HIGH`/`RECONCILE_PAGECOUNT_TOL`/`FRAGMENT_MIN_LINES`/`FRAGMENT_SHORTLINE_LEN`/`FRAGMENT_SHORTLINE_RATIO`/`GRAPH_DENSE_DEGREE`）不折进缓存、纯门禁/观测/审计期参数 | 各有默认值 |
+| `STUDY_KB_*`（**28 个**，见 `thresholds.py`） | 覆盖检测/路由/门禁阈值；其中 **18 个**折进 `_CACHE_KEYED`（缓存指纹）、**10 个**（`TOPIC_THRESHOLD`/`LESSON_MIN_BODY`/`CONTENT_MIN_BODY`/`TOPIC_MONOPOLY_RATIO`/`DETECT_RATIO_HIGH`/`RECONCILE_PAGECOUNT_TOL`/`FRAGMENT_MIN_LINES`/`FRAGMENT_SHORTLINE_LEN`/`FRAGMENT_SHORTLINE_RATIO`/`GRAPH_DENSE_DEGREE`）不折进缓存、纯门禁/观测/审计期参数 | 各有默认值 |
 | `MINERU_DISABLE=1` | 强制禁用 MinerU | 未设=按可用性探测 |
 | `MINERU_MODEL_SOURCE` | MinerU 模型源 | 默认 `modelscope`（可设 HF 镜像） |
 | `PYTHONUTF8=1` | CJK 源/路径必设 | 每个新 shell 会话需设 |
@@ -669,10 +669,10 @@ python -m pytest tests --collect-only -q --basetemp=$bt   # 只看分层收集
 | `test_legacy_removed.py` | **架构不回退**：禁 LangGraph / 双 SQLite / plan-units / surya 硬 OCR；确认双审架构（source_audit/mineru_backend/check_dual_audit）在位 |
 | `test_command_docs.py` | **文档与协议一致**：锁定各 skill 必备协议要素、ingest 端到端编排、双审接线、续跑脚本旗标措辞（`--sandbox workspace-write` / `--dangerously-bypass...`）；真跑 pwsh + `.cmd` shim 的烟测拆在 `test_resume_ingest_smoke.py` |
 | `test_tiering_guard.py` | **fail-closed 归层守卫**：`tests/_tiering.py` 注册表 vs 磁盘漂移、非法/冲突 tier 判定（daily 白名单不静默漏测） |
-| `test_skill_standard.py` | 九段合约（T1）、**双树字节对等**（T2）、卫生（T3）、协议关键词完好（T4，含 `kb-postmortem`/`pipeline-doctor` 词表）、source-xray guard（T5） |
+| `test_skill_standard.py` | 九段合约（T1）、**双树协议/语义对等**（T2，归一 project-truth 指针后逐字比对）、卫生（T3）、协议关键词完好（T4，含 `kb-postmortem`/`pipeline-doctor` 词表）、source-xray guard（T5） |
 | `test_state_store.py` | 状态机单向转换、幂等跳过、reopen、window 记账 |
 | `test_locks.py` | 单 vault 锁获取/释放/stale 判定/受控破锁 |
-| `test_preflight_eval.py` | 12 项 check 各自行为（纯 check_* 已 parametrize；CLI wiring 拆在 `test_preflight_eval_cli.py`，端到端 evaluate 独立） |
+| `test_preflight_eval.py` | 13 项 check 各自行为（纯 check_* 已 parametrize；CLI wiring 拆在 `test_preflight_eval_cli.py`，端到端 evaluate 独立） |
 | `test_source_convert.py` | 后端选择 + 转换契约（needs-vision/backend/classify 判定矩阵已 parametrize，真实 PDF/convert 独立） |
 | `test_conversion_backend_cli.py` | backend/policy CLI 路由 |
 | `test_wiki_gate.py` | lint 各规则（含 `table-wikilink-pipe`/`overview-seed`）、渲染安全（callout 白名单/嵌套）、quiz/命题索引构建 |
@@ -695,13 +695,14 @@ python -m pytest tests --collect-only -q --basetemp=$bt   # 只看分层收集
 
 > 开发时最容易记错的几处，均以源码为准。
 
-**preflight 验收 = 12 项确定性 check**（`preflight_eval.evaluate()` 依次调用）：
+**preflight 验收 = 13 项确定性 check**（`preflight_eval.evaluate()` 依次调用）：
 `check_artifact_schema` / `check_page_coverage` / `check_window_monotonic` / `check_window_contract` /
 `check_asset_traceability` / `check_dual_audit` / `check_evidence_bundle` / `check_risk_coverage` /
 `check_risk_signals`（扫描·OCR） / `check_orphan_blocks`（孤儿块） / `check_source_ref_integrity` /
-`check_detection_distribution`。`--strict` 遇 high/fail → exit 2。
+`check_content_retention`（仅 mineru 后端：空 text/heading 块且无 asset = 归一丢正文，如 Office 列表
+`list_items` 未读） / `check_detection_distribution`。`--strict` 遇 high/fail → exit 2。
 
-**lint 发布门禁规则集 = 27 个违规标识**（`wiki_gate.lint_pages`/`render_safety_violations`/
+**lint 发布门禁规则集 = 33 个违规标识**（`wiki_gate.lint_pages`/`render_safety_violations`/
 `lint_risk_traceability` + `pipeline.cmd_lint` 自身，order/safety/provenance；2026-07-12 静态提取核对）：
 `L1`（裸 evidence id）/ `evidence-footnote` / `source-image-embed`（D-1/G1 正文禁嵌源图）/
 `frontmatter-incomplete`（G2，非 source 内容页必带 `source_refs`）/ `title-duplicate-h1` /
@@ -723,7 +724,12 @@ proposed 页：既无 frontmatter 归属也不在任何 write_set） / **`unacco
 ≥3 成套复活即阻断，单个自然标题合法） / **`session-candidate-missing`** / **`session-identity-mismatch`**
 （2026-07-12：kb-save 会话完整性——candidate 路径缺失或页面 `save_session` 身份不符即整体 fail-closed） /
 **`source-page-missing`**（本批产出 concept 但 `sources/<src>.md` 台账页不存在 → 阻断，2026-07-08 新增；
-kb-save 会话批豁免）。
+kb-save 会话批豁免） / **`source-page-duplicate`** / **`source-page-misplaced`**（源台账页须唯一且只在
+`sources/<src>.md`——同 `source_id` 两页或错位会撞图谱 `source:<id>` 节点 id） / **`window-unread-write`**
+（某窗本轮写了页却没经 `show-window` 读过 → 页内容无源可依；`window-done` 同规 fail-fast） /
+**`windows-unread`**（首次完整 ingest 未读满 100% 窗口，含空写 skip 窗） / **`write-scope-violation`**
+（proposed/台账路径越出 work order 的 `write_scope`——`check-write` 可跳过，故 lint 复检） /
+**`prewrite-snapshot-missing`**（对 work-order 既有页做本轮编辑却无已核验的写前基线，堵"先改后补快照"）。
 **发布门分两段事务隔离（2026-07-11）**：vault preflight（published 渲染旧伤 → 阻断 promote + 按
 rule+path+content_hash 去重进 `Review-Queue/vault-health-*.md`，**不回滚当前批、不写 lint 阶段状态**）→
 batch lint（当前批违规才回滚快照）。kb-save 发布走会话作用域：`lint --source kb-save --session <run_id>`
@@ -753,8 +759,8 @@ content-routing.md`）按 5 分类（理论/方法/案例/参考/观点）判断
 **运维 / 阈值 env 变量**（默认见 `thresholds.py`，改动折进阶段缓存指纹）：
 `STUDY_KB_ROOT`（锚点重定向）/ `STUDY_KB_PYTHON`（续跑解释器）/ `PYTHONUTF8=1`（CJK 必设）/
 `MINERU_DISABLE=1`（禁 MinerU）/ `MINERU_MODEL_SOURCE`（模型源，默认 modelscope）；
-**精确 27 个** `STUDY_KB_*` 检测/门禁阈值（18 个折进缓存指纹 `_CACHE_KEYED` + 9 个门禁/观测/审计专用不折进，
-如 `STUDY_KB_TOPIC_THRESHOLD`/`STUDY_KB_GRAPH_DENSE_DEGREE`）。
+**精确 28 个** `STUDY_KB_*` 检测/门禁阈值（18 个折进缓存指纹 `_CACHE_KEYED` + 10 个门禁/观测/审计专用不折进，
+如 `STUDY_KB_TOPIC_THRESHOLD`/`STUDY_KB_TOPIC_MONOPOLY_RATIO`/`STUDY_KB_GRAPH_DENSE_DEGREE`）。
 
 **命名易混点：**
 - `preflight_eval`（CLI 验收模块）vs `source-preflight`（只读预处理 skill）——同根不同物。

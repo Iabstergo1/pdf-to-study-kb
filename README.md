@@ -10,7 +10,7 @@
   <img alt="Output" src="https://img.shields.io/badge/output-Obsidian%20vault-7C3AED">
 </p>
 
-这是一个 **对话式 agent 驱动的知识库编译器**：你在 **Claude Code 或 Codex**（任选其一）里用自然语言说“把这本书加进知识库”，背后的 LLM 就会自己跑完**预处理 → 写笔记 → 概念归一 → 收尾发布**全流程。两个 agent 共享同一套确定性 CLI 与同一个 vault，行为一致、可互换。不是“按章节翻译原文”，而是 [llm-wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) 模式：相同概念**合并更新**，新内容**新增页面**，库越长越互联。
+这是一个 **对话式 agent 驱动的知识库编译器**：你在 **Claude Code 或 Codex**（任选其一）里用自然语言说“把这本书加进知识库”，背后的 LLM 就会自己跑完**预处理 → 写笔记 → 概念归一 → 收尾发布**全流程。两个 agent 共享同一套确定性 CLI 与同一个 vault，确定性行为一致（调用界面、权限与写作质量因 agent 而异）。不是“按章节翻译原文”，而是 [llm-wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) 模式：相同概念**合并更新**，新内容**新增页面**，库越长越互联。
 
 > **它不是什么**：不是 PDF 翻译器，不是单篇摘要工具，也不是无人值守的批量转换器——唯一的 LLM 是你**手动触发**的对话；只读 / 翻译 / 解释类请求不会写库。
 
@@ -78,7 +78,7 @@ python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yam
 装好后，用 **Claude Code 或 Codex** 打开本项目根目录，即可进入下一节的对话流程。
 
 > [!NOTE]
-> **Claude Code 与 Codex 完全对等、二选一即可**：两者各读自己的项目真值（[`CLAUDE.md`](CLAUDE.md) / [`AGENTS.md`](AGENTS.md)）与各自的 skill 树（[`.claude/skills/`](.claude/skills/) 与 [`.agents/skills/`](.agents/skills/)，两树**字节对等**），但**调用同一套 CLI、操作同一个 `wiki/`**，因此行为一致、可互换。你**无需两个都装**。
+> **Claude Code 与 Codex 二选一即可**：两者各读自己的项目真值（[`CLAUDE.md`](CLAUDE.md) / [`AGENTS.md`](AGENTS.md)）与各自的 skill 树（[`.claude/skills/`](.claude/skills/) 与 [`.agents/skills/`](.agents/skills/)，两树**协议 / 语义对等**——仅各自的 project-truth 指针不同），且**调用同一套 CLI、操作同一个 `wiki/`**，因此确定性行为一致；调用界面、权限与写作质量因 agent 而异。你**无需两个都装**。
 
 > [!NOTE]
 > 必需依赖只有 **PyMuPDF + PyYAML**（见 [`requirements.txt`](requirements.txt)）。
@@ -96,7 +96,7 @@ python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yam
 
 ## 💬 如何使用（端到端工作流）
 
-打开项目后**全程用自然语言对话**，模型按意图自动调用对应 skill（也可手动输入 `/<skill>`）。你**无需记命令、也无需自己撰写笔记内容**——内容由模型在对话中生成。典型一本书的流程只有三步：
+打开项目后**全程用自然语言对话**，模型按意图自动调用对应 skill（也可手动触发：Claude Code 用 `/<skill>` 斜杠命令；Codex 用 `/skills` 浏览选择或 `$skill-name` 提及）。你**无需记命令、也无需自己撰写笔记内容**——内容由模型在对话中生成。典型一本书的流程只有三步：
 
 ### ① 填学习目标 —— 唯一需要你手写的输入（可选但推荐）
 
@@ -177,7 +177,7 @@ flowchart TD
 | **L1 解析与双审** | `source_profile` / `source_convert` / `source_backends` / `source_audit` | **来源类型路由**：按 markdown / native PDF / scanned PDF / low-text PDF / mixed PDF / DOCX / PPTX 选后端（PyMuPDF / MinerU / markdown）。PDF 走 PyMuPDF 快速抽取 + **MinerU 作必需 structural reviewer 双审**（`source-audit` 记录分歧 / 接受 / 降级）；扫描·低文本 PDF、DOCX / PPTX 由 MinerU primary 解析；MinerU 不可用 **fail-closed**（绝不伪装成功） | `parse_report.json`：`source_type` · `backend_reason` · `selected_backend` · `dual_audit_required` ＋ `reconciliation.json`：`dual_audited` · `review_status` · `disagreements` · `degraded` |
 | **L2 结构还原与证据归一** | `blocks.jsonl` · `chapters.json` · `evidence.json` · `assets/` | 保留页码、标题层级、章节、段落、表/图/公式；**`source.md` 是主顺读文本，但不是绝对真相、预处理绝不重写它**——哪些页文本不可信（公式抽碎 / 表被线性化 / 图缺资产），由 `evidence.json` + `risk_flags` + `assets` **旁路补足**（证据路由），而不是改写正文 | block：`page` · `block_id` · `type` · `heading_path` · `chapter_id` · `source_ref` · `risk_flags` · `element_id`（表→`t{n}` / 图→`f{n}`） ＋ `evidence.json`：`risk_flags_by_page` · `candidates` · `soft_risk_pages` |
 | **L3 读取窗口与导航** | `chaptering` / `windowing` · `chapters.json` · `windows.jsonl` | **读取导航层**：`chapters.json` 给全书结构导航，`windows.jsonl` 给 ingest LLM 局部读取边界（block-aware、顺序稳定、可追溯、**长表不切**）。窗口只是**读取单位，不决定最终 wiki 页面结构** | window：`source_id` · `chapter_title` · `page_start`–`page_end` · `block_ids` · `contains` · `assets` · `risk_flags` · `source_refs` |
-| **L4 agent 仲裁与确定性验收** | `source-audit` · `arbitration-*` · `preflight-eval` · `source-preflight` · `ingest` | **写前路由 + 证据闭环**：`source-audit` 把"哪些 hard-risk 分歧需仲裁"整理成 arbitration queue；**agent 只读最小证据包、输出 `render` / `ignore` / `needs_human` 结构化裁决**，CLI 物化（补整页图 / 置 `needs_vision` / 标风险）；`preflight-eval` 跑 **12 项**确定性验收——strict 把关的是"**交给 ingest LLM 的证据是否完整闭环**"，不是"双审跑没跑" | `arbitration/{queue,decisions}.json` ＋ `preflight_eval.json`：12 项（字段契约 / 页码覆盖 / 窗口单调 / 窗口契约 / asset 可追溯 / `dual_audit` / `evidence_bundle` / `risk_coverage` / 扫描·OCR / 孤儿块 / source_ref 完整 / 检测分布）；`--strict` 遇 high/fail **非零退出** |
+| **L4 agent 仲裁与确定性验收** | `source-audit` · `arbitration-*` · `preflight-eval` · `source-preflight` · `ingest` | **写前路由 + 证据闭环**：`source-audit` 把"哪些 hard-risk 分歧需仲裁"整理成 arbitration queue；**agent 只读最小证据包、输出 `render` / `ignore` / `needs_human` 结构化裁决**，CLI 物化（补整页图 / 置 `needs_vision` / 标风险）；`preflight-eval` 跑 **13 项**确定性验收——strict 把关的是"**交给 ingest LLM 的证据是否完整闭环**"，不是"双审跑没跑" | `arbitration/{queue,decisions}.json` ＋ `preflight_eval.json`：13 项（字段契约 / 页码覆盖 / 窗口单调 / 窗口契约 / asset 可追溯 / `dual_audit` / `evidence_bundle` / `risk_coverage` / 扫描·OCR / 孤儿块 / source_ref 完整 / 内容保全 / 检测分布）；`--strict` 遇 high/fail **非零退出** |
 
 > **可追溯引用贯穿四层**：每个 block 带 `source_ref`（`p{页码}#{块号}`）＋ `chapter_id` ＋ `element_id` ＋ `risk_flags`，每个 window 列出其 `source_refs`，写库时 `lint` 强制 lesson 可追溯回来源——产出能落到“第几页、第几张表”，而非无源的自信。零成本先验：`python scripts/pipeline.py preflight-eval --source <src> --strict`（见下方 CLI）。
 
@@ -185,7 +185,7 @@ flowchart TD
 
 ## 🗂️ 项目结构
 
-仓库分工一目了然：**业务逻辑只在 `scripts/`**，对话编排在两套**字节对等**的 skill 树，运行时产物（`wiki/` `pipeline-workspace/` 与 `books/` 内容）一律 gitignore——每机自有、不入版本控制。
+仓库分工一目了然：**业务逻辑只在 `scripts/`**，对话编排在两套**协议 / 语义对等**的 skill 树（仅 project-truth 指针不同），运行时产物（`wiki/` `pipeline-workspace/` 与 `books/` 内容）一律 gitignore——每机自有、不入版本控制。
 
 ```text
 pdf-to-study-kb/
@@ -194,7 +194,7 @@ pdf-to-study-kb/
 ├── README.md                 # 本文件
 ├── requirements.txt          # 仅 PyMuPDF + PyYAML + pytest
 ├── scripts/
-│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（44 子命令，全部业务逻辑在此）
+│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（46 子命令，全部业务逻辑在此）
 │   ├── state_store.py / locks.py                # 业务 SQLite 状态机 / 单-ingest 并发锁
 │   ├── source_profile.py / source_convert.py / source_artifacts.py / chaptering.py   # L1 解析 + L2 结构契约
 │   ├── source_backends/      # 后端：pymupdf（fast path）/ markdown / 可选 mineru（结构化）
@@ -205,7 +205,7 @@ pdf-to-study-kb/
 │   ├── install_mineru.py                         # 可选：按机型自动装 MinerU + 匹配 CUDA torch
 │   └── resume-ingest.ps1                         # 无人值守续跑（OS 调度脚本，模型可用性探针 + 有界续跑）
 ├── .claude/skills/<name>/SKILL.md   # 11 个对话式 skill（Claude 读）
-├── .agents/skills/<name>/SKILL.md   # 同 11 个（Codex 读，与上者字节对等）
+├── .agents/skills/<name>/SKILL.md   # 同 11 个（Codex 读，与上者协议/语义对等，仅 truth 指针不同）
 ├── docs/skill-runtime/       # skill 运行时协议（routing / schema / 概念归一 / save-back / 标准）
 ├── templates/                # 运行时模板（concept：resolve-concept 新建骨架 / overview：init-vault seed）；其余页型正文交 purpose + 写作 LLM
 ├── tests/                    # 确定性测试（即规格）
@@ -218,7 +218,7 @@ pdf-to-study-kb/
 
 ## 🧩 对话式 skills 全表
 
-在 Claude Code 或 Codex 中，**直接用自然语言描述即可**——模型会按意图自动调用对应 skill（也可手动输入 `/<skill>`）。两套 agent 各读自己的 skill 树（`.claude/skills/` 与 `.agents/skills/`），但**字节对等、调用同一套 CLI**，因此行为一致。
+在 Claude Code 或 Codex 中，**直接用自然语言描述即可**——模型会按意图自动调用对应 skill（也可手动触发：Claude Code 用 `/<skill>` 斜杠命令；Codex 用 `/skills` 浏览或 `$skill-name` 提及）。两套 agent 各读自己的 skill 树（`.claude/skills/` 与 `.agents/skills/`），**协议 / 语义对等（仅 truth 指针不同）、调用同一套 CLI**，因此确定性行为一致。
 所有写库 skill 全程受确定性 CLI 守卫保护，只写 `status: proposed`。
 
 | skill | 一句话说什么就触发 | 它做什么 |
@@ -241,7 +241,7 @@ pdf-to-study-kb/
 
 所有 skill 背后调用的都是 `python scripts/pipeline.py <command>`（零 LLM、可独立运行，**全部业务逻辑与安全守卫都在这里**）。日常对话无需手动输入；该接口面向**精细控制、问题排查、手动重跑某一阶段、无人值守脚本化**等高级场景。
 
-命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 38 个子命令：
+命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 46 个子命令（以 `python scripts/pipeline.py --help` 为准）：
 
 <details>
 <summary><b>展开：完整 CLI 命令参考</b></summary>
@@ -279,7 +279,7 @@ pdf-to-study-kb/
 | `arbitration-resolve` | 把某 `needs_human` 页改判为 `render`/`ignore`（人工 / agent 闭环，`--reason` 必填、审计） | → `decisions.json` | `--source --page --decision --reason` |
 | `windows` | 生成确定性 processing windows（block-aware，长表不切）；PDF 须先双审且分歧闭环，否则 fail-closed | source.md → `windows.jsonl` | `--source [--dev-bypass]` |
 | `workorder` | 生成 ingest 事务契约 | → `staging/<src>/workorder.yaml` | `--source` |
-| `preflight-eval` | **L4 确定性验收门**：**12 项**结构检查（字段契约 / 页码覆盖 / 窗口单调 / 窗口契约 / asset 可追溯 / `dual_audit` / `evidence_bundle` / `risk_coverage` / 扫描·OCR / 孤儿块 / source_ref 完整 / 检测分布）→ JSON；验收的是“证据是否闭环进 LLM 输入” | staging → `preflight_eval.json` | `--source [--strict] [--json <path>]` |
+| `preflight-eval` | **L4 确定性验收门**：**13 项**结构检查（字段契约 / 页码覆盖 / 窗口单调 / 窗口契约 / asset 可追溯 / `dual_audit` / `evidence_bundle` / `risk_coverage` / 扫描·OCR / 孤儿块 / source_ref 完整 / **内容保全**（mineru 空块 = 归一丢正文） / 检测分布）→ JSON；验收的是“证据是否闭环进 LLM 输入” | staging → `preflight_eval.json` | `--source [--strict] [--json <path>]` |
 
 ### `ingest` 会话支撑（通常由 skill 内部调用）
 
@@ -304,6 +304,7 @@ pdf-to-study-kb/
 | `vault-lint` | 全库渲染安全健康门禁（published∪proposed 已知渲染陷阱，只读、违规非零退出、可 CI） | — |
 | `reopen` | 重开已收尾来源做增量补充（重建 workorder + 状态机回 `workorder_ready`） | `--source` |
 | `reset-source` | **维护**：确定性重置到某预处理阶段刚完成（forward-only 状态机的回退出口；**默认 dry-run**，只删下游 stage-run 缓存行 + 插 reset 审计行，不动 ingest_progress/artifacts/work_orders/review_proposals/staging） | `--source --to {registered,profiled,converted,windowed,workorder_ready} [--apply]` |
+| `retract-source` | **证据先行撤库**（**默认 dry-run**）：先导出证据包（页字节 + SHA256 manifest + 全部账本行）并核验，才删该源独占页、清账本、重置状态、重建派生层；共享页与 `managed_by: human` 页只报告不删 | `--source [--to {workorder_ready,registered}] [--apply]` |
 | `sync-assets` | 把本源 staging 难页 PNG 同步进 `wiki/assets/<src>/`（预处理 / reopen 会自动调用） | `--source` |
 | `staging-clean` | **磁盘治理**：staging 三分类报告（审计保留 / 可再生可删 mineru_raw·audit·diag·dump_* / unknown 一律保留）；**默认 dry-run**，`--apply` 双护栏（source 已 published + assets 同步核对通过） | `--source [--apply]` |
 | `promotion-candidates` | 检测跨域提升候选（人工确认） | `--propose` |
@@ -313,7 +314,7 @@ pdf-to-study-kb/
 
 ### skill 自进化（零 LLM 命令；唯一 LLM 是人触发的 `skill-evolve` skill）
 
-> **为什么有这组**：让**反复出现的 lint 失败**能被沉淀成对 skill 自身的有界改进，而不是同一个坑一踩再踩。`skill-mine` 把失败信号聚成 `backlog.yaml`；人触发的 `skill-evolve` skill 写出 bounded 编辑；`skill-gate` 当门禁（pytest + 双树字节对等 + 只许动 skill 两树，挡越权改 `tests/`）；`skill-stage` 登记候选；最终 `skill-adopt` 由**人**重跑门禁后才合并进双树。改的始终是 skill 自己，绝不写 vault。
+> **为什么有这组**：让**反复出现的 lint 失败**能被沉淀成对 skill 自身的有界改进，而不是同一个坑一踩再踩。`skill-mine` 把失败信号聚成 `backlog.yaml`；人触发的 `skill-evolve` skill 写出 bounded 编辑；`skill-gate` 当门禁（pytest + 双树协议/语义对等 + 只许动 skill 两树，挡越权改 `tests/`）；`skill-stage` 登记候选；最终 `skill-adopt` 由**人**重跑门禁后才合并进双树。改的始终是 skill 自己，绝不写 vault。
 > **信号的进与出**：失败信号只增不减会让 backlog 越来越脏——已修复的坑永远占着计数。`proposals-resolve` 是配套的**退场机制**：修复验证后把对应信号标 `resolved`，backlog 只统计 `open` 行并给每簇带 `last_seen` 时间戳。每本书发布后跑一次 `kb-postmortem` skill（指标 + 偏离 + backlog 增量 → 报告 + 建议），这个"进（mine）—评（postmortem）—出（resolve）—改（evolve）"的循环才是完整闭环。
 
 | 命令 | 作用 | 关键参数 |
@@ -329,7 +330,7 @@ pdf-to-study-kb/
 > **运维 / 阈值环境变量**（默认值见 `scripts/thresholds.py`，改动会折进阶段缓存指纹、自动失效缓存）：
 > `STUDY_KB_ROOT`（状态库/staging/vault 锚点）、`STUDY_KB_PYTHON`（续跑脚本优先解释器）、`PYTHONUTF8=1`（CJK 源/路径必设）、
 > `MINERU_DISABLE=1`（强制禁用 MinerU）、`MINERU_MODEL_SOURCE`（MinerU 模型源，默认 `modelscope`）；
-> 检测/门禁阈值约 30 个 `STUDY_KB_*`（如 `STUDY_KB_VECTOR_FIGURE_DRAW` 矢量图判定、`STUDY_KB_FORMULA_STRONG` 强公式信号、
+> 检测/门禁阈值 28 个 `STUDY_KB_*`（如 `STUDY_KB_VECTOR_FIGURE_DRAW` 矢量图判定、`STUDY_KB_FORMULA_STRONG` 强公式信号、
 > `STUDY_KB_TOPIC_THRESHOLD` 建 topic 的概念数阈值），全部可 env 覆盖，逐项见 `scripts/thresholds.py`。
 
 </details>
@@ -482,7 +483,7 @@ registered → profiled → converted → windowed → workorder_ready
 
 ### 上下文窗口压缩：手动续跑
 
-上下文被 auto-compact 后，进度不丢——确定性层已落盘一切：`pipeline.py next`（机器推导的下一步）与各 staging digest 顶部的 `## RESUME` 块（`ingest` skill 每个 window 维护）。在会话中说一句“继续”，agent 会自行跑 `pipeline.py next` 并读 digest RESUME 块定位到下一个未完成 window 续跑；该锚点对任意来源自动具备，不限于特定文档。两 agent 的**共享契约是 `pipeline.py` + `digest.md`（含 RESUME 块）+ 字节对等的 skill 双树**，对 Claude / Codex 一致。
+上下文被 auto-compact 后，进度不丢——确定性层已落盘一切：`pipeline.py next`（机器推导的下一步）与各 staging digest 顶部的 `## RESUME` 块（`ingest` skill 每个 window 维护）。在会话中说一句“继续”，agent 会自行跑 `pipeline.py next` 并读 digest RESUME 块定位到下一个未完成 window 续跑；该锚点对任意来源自动具备，不限于特定文档。两 agent 的**共享契约是 `pipeline.py` + `digest.md`（含 RESUME 块）+ 协议/语义对等的 skill 双树（仅 truth 指针不同）**，对 Claude / Codex 一致。
 
 > **无人值守续跑不依赖任何会话级机制**：下一节的 `resume-ingest.ps1` 由 OS 定时器独立触发，其 prompt 自带“读 RESUME 块 + 跑 `pipeline.py next`”的定位逻辑，与本节的手动续跑互不依赖。
 
@@ -570,7 +571,7 @@ python -m pytest tests --collect-only -q --basetemp=$bt
 2. 改 scripts/（业务逻辑），或 docs/skill-runtime、.claude/skills + .agents/skills（两树同步改）
 3. 普通改动先跑日常层：python -m pytest tests -q -m fast --basetemp=<fresh-dir>（新增测试文件须在 tests/_tiering.py 登记 tier，否则收集直接失败）
 4. 发布 / 大重构 / 真实书验证前跑全量：python -m pytest tests -q --basetemp=<fresh-dir>（须全绿；含架构守卫 test_legacy_removed 与文档守卫 test_command_docs）
-5. 若动了 skill：两套 skill 树须保持字节对等（skill-gate 会校验）
+5. 若动了 skill：两套 skill 树须保持协议/语义对等（仅 project-truth 指针不同；skill-gate/T2 会校验）
 6. 提 PR，说明改了什么、为什么
 ```
 
@@ -587,4 +588,4 @@ python -m pytest tests --collect-only -q --basetemp=$bt
 | [`docs/user-guide.md`](docs/user-guide.md) | **用户使用说明**：面向使用者的完整操作手册（安装 / 端到端流程 / 每个操作怎么用 / 故障排查） |
 | [`docs/developer-guide.md`](docs/developer-guide.md) | **开发实现说明**：面向开发者的架构 / 模块职责 / 命令实现映射 / 数据契约 / 测试分层 |
 | [`docs/skill-runtime/`](docs/skill-runtime/) | skills 的运行时协议（routing / schema / 概念归一 / save-back 准入），skill 按需加载 |
-| [`.claude/skills/`](.claude/skills/) · [`.agents/skills/`](.agents/skills/) | 11 个对话式 skill 的指令文件（Claude 读前者、Codex 读后者，两树字节对等） |
+| [`.claude/skills/`](.claude/skills/) · [`.agents/skills/`](.agents/skills/) | 11 个对话式 skill 的指令文件（Claude 读前者、Codex 读后者，两树协议/语义对等，仅 truth 指针不同） |
