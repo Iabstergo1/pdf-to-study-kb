@@ -111,7 +111,8 @@ def test_kb_query_skill_readonly_and_persists():
 def test_kb_save_skill_gate_and_discipline():
     text = _skill("kb-save")
     for must in ["save-back-policy", "admission gate", "status: proposed", "decision.md",
-                 "resolve-concept", "check-write", "check-session", "--saved", "lint"]:
+                 "resolve-concept", "check-write", "check-session", "--saved", "lint",
+                 "canonical", "one direct", "防手工伪造", "legacy saved session", "Review-Queue"]:
         assert must in text, f"kb-save missing: {must}"
 
 
@@ -126,7 +127,8 @@ def test_kb_review_and_semantic_lint_skills():
 def test_save_back_policy_doc():
     text = (ROOT / "docs/skill-runtime/save-back-policy.md").read_text(encoding="utf-8")
     for must in ["admission gate", "At least one", "Do not save by default", "one-off fact",
-                 "managed_by: human", "resolve_or_create_concept"]:
+                 "managed_by: human", "new-page-only", "Review-Queue", "canonical",
+                 "local cooperative-workflow ledger", "Legacy session recovery"]:
         assert must in text, f"save-back-policy.md missing: {must}"
 
 

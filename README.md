@@ -283,7 +283,9 @@ pdf-to-study-kb/
 
 ### `ingest` 会话支撑（通常由 skill 内部调用）
 
-> **为什么有这组**：保证 LLM 写库这一步"**可断点续跑 + 不越界 + 不覆盖人工页**"。`ingest-start`/`ingest-done` 取/释放并发锁并校验 registry 是否过期；`window-start`/`window-done`/`window-fail` 做窗级记账（中断后能从下一个未完成 window 续跑，并维持锁心跳）；`resolve-concept` 是概念去重的**唯一入口**（命中合并、未命中新建，核心约束②）；`check-write` 必须先于编辑，且会为既有页原子保存首份基线，`window-done` 与 `lint` 都会复核，因而“先改后补快照”不能过关（核心约束④）。
+> **为什么有这组**：保证 LLM 写库这一步"**可断点续跑 + 不越界 + 不覆盖人工页**"。`ingest-start`/`ingest-done` 取/释放并发锁并校验 registry 是否过期；`window-start`/`window-done`/`window-fail` 做窗级记账（中断后能从下一个未完成 window 续跑，并维持锁心跳）；`resolve-concept` 是概念去重的**唯一入口**（命中合并、未命中新建，核心约束②）。ingest 的 `check-write` 会为既有页原子保存首份基线，`window-done` 与 `lint` 都会复核；kb-save 则以 `--session` 只授权候选集内的**全新页**并写 `write_authorizations.json`，既有目标 fail-closed 转 Review-Queue。
+
+> **kb-save 会话契约**：`<run_id>` 只能是 `query-sessions/` 下的单层目录名；candidate 必须是无重复的 canonical vault 相对路径字符串，授权项只能是精确 `{path, mode: "new"}`，两者一一对应。授权账本只是本地协作流程记录，不防手工伪造、不得手填。旧会话若缺授权账本会 fail-closed：目标仍不存在时逐项重跑 `check-write`；目标已存在时不得补票，改走 Review-Queue/`kb-review` 或新会话的新路径。
 
 | 命令 | 作用 | 关键参数 |
 |------|------|------|
@@ -291,7 +293,7 @@ pdf-to-study-kb/
 | `show-window` | 打印指定 window 的源文本 | `--source --window` |
 | `window-start` / `window-done` / `window-fail` | window 级记账（断点续跑 + 锁心跳）；`--writes-file` 从 UTF-8 文件读 JSON 数组（绕开 Windows 引号剥离坑，与 `--writes` 互斥） | `--source --window [--hash/--writes/--writes-file/--error]` |
 | `resolve-concept` | 概念归一唯一入口：命中合并 / 未命中新建 | `--mention --domain [--alias --ref-source --ref-sections]` |
-| `check-write` | 写前守卫：边界 + 覆盖保护；既有页自动保存首份写前基线（DENY 则 `exit 1`） | `--source --path` |
+| `check-write` | 写前守卫：ingest 做边界/覆盖保护与首份基线；kb-save 用 `--source kb-save --session <run_id>` 只授权候选集内全新页并记 `write_authorizations.json`（既有页 DENY） | `--source --path [--session]` |
 | `snapshot-page` | 兼容命令：复用 `check-write`，幂等确认首份基线；不可写后补救 | `--source --path` |
 
 ### 收尾、提升与查询
@@ -300,7 +302,7 @@ pdf-to-study-kb/
 
 | 命令 | 作用 | 关键参数 |
 |------|------|------|
-| `lint` | 收尾门禁（vault preflight 事务隔离 + batch lint）：proposed 过则 promote + 重建 index/registry + 知识图谱(graph-data+HTML)、当前批违规才回滚 + Review-Queue；kb-save 会话发布：`--source kb-save --session <run_id>`（candidate 集定发布范围与记账，页面须带 `save_session` 身份标记） | `--source [--session]` |
+| `lint` | 收尾门禁（vault preflight 事务隔离 + batch lint）：proposed 过则 promote + 重建 index/registry + 知识图谱(graph-data+HTML)、当前批违规才回滚 + Review-Queue；kb-save 会话发布复核 candidate、`save_session` 与 `write_authorizations.json` | `--source [--session]` |
 | `vault-lint` | 全库渲染安全健康门禁（published∪proposed 已知渲染陷阱，只读、违规非零退出、可 CI） | — |
 | `reopen` | 重开已收尾来源做增量补充（重建 workorder + 状态机回 `workorder_ready`） | `--source` |
 | `reset-source` | **维护**：确定性重置到某预处理阶段刚完成（forward-only 状态机的回退出口；**默认 dry-run**，只删下游 stage-run 缓存行 + 插 reset 审计行，不动 ingest_progress/artifacts/work_orders/review_proposals/staging） | `--source --to {registered,profiled,converted,windowed,workorder_ready} [--apply]` |
@@ -309,7 +311,7 @@ pdf-to-study-kb/
 | `staging-clean` | **磁盘治理**：staging 三分类报告（审计保留 / 可再生可删 mineru_raw·audit·diag·dump_* / unknown 一律保留）；**默认 dry-run**，`--apply` 双护栏（source 已 published + assets 同步核对通过） | `--source [--apply]` |
 | `promotion-candidates` | 检测跨域提升候选（人工确认） | `--propose` |
 | `promote-concept` | 机械提升一个概念为 shared | `--id concept.<domain>.<slug>` |
-| `check-session` | query-session 目录契约检查（Q1） | `--id <run_id> [--saved]` |
+| `check-session` | query-session 目录契约检查（Q1）；run_id 单层校验，saved 模式严格核对 canonical candidate 与 new-only 授权一一对应 | `--id <run_id> [--saved]` |
 | `ingest-stats` | 只读代理指标：窗口成败/阶段耗时与重跑/lint 失败/窗口账本估算 `pages_estimate` + 精确交付清单 `page_inventory`（报告总页数只认后者）/违规分布；不伪造 token/费用 | `--source [--json]` |
 
 ### skill 自进化（零 LLM 命令；唯一 LLM 是人触发的 `skill-evolve` skill）

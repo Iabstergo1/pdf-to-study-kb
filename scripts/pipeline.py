@@ -1416,11 +1416,106 @@ def _run_snapshot_context(db, source_id):
     return run_id, manifest
 
 
-def _prepare_write(db, source_id, rel_path):
+_KB_SAVE_WRITE_SCOPE = [
+    "topics/**",
+    "comparisons/**",
+    "synthesis/**",
+    "overview.md",
+    "log.md",
+]
+
+
+def _query_session_dir(session_id):
+    """Return one direct query-session child; reject traversal, drive paths and link escapes."""
+    raw = str(session_id or "")
+    if not raw or raw != raw.strip() or raw in (".", "..") or raw.endswith(".") or \
+            any(ch in raw for ch in ("/", "\\", ":")) or \
+            any(ord(ch) < 32 for ch in raw):
+        raise SystemExit(f"invalid query-session id: {raw!r}（只允许单层目录名）")
+    root = (_workspace_root() / "pipeline-workspace/query-sessions").resolve()
+    target = (root / raw).resolve()
+    if target.parent != root:
+        raise SystemExit(f"invalid query-session id: {raw!r}（路径逃出 query-sessions）")
+    return target
+
+
+def _prepare_kb_save_write(rel_path, session_id):
+    """Authorize one *new* kb-save candidate without fabricating ingest state.
+
+    Existing-page updates need a session-scoped immutable baseline/rollback contract that kb-save does
+    not yet provide, so they fail closed to Review-Queue.  The authorization ledger is a local workflow
+    record that lint reconciles with the candidate set; it is not an anti-tamper attestation.
+    """
+    import json
+    import ingest_guards
+    import query_session
+
+    if not session_id:
+        raise SystemExit("check-write --source kb-save 必须带 --session <run_id>")
+    session_dir = _query_session_dir(session_id)
+    # 写前尚无 authorization 文件；其余 saved-mode 输入必须先齐全（admission/evidence/decision）。
+    problems = [p for p in query_session.check_session(session_dir, saved=True)
+                if "write_authorizations.json" not in p]
+    if problems:
+        for problem in problems:
+            print(f"[Q1] {problem}")
+        raise SystemExit(f"kb-save session {session_id} 未达到写前契约")
+
+    try:
+        rel = query_session.canonical_vault_rel(rel_path)
+    except ValueError as exc:
+        print(f"DENY {rel_path}: non-canonical kb-save path: {exc}")
+        raise SystemExit(1)
+    if not ingest_guards.in_write_scope(rel, _KB_SAVE_WRITE_SCOPE):
+        print(f"DENY {rel}: outside kb-save write scope")
+        raise SystemExit(1)
+    try:
+        candidates = set(query_session.load_candidate_write_set(session_dir))
+    except ValueError as exc:
+        raise SystemExit(str(exc))
+    if rel not in candidates:
+        print(f"DENY {rel}: not in kb-save session candidate_write_set")
+        raise SystemExit(1)
+
+    vault = _vault_dir().resolve()
+    target = (vault / rel).resolve()
+    try:
+        target.relative_to(vault)
+    except ValueError:
+        print(f"DENY {rel}: resolved target escapes the vault (symlink/junction traversal)")
+        raise SystemExit(1)
+    # Strict new-only boundary: an old/stale/pre-filled authorization never overrides current disk truth.
+    if target.exists():
+        print(f"DENY {rel}: existing kb-save target is unsupported without a session baseline; "
+              "write a Review-Queue proposal")
+        raise SystemExit(1)
+
+    auth_path = session_dir / "write_authorizations.json"
+    try:
+        authorizations = query_session.load_write_authorizations(
+            session_dir, allow_missing=True, allow_empty=True)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
+    extra_authorizations = {entry["path"] for entry in authorizations} - candidates
+    if extra_authorizations:
+        extras = ", ".join(sorted(extra_authorizations))
+        raise SystemExit(
+            "write_authorizations.json contains paths outside candidate_write_set.json: " + extras)
+    if any(entry["path"] == rel for entry in authorizations):
+        return rel, f"kb-save new candidate already authorized; session={session_id}", auth_path
+    authorizations.append({"path": rel, "mode": "new"})
+    auth_path.write_text(json.dumps(authorizations, ensure_ascii=False, indent=2) + "\n",
+                         encoding="utf-8", newline="\n")
+    return rel, f"new kb-save candidate authorized; session={session_id}", auth_path
+
+
+def _prepare_write(db, source_id, rel_path, *, session_id=None):
     """check-write 的单一实现：授权既有页时原子留下首份写前基线。"""
     import state_store
     import ingest_guards
     import snapshots
+    if source_id == "kb-save":
+        return _prepare_kb_save_write(rel_path, session_id)
     if _source_is_running_ingest(db, source_id):
         _require_vault_lock(db, source_id)
     wo = _workorder_data(db, source_id)
@@ -1476,13 +1571,17 @@ def _prewrite_snapshot_violations(db, source_id, rel_paths):
 def cmd_check_write(args):
     """写前守卫：写入边界 + 覆盖保护 + 既有页自动快照，DENY 时 exit 1。"""
     db = _vault_state_db()
-    rel, reason, _manifest = _prepare_write(db, args.source, args.path)
+    rel, reason, _manifest = _prepare_write(
+        db, args.source, args.path, session_id=getattr(args, "session", None))
     print(f"ALLOW {rel}: {reason}")
 
 
 def cmd_snapshot_page(args):
     """兼容命令：复用 check-write；既有页的首份基线已由它自动、幂等地保存。"""
     import snapshots
+    if args.source == "kb-save":
+        raise SystemExit("snapshot-page 不支持 kb-save：当前 kb-save 只授权全新 candidate；"
+                         "用 check-write --source kb-save --session <run_id>，既有页改走 Review-Queue")
     db = _vault_state_db()
     rel, reason, manifest = _prepare_write(db, args.source, args.path)
     # 新页/本轮新建页没有 workorder 基线；保留旧命令的显式快照能力。take_snapshot
@@ -1536,19 +1635,24 @@ def cmd_lint(args):
     # 历史/未保存/其他 run_id 一律不得代记账；kb-save 不是状态机 source，跳过 stage 记录。
     session_mode = args.source == "kb-save"
     session_set: set[str] = set()
+    session_authorized: set[str] = set()
     if session_mode:
         import query_session
         if not getattr(args, "session", None):
             raise SystemExit("lint --source kb-save 必须带 --session <run_id>：kb-save 的发布范围"
                              "与记账只认该会话的 candidate_write_set.json（历史/未保存会话不得代记账）")
-        sess_dir = _workspace_root() / "pipeline-workspace/query-sessions" / args.session
+        sess_dir = _query_session_dir(args.session)
         problems = query_session.check_session(sess_dir, saved=True)
         if problems:
             for pb in problems:
                 print(f"[Q1] {pb}")
             raise SystemExit(f"kb-save session {args.session} 未过 saved 契约（先补齐再 lint）")
-        session_set = {str(x).replace("\\", "/") for x in
-                       json.loads((sess_dir / "candidate_write_set.json").read_text(encoding="utf-8"))}
+        try:
+            session_set = set(query_session.load_candidate_write_set(sess_dir))
+            auth_entries = query_session.load_write_authorizations(sess_dir)
+        except ValueError as exc:
+            raise SystemExit(str(exc))
+        session_authorized = {entry["path"] for entry in auth_entries}
     proposed_all = wiki_gate.collect_proposed(vault) if vault.exists() else []
     for s in (wiki_gate.stray_files(vault) if vault.exists() else []):   # C4：杂物软警告（非阻断）
         print(f"[warn] 杂物文件（疑似 Obsidian 点坏链误建，可删）：{s}")
@@ -1634,6 +1738,18 @@ def cmd_lint(args):
                              "或 frontmatter 归属），fail-closed 阻断发布"}
                   for p in orphans] + wiki_gate.lint_pages(vault, proposed,
                                                            phase_e=not session_mode)
+    if session_mode:
+        import ingest_guards
+        for rel in sorted(session_set - session_authorized):
+            violations.append({"path": rel, "rule": "session-write-authorization-missing",
+                               "detail": "candidate 未经 check-write --source kb-save --session 写前授权"})
+        for rel in sorted(session_authorized - session_set):
+            violations.append({"path": rel, "rule": "session-write-authorization-extra",
+                               "detail": "写前授权路径不在本 session candidate_write_set"})
+        for rel in sorted(session_set):
+            if not ingest_guards.in_write_scope(rel, _KB_SAVE_WRITE_SCOPE):
+                violations.append({"path": rel, "rule": "write-scope-violation",
+                                   "detail": "路径超出 kb-save 新页 allowlist；check-write 可被绕过，lint 兜底拒绝"})
     # —— 本轮作用域（2026-07-17 规格；07-18 P1 改显式 round token）：本轮 = work_orders.round
     # 章相等的行（workorder/reopen 换轮，lint 失败重试不换轮；同秒碰撞免疫）。记账只认本轮
     # **finished** 行（P1-2：failed/running 行不记账——start 已清旧账，此处双保险）；历史归属
@@ -1862,7 +1978,7 @@ def cmd_promote_concept(args):
 def cmd_check_session(args):
     """Q1 确定性检查：query-session 目录契约（--saved 按 /kb-save 后完整契约）。"""
     import query_session
-    d = _workspace_root() / "pipeline-workspace/query-sessions" / args.id
+    d = _query_session_dir(args.id)
     problems = query_session.check_session(d, saved=getattr(args, "saved", False))
     if problems:
         for p in problems:
@@ -2335,6 +2451,7 @@ def main():
     cwp = subparsers.add_parser("check-write", help="写前守卫：边界 + 覆盖保护；既有页自动留首份快照")
     cwp.add_argument("--source", required=True)
     cwp.add_argument("--path", required=True)
+    cwp.add_argument("--session", help="kb-save 新页写前授权必填：必须命中该会话 candidate 集")
     spp = subparsers.add_parser("snapshot-page", help="兼容命令：复用 check-write 并幂等确认写前快照")
     spp.add_argument("--source", required=True)
     spp.add_argument("--path", required=True)

@@ -324,7 +324,7 @@ pdf-to-study-kb/
 | 打印窗口文本 | `show-window --source --window [--plain] [--verbose]` | `cmd_show_window` | windows + source.md + pages.jsonl | 终端（含 `route-b-assets` 资产头） | 窗不存在 → 报错 | `test_ingest_orchestration_cli.py` | 已实现（含 `--plain/--verbose`） |
 | 窗口记账 | `window-start --source --window --hash` / `window-done [--writes\|--writes-file --proposals]` / `window-fail --error` | `cmd_window_*` → `state_store.*_window` | 锁 | `ingest_progress` 行 + 锁心跳 | 未持锁 → 拒；`--writes` 与 `--writes-file` 同给 → 报错互斥 | `test_ingest_progress.py`、`test_doctor_cli.py` | 准确（`--writes-file` 为 2026-07-09 新增，见 §3.7b） |
 | 概念归一 | `resolve-concept --mention --domain [--alias --ref-source --ref-sections]` | `cmd_resolve_concept` → `concept_store.resolve_or_create_concept` | 概念页 | merge 或新建概念页 | 概念页损坏 → 报错 | `test_concept_store.py` | 准确 |
-| 写前守卫 | `check-write --source --path` | `cmd_check_write` → `_prepare_write` → scope/overwrite + 首份基线快照 | workorder + vault 页 | ALLOW / DENY(exit 1) | 越界/human/hash 不符拒绝；既有页由 window-done/lint 双重复核 | `test_ingest_orchestration_cli.py` | 准确 |
+| 写前守卫 | ingest：`check-write --source --path`；kb-save：`check-write --source kb-save --session <run_id> --path` | `cmd_check_write` → `_prepare_write`；kb-save 分支 `_prepare_kb_save_write` | ingest: workorder+vault；kb-save: 单层 run_id + saved-session 输入 + canonical candidate | ingest 首份基线；kb-save 本地流程账本 `write_authorizations.json`（非防篡改证明） | kb-save 仅 ALLOW 候选集中不存在的新页；既有目标优先于旧授权拒绝，非候选/越界/清单结构错误均 fail-closed | `test_ingest_orchestration_cli.py`、`test_lint_republish_cli.py` | 准确 |
 | 页快照 | `snapshot-page --source --path` | 兼容入口，同样复用 `_prepare_write`；`take_snapshot` 合并 manifest 且不覆盖首份同路径基线 | vault 页 | `snapshots/<src>/<run>/` | 写后调用仍被 workorder hash 拒绝 | `test_snapshots.py` | 准确 |
 
 ### 3.5 收尾、提升与查询命令
@@ -725,8 +725,10 @@ proposed 页：既无 frontmatter 归属也不在任何 write_set） / **`unacco
 ——本轮 proposed 的**全部非 source 页**（concept/lesson/topic/comparison/synthesis/overview）必须入
 **本轮**台账：ingest 的窗口 `--writes`（轮次 = work order 上的显式计数器，reopen/重预处理换轮、lint
 重试不换轮；只认本轮 finished 窗行）或 kb-save 的会话 `candidate_write_set.json`） / **`legacy-concept-scaffold`**（2026-07-11：概念页旧模板骨架标题共现
-≥3 成套复活即阻断，单个自然标题合法） / **`session-candidate-missing`** / **`session-identity-mismatch`**
-（2026-07-12：kb-save 会话完整性——candidate 路径缺失或页面 `save_session` 身份不符即整体 fail-closed） /
+≥3 成套复活即阻断，单个自然标题合法） / **`session-candidate-missing`** / **`session-identity-mismatch`** /
+**`session-write-authorization-missing`** / **`session-write-authorization-extra`**
+（kb-save 会话完整性：candidate 路径缺失、页面 `save_session` 身份不符、或 candidate 与
+`write_authorizations.json` 不一致均整体 fail-closed） /
 **`source-page-missing`**（本批产出 concept 但 `sources/<src>.md` 台账页不存在 → 阻断，2026-07-08 新增；
 kb-save 会话批豁免） / **`source-page-duplicate`** / **`source-page-misplaced`**（源台账页须唯一且只在
 `sources/<src>.md`——同 `source_id` 两页或错位会撞图谱 `source:<id>` 节点 id） / **`window-unread-write`**
@@ -737,7 +739,8 @@ kb-save 会话批豁免） / **`source-page-duplicate`** / **`source-page-mispla
 **发布门分两段事务隔离（2026-07-11）**：vault preflight（published 渲染旧伤 → 阻断 promote + 按
 rule+path+content_hash 去重进 `Review-Queue/vault-health-*.md`，**不回滚当前批、不写 lint 阶段状态**）→
 batch lint（当前批违规才回滚快照）。kb-save 发布走会话作用域：`lint --source kb-save --session <run_id>`
-（先过 saved 模式 Q1 契约，candidate 集同时决定 membership 与 accounting）。
+（先过 saved 模式 Q1 契约，candidate 集同时决定 membership/accounting，并与 new-only 写前授权账本
+精确对账；路径 allowlist 由 lint 再检查，不能靠跳过 `check-write` 绕过）。
 **正文小节标题不是门禁**（D-4：`page_rules.REQUIRED_SECTIONS` 七个页型键仍在，但值已清空为 `[]`，结构
 交写作 LLM + `purpose.md` 决定）。
 

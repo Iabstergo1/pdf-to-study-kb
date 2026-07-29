@@ -180,13 +180,19 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | 操作 | 作用 / 何时用 | 对话怎么说 | 会创建/改什么 | 查看 | 错误与修复 |
 |------|--------------|-----------|---------------|------|-----------|
 | `kb-query` | **只读**查询知识库 + 持久化查询会话 | "知识库里关于 X 怎么说" | `pipeline-workspace/query-sessions/<id>/`（不写 vault） | 终端回答 | 无 |
-| `kb-save` | 把查询会话的对比/结论存成 proposed（有准入门槛） | "把刚才那个对比存进 wiki" | `synthesis/` 等 proposed 页 | lint 后入 index | 准入不达标→门会拦（见 `docs/skill-runtime/save-back-policy.md`） |
+| `kb-save` | 把查询会话的对比/结论存成 proposed（有准入门槛；当前直接写只支持全新候选页） | "把刚才那个对比存进 wiki" | `synthesis/` 等 proposed 页 + session 写前授权账本 | lint 后入 index | 准入不达标、目标已存在或未授权→门会拦（见 `docs/skill-runtime/save-back-policy.md`） |
 | `kb-review` | 逐条处理 Review-Queue / 复核项 | "处理一下复核队列" | 据你定夺改 | `wiki/Review-Queue/` | — |
 | `wiki-lint-semantic` | 语义体检（对比维度/跨页矛盾/Q2 价值），只出 proposal | "给知识库做个语义体检" | Review-Queue proposal（不改页） | Review-Queue | — |
 | `kb-qa` | QA/审计覆盖率（只读不改库） | "给知识库做次 QA / 审计覆盖率" | 报告 + Review-Queue proposal | reports | — |
 | `skill-evolve` | 把反复踩的坑沉淀成对 skill 的有界改进 | "把这次踩的坑沉淀进 skill" | skill 候选提案（不写 vault） | `skill-evolution/` | gate 不过→修候选 |
 | `kb-postmortem` | **发布后验后复盘**：一本书入库完，看看这次跑得怎么样 | "复盘这次入库 / 这本书 ingest 得怎么样" | 一份报告 `reports/postmortem/<书>-<日期>.md`（只出建议，**不改任何东西**） | 该报告文件 | 源没发布→先收尾 ingest |
 | `pipeline-doctor` | **流水线卡住了找它**：只用安全命令修，绝不手改数据库 | "流水线卡住了 / 锁释放不掉 / 不让我重跑某一步" | 视诊断结果而定（都走已有安全命令） | 终端诊断结果 | 无固定配方时会如实告诉你、不瞎猜 |
+
+> **kb-save 会话边界**：`<run_id>` 只能是 `query-sessions/` 下的单层目录名。candidate 是无重复的
+> canonical vault 相对路径字符串；授权项只能是精确 `{path, mode: "new"}`，并与 candidate 一一
+> 对应。授权账本只是本地协作流程记录，不是防手工伪造机制，也不得手填。旧会话缺授权账本时
+> fail-closed：若目标尚不存在，逐项重跑 `check-write`；若目标已经存在，不得补票，改走
+> Review-Queue/`kb-review` 或新会话的未使用路径。
 
 ### 5.3 底层 CLI 操作（高级排障 / 手动重跑）
 
@@ -232,7 +238,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | `show-window` | 打印某窗源文本（含难页资产头） | `--source --window` | `--plain` `--verbose` |
 | `window-start` / `window-done` / `window-fail` | 窗口记账 | `--source --window`（done 另 `--writes/--proposals`；fail 另 `--error`；start 另 `--hash`） | — |
 | `resolve-concept` | 概念归一唯一入口（`--mention` 用中文规范名；英文/缩写放 `--alias`，`canonical_id` 才有稳定 ASCII 去重键） | `--mention --domain` | `--alias`（可重复）`--ref-source --ref-sections` |
-| `check-write` | 写前守卫；既有页 ALLOW 时自动保存首份写前基线（必须先检查、后编辑） | `--source --path` | — |
+| `check-write` | 写前守卫；ingest 的既有页 ALLOW 时保存首份基线；kb-save 仅授权 session candidate 中不存在的新页并写授权账本 | `--source --path` | `--session <run_id>`（kb-save 必填） |
 | `snapshot-page` | 兼容命令：幂等确认首份基线，不能为已经发生的编辑补票 | `--source --path` | — |
 
 **收尾、提升、查询、增量、自进化：**
@@ -245,7 +251,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | `sync-assets` | 把难页 PNG 同步进 `wiki/assets/<src>/` | `--source` | — |
 | `promotion-candidates` | 检测跨域提升候选 | — | `--propose` |
 | `promote-concept` | 机械提升一个概念为 shared | `--id concept.<domain>.<slug>` | — |
-| `check-session` | query-session 目录契约检查 | `--id <run_id>` | `--saved` |
+| `check-session` | query-session 目录契约检查；run_id 仅限单层目录名，saved 模式严格核对 canonical candidate 与 new-only 授权一一对应 | `--id <run_id>` | `--saved` |
 | `skill-mine` / `skill-gate` / `skill-stage` / `skill-adopt` | skill 自进化四步 | gate/stage/adopt 需 `--candidate` | `--base HEAD` |
 | `ingest-stats` | 只读"体检单"：窗口/返工、窗口账本估算 `pages_estimate`，以及按 vault `source_refs` 重建的精确交付清单 `page_inventory`（报告总页数只认后者；不含 token/费用） | `--source` | `--json` |
 | `proposals-resolve` | **给已修复的错误销账**（不然 `skill-mine` 的 backlog 会越攒越脏）；**默认只列清单不改库**，看清楚了再加 `--apply` | `--id <行号>` 或 `--signature <类型>` | `--source`（配合 `--signature` 限定某源）`--all-matching`（批量落库必须加）`--apply` |
@@ -452,6 +458,7 @@ python scripts/pipeline.py source-convert --source micro-econ
 | `vault lock held by <other> since ...` | 另一 ingest 持锁（或崩溃残留） | 等待；若 `status` 显示 `[STALE]` 则 `python scripts/pipeline.py unlock`（默认 heartbeat 超 1800s 才允许） | `locks`、`cmd_unlock` |
 | `stale registry: disk _registry.yaml != work order hash` | registry 派生文件与 workorder 记录不一致 | 重跑 `workorder` 再 `ingest-start` | `ingest_guards.registry_fresh`、`cmd_ingest_start` |
 | `check-write` 输出 `DENY ...` | 路径越界 / 目标是 human 页 / hash 不符 | 不在 write_scope→走对应目录；human 页→改走 Review-Queue proposal（**不会静默覆盖**） | `ingest_guards.can_overwrite` |
+| kb-save `check-write` 报 existing / candidate / scope | 目标已存在、未列入本 session candidate，或路径越出 kb-save allowlist | 既有目标改写 Review-Queue proposal；新页先补齐 session 的 candidate/evidence/decision，再带 `--session` 重跑；不要伪造 workorder | `_prepare_kb_save_write`、`write_authorizations.json` |
 | `lint failed: N violations -> Review-Queue/...` | 收尾门禁未过（断链/孤儿/重复 canonical_id/**正文嵌了源图**/占位符残留/表内裸竖线/frontmatter 缺项/综合层或 topic 缺失/概念未被 topic 收编等；**注：正文小节标题已不再是门禁**） | 看 `wiki/Review-Queue/<src>-lint-<date>.md` 逐条修，再说"重跑 lint" | `cmd_lint`、`wiki_gate.lint_pages` |
 | `InvalidTransition: ... not allowed` | 阶段顺序不对 / 想跳步 | 按 `next` 提示的下一步走；崩溃残留 running 用 `fail` 标记后重跑该阶段 | `state_store._allowed_next` |
 | `cannot reopen ... at <stage>` | 对未收尾来源用了 reopen | 只有已收尾（lint 终态 / ingested-proposed）才能 reopen；进行中请续跑，预处理中请直接续预处理 | `state_store.reopen_source` |

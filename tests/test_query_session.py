@@ -18,6 +18,8 @@ def _mk_session(tmp_path, *, with_save=False):
         (d / "candidate_write_set.json").write_text('["topics/t.md"]', encoding="utf-8")
         (d / "evidence_refs.json").write_text('[{"source": "wp", "sections": ["1"]}]',
                                               encoding="utf-8")
+        (d / "write_authorizations.json").write_text(
+            '[{"path": "topics/t.md", "mode": "new"}]', encoding="utf-8")
         (d / "decision.md").write_text("# 为什么保存\n", encoding="utf-8")
     return d
 
@@ -49,6 +51,40 @@ def test_saved_session_requires_decision_and_nonempty_sets(tmp_path):
     assert any("candidate_write_set" in p for p in problems)
     assert any("evidence_refs" in p for p in problems)
     assert any("related_pages" in p for p in problems)
+    assert any("write_authorizations" in p for p in problems)
+
+
+def test_saved_session_rejects_noncanonical_duplicate_and_nonstring_candidates(tmp_path):
+    d = _mk_session(tmp_path, with_save=True)
+    candidate = d / "candidate_write_set.json"
+    auth = d / "write_authorizations.json"
+    auth.write_text('[{"path": "topics/t.md", "mode": "new"}]', encoding="utf-8")
+
+    for payload in (["topics/./t.md"], ["topics//t.md"], [r"topics\t.md"],
+                    ["../t.md"], ["topics/t.md", "topics/t.md"], [1]):
+        candidate.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        problems = query_session.check_session(d, saved=True)
+        assert any("candidate_write_set" in p for p in problems), payload
+
+
+def test_saved_session_rejects_malformed_or_mismatched_authorizations(tmp_path):
+    d = _mk_session(tmp_path, with_save=True)
+    auth = d / "write_authorizations.json"
+
+    bad_payloads = [
+        [1],
+        [{"path": "topics/t.md", "mode": "new", "extra": True}],
+        [{"path": "topics/t.md", "mode": "existing"}],
+        [{"path": "topics/./t.md", "mode": "new"}],
+        [{"path": r"topics\t.md", "mode": "new"}],
+        [{"path": "topics/t.md", "mode": "new"},
+         {"path": "topics/t.md", "mode": "new"}],
+        [{"path": "topics/other.md", "mode": "new"}],
+    ]
+    for payload in bad_payloads:
+        auth.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        problems = query_session.check_session(d, saved=True)
+        assert any("write_authorizations" in p for p in problems), payload
 
 
 def test_missing_dir_is_problem(tmp_path):

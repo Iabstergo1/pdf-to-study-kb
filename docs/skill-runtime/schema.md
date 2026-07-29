@@ -22,9 +22,16 @@
 - **Ownership ≠ accounting:** `source_refs` only decides which source's lint owns a page. The write ledger
   is separate — a proposed `topic`/`comparison`/`synthesis`/`overview` must be in a window's `--writes`
   (ingest) or the session's `candidate_write_set.json` (kb-save), else `unaccounted-write` blocks.
-  **kb-save pages additionally carry `save_session: <run_id>`** (content identity — the candidate set only
-  records paths; this marker is what stops one session publishing content later rewritten at the same path
-  by another session; verified by `lint --source kb-save --session <run_id>`).
+  **kb-save pages additionally carry `save_session: <run_id>`** (content identity) and every candidate must
+  have a matching `{path, mode: "new"}` entry in the session's `write_authorizations.json`. The candidate,
+  identity marker, authorization ledger, and kb-save allowlist are rechecked together by
+  `lint --source kb-save --session <run_id>`. Current direct kb-save writes are new-page-only; an existing
+  target fails closed to a Review-Queue proposal because kb-save has no immutable overwrite baseline yet.
+  The run id is one direct session-directory name. Candidate paths are unique canonical vault-relative
+  strings; authorization entries have exactly `path`/`mode`, use `mode: "new"`, are canonical and unique,
+  and must match candidates one-for-one. The authorization file is a local workflow ledger, not an
+  anti-tamper attestation; missing legacy ledgers follow `save-back-policy.md` recovery and are never
+  hand-backfilled.
 - **Render safety is frontmatter-independent and re-checked vault-wide:** callout whitelist + nesting
   (`> > [!type]`), `$…$`/`$$…$$` math delimiters, non-empty question stems — same scan runs on the proposed
   batch and as a transaction-isolated published preflight (`vault-lint` standalone).

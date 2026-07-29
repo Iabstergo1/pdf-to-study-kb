@@ -200,7 +200,154 @@ def _mk_saved_session(tmp_path, run_id, writes):
     (sess / "candidate_write_set.json").write_text(
         _json.dumps(writes, ensure_ascii=False), encoding="utf-8")
     (sess / "evidence_refs.json").write_text('["s §1"]', encoding="utf-8")
+    (sess / "write_authorizations.json").write_text(
+        _json.dumps([{"path": p, "mode": "new"} for p in writes], ensure_ascii=False),
+        encoding="utf-8")
     return sess
+
+
+def test_kb_save_check_write_authorizes_only_new_session_candidates(tmp_path):
+    """kb-save 写前守卫不伪造 workorder，只授权本 session allowlist 内的全新 candidate。"""
+    import json as _json
+
+    assert _run(["init-vault"], tmp_path).returncode == 0
+    sess = _mk_saved_session(tmp_path, "guard-new", ["topics/新建主题.md"])
+    (sess / "write_authorizations.json").unlink()  # 必须由 check-write 真实生成，不能预填门票。
+
+    ok = _run(["check-write", "--source", "kb-save", "--session", "guard-new",
+               "--path", "topics/新建主题.md"], tmp_path)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert "ALLOW" in ok.stdout
+    auth = _json.loads((sess / "write_authorizations.json").read_text(encoding="utf-8"))
+    assert auth == [{"path": "topics/新建主题.md", "mode": "new"}]
+    db = tmp_path / "pipeline-workspace/state/study-kb.sqlite"
+    assert not db.exists()  # kb-save 写前授权不伪造 source/workorder/ingest 状态。
+
+    # 页面仍不存在时重复检查幂等，授权账本不得重复追加。
+    repeated = _run(["check-write", "--source", "kb-save", "--session", "guard-new",
+                     "--path", "topics/新建主题.md"], tmp_path)
+    assert repeated.returncode == 0, repeated.stdout + repeated.stderr
+    assert _json.loads((sess / "write_authorizations.json").read_text(encoding="utf-8")) == auth
+
+    # 一旦页面出现，即使本 session 已有授权也必须按 existing 拒绝，不能拿旧门票覆盖。
+    mdpage.write_page(tmp_path / "wiki/topics/新建主题.md",
+                      {"type": "topic", "status": "proposed", "managed_by": "pipeline",
+                       "title": "新建主题", "save_session": "guard-new",
+                       "source_refs": [{"source": "legacy"}]}, _TOPIC_BODY)
+    after_create = _run(["check-write", "--source", "kb-save", "--session", "guard-new",
+                         "--path", "topics/新建主题.md"], tmp_path)
+    assert after_create.returncode != 0
+    assert "existing" in (after_create.stdout + after_create.stderr).lower()
+
+    not_candidate = _run(["check-write", "--source", "kb-save", "--session", "guard-new",
+                          "--path", "topics/未列入候选.md"], tmp_path)
+    assert not_candidate.returncode != 0 and "candidate" in (not_candidate.stdout + not_candidate.stderr)
+
+    existing_sess = _mk_saved_session(tmp_path, "guard-existing", ["topics/既有主题.md"])
+    mdpage.write_page(tmp_path / "wiki/topics/既有主题.md",
+                      {"type": "topic", "status": "published", "managed_by": "pipeline",
+                       "title": "既有主题", "source_refs": [{"source": "legacy"}]}, _TOPIC_BODY)
+    existing = _run(["check-write", "--source", "kb-save", "--session", "guard-existing",
+                     "--path", "topics/既有主题.md"], tmp_path)
+    assert existing.returncode != 0 and "existing" in (existing.stdout + existing.stderr).lower()
+
+    scope_sess = _mk_saved_session(tmp_path, "guard-scope", ["index.generated.md"])
+    (scope_sess / "write_authorizations.json").unlink()
+    outside = _run(["check-write", "--source", "kb-save", "--session", "guard-scope",
+                    "--path", "index.generated.md"], tmp_path)
+    assert outside.returncode != 0 and "scope" in (outside.stdout + outside.stderr).lower()
+
+
+def test_kb_save_check_write_rejects_noncanonical_contract_files(tmp_path):
+    """候选/授权不是 canonical 严格结构时，写前守卫在落任何新授权前拒绝。"""
+    import json as _json
+
+    assert _run(["init-vault"], tmp_path).returncode == 0
+    for idx, bad in enumerate(("topics/./坏路径.md", "topics//坏路径.md", r"topics\坏路径.md")):
+        sess = _mk_saved_session(tmp_path, f"bad-candidate-{idx}", [bad])
+        (sess / "write_authorizations.json").unlink()
+        denied = _run(["check-write", "--source", "kb-save", "--session", sess.name,
+                       "--path", bad], tmp_path)
+        assert denied.returncode != 0
+        assert "candidate_write_set" in (denied.stdout + denied.stderr)
+        assert not (sess / "write_authorizations.json").exists()
+
+    duplicate = _mk_saved_session(
+        tmp_path, "duplicate-candidate", ["topics/重复.md", "topics/重复.md"])
+    (duplicate / "write_authorizations.json").unlink()
+    dup = _run(["check-write", "--source", "kb-save", "--session", duplicate.name,
+                "--path", "topics/重复.md"], tmp_path)
+    assert dup.returncode != 0
+    assert "candidate_write_set" in (dup.stdout + dup.stderr)
+    assert not (duplicate / "write_authorizations.json").exists()
+
+    malformed = _mk_saved_session(tmp_path, "malformed-auth", ["topics/新页.md"])
+    (malformed / "write_authorizations.json").write_text(
+        _json.dumps([1]), encoding="utf-8")
+    bad_auth = _run(["check-write", "--source", "kb-save", "--session", malformed.name,
+                     "--path", "topics/新页.md"], tmp_path)
+    assert bad_auth.returncode != 0
+    assert "write_authorizations" in (bad_auth.stdout + bad_auth.stderr)
+    assert _json.loads((malformed / "write_authorizations.json").read_text(encoding="utf-8")) == [1]
+
+    extra = _mk_saved_session(tmp_path, "extra-auth", ["topics/新页.md"])
+    extra_payload = [
+        {"path": "topics/新页.md", "mode": "new"},
+        {"path": "topics/不在候选集.md", "mode": "new"},
+    ]
+    (extra / "write_authorizations.json").write_text(
+        _json.dumps(extra_payload, ensure_ascii=False), encoding="utf-8")
+    bad_extra = _run(["check-write", "--source", "kb-save", "--session", extra.name,
+                      "--path", "topics/新页.md"], tmp_path)
+    assert bad_extra.returncode != 0
+    assert "write_authorizations" in (bad_extra.stdout + bad_extra.stderr)
+    assert _json.loads((extra / "write_authorizations.json").read_text(encoding="utf-8")) == extra_payload
+
+
+def test_kb_save_rejects_session_path_escape(tmp_path):
+    """run_id 只能是 query-sessions 下的单层目录名，不能用 ..、分隔符或盘符逃逸。"""
+    import shutil
+
+    assert _run(["init-vault"], tmp_path).returncode == 0
+    source = _mk_saved_session(tmp_path, "safe-session", ["topics/新建主题.md"])
+    escaped = tmp_path / "pipeline-workspace/escaped-session"
+    shutil.copytree(source, escaped)
+    auth = escaped / "write_authorizations.json"
+
+    for unsafe in (r"..\escaped-session", str(escaped)):
+        if auth.exists():
+            auth.unlink()
+        guarded = _run(["check-write", "--source", "kb-save", "--session", unsafe,
+                        "--path", "topics/新建主题.md"], tmp_path)
+        assert guarded.returncode != 0
+        assert "session" in (guarded.stdout + guarded.stderr).lower()
+        assert not auth.exists()
+        checked = _run(["check-session", "--id", unsafe, "--saved"], tmp_path)
+        assert checked.returncode != 0
+
+
+def test_kb_save_lint_rechecks_authorization_and_write_scope(tmp_path):
+    """跳过 check-write 或伪把域内 lesson 塞进 candidate，lint 都必须兜底拒绝。"""
+    assert _run(["init-vault"], tmp_path).returncode == 0
+    state_store.init_db(tmp_path / "pipeline-workspace/state/study-kb.sqlite")
+    topic = tmp_path / "wiki/topics/未授权主题.md"
+    mdpage.write_page(topic, {"type": "topic", "status": "proposed", "managed_by": "pipeline",
+                              "title": "未授权主题", "save_session": "no-auth",
+                              "source_refs": [{"source": "legacy"}]}, _TOPIC_BODY)
+    sess = _mk_saved_session(tmp_path, "no-auth", ["topics/未授权主题.md"])
+    (sess / "write_authorizations.json").unlink()
+    missing = _run(["lint", "--source", "kb-save", "--session", "no-auth"], tmp_path)
+    assert missing.returncode != 0
+    assert "write_authorizations" in (missing.stdout + missing.stderr)
+
+    lesson = tmp_path / "wiki/domains/misc/lessons/越界页面.md"
+    mdpage.write_page(lesson, {"type": "lesson", "status": "proposed", "managed_by": "pipeline",
+                               "title": "越界页面", "save_session": "bad-scope",
+                               "source_refs": [{"source": "legacy"}]}, _TOPIC_BODY)
+    _mk_saved_session(tmp_path, "bad-scope", ["domains/misc/lessons/越界页面.md"])
+    outside = _run(["lint", "--source", "kb-save", "--session", "bad-scope"], tmp_path)
+    assert outside.returncode != 0
+    assert "write-scope-violation" in (outside.stdout + outside.stderr)
 
 
 def test_foreign_source_refs_page_not_published_by_accounting_source(tmp_path):
@@ -302,9 +449,8 @@ def test_kb_save_session_content_identity_and_completeness(tmp_path):
     assert rc.returncode != 0 and "session-candidate-missing" in (rc.stdout + rc.stderr)
 
 
-def test_kb_save_session_publishes_concept_page(tmp_path):
-    """P1b 边界：kb-save 允许产出 concept 页——不得被 ingest 专属的 source-page-missing
-    （sources/kb-save.md 不存在也不该存在）误拦。"""
+def test_kb_save_session_rejects_direct_concept_page(tmp_path):
+    """new-only kb-save 不得绕过 resolve-concept 直接发布 concept；同 session 原子不部分发布。"""
     _ingest_ready(tmp_path, sid="s")
     concept_body = ("会话概念的散文定义正文，先给直觉再给边界条件，说明它与既有概念的关系；"
                     "这一段足够长以越过残次页兜底检查的字符下限，并补充一个可核对的最小例子："
@@ -323,10 +469,10 @@ def test_kb_save_session_publishes_concept_page(tmp_path):
     _mk_saved_session(tmp_path, "rk",
                       ["domains/misc/concepts/会话概念.md", "synthesis/会话综合.md"])
     r = _run(["lint", "--source", "kb-save", "--session", "rk"], tmp_path)
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "source-page-missing" not in (r.stdout + r.stderr)
-    assert mdpage.read_page(c)[0]["status"] == "published"
-    assert mdpage.read_page(syn)[0]["status"] == "published"
+    assert r.returncode != 0
+    assert "write-scope-violation" in (r.stdout + r.stderr)
+    assert mdpage.read_page(c)[0]["status"] == "proposed"
+    assert mdpage.read_page(syn)[0]["status"] == "proposed"
 
 
 def test_vault_lint_cli_reports_render_safety(tmp_path):
@@ -340,6 +486,11 @@ def test_vault_lint_cli_reports_render_safety(tmp_path):
     mdpage.write_page(bad, meta, body.replace("？\n>\n> [!success]", "？\n\n> [!success]"))
     r2 = _run(["vault-lint"], tmp_path)
     assert r2.returncode == 0, r2.stdout + r2.stderr
+    meta, body = mdpage.read_page(bad)
+    mdpage.write_page(bad, meta, body +
+                      '\n```mermaid\nflowchart LR\nA["[[domains/misc/concepts/a|A]]"]\n```\n')
+    r3 = _run(["vault-lint"], tmp_path)
+    assert r3.returncode != 0 and "mermaid-wikilink" in r3.stdout
 
 
 def test_lint_scopes_to_own_source_pages(tmp_path):
