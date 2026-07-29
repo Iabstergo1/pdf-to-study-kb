@@ -22,6 +22,11 @@ import thresholds  # 检测阈值单一真值（env 可覆盖；调用点用 thr
 # （否则 should_run_stage 只看 PDF sha，改了启发式也会 [skip]）。v2: 强/弱信号分层 + 代码页抑制。
 PROFILER_VERSION = "5"  # v5: 矩阵/matrix(通用结构词)+结构证据补符号化矩阵 + 整本扫描件 fail-closed(is_scanned_source)。
 
+# 可摄取来源格式的单一真值：add-source --fmt 的 choices、以及 reuse-source 判定 origin
+# 是否为一次正常 ingest 都读它。legacy-vault / external-vault-reuse 是旁路终态格式，
+# 不是可摄取格式，故不在此列。
+INGESTABLE_FORMATS = ("pdf", "md", "docx", "pptx")
+
 # 强信号：非 ASCII 数学符号 + 希腊字母 + Unicode 上/下标 + 真减号（U+2212）。
 _MATH_STRONG = re.compile(
     r"[∑∏∫∬∮∂∇√∛∜±∓×÷⋅≤≥≠≈≡≅≜∝∞∈∉∋∌⊂⊆⊃⊇⊄⊊∪∩∧∨¬∀∃∄∅≪≫⌊⌋⌈⌉⟨⟩↦⇒⇔→←↔"

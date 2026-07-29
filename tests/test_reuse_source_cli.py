@@ -368,6 +368,33 @@ def test_reuse_source_optional_shape_expectations_are_opt_in(tmp_path):
     assert _tree_bytes(fx["target"]) == before
 
 
+@pytest.mark.parametrize("fmt,accepted", [
+    ("docx", True), ("pptx", True), ("md", True),
+    ("legacy-vault", False), ("external-vault-reuse", False),
+])
+def test_reuse_source_accepts_every_ingestable_origin_format(tmp_path, fmt, accepted):
+    """复用只要求 origin 走完一次正常 ingest 并发布；旁路终态格式没有 raw_source 链，仍拒绝。"""
+    fx = _fixture(tmp_path, concepts=5, topics=2, group_sizes=(3, 2, 0))
+    db = fx["origin"] / "pipeline-workspace" / "state" / "study-kb.sqlite"
+    con = sqlite3.connect(db)
+    try:
+        con.execute("UPDATE sources SET format=? WHERE source_id='mysql'", (fmt,))
+        con.commit()
+    finally:
+        con.close()
+    before = _tree_bytes(fx["target"])
+
+    result = _run(fx["args"], fx["target"])
+
+    if accepted:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "[dry-run]" in result.stdout
+    else:
+        assert result.returncode != 0
+        assert "must be a published ingest" in (result.stdout + result.stderr)
+    assert _tree_bytes(fx["target"]) == before
+
+
 def test_reuse_source_rejects_wal_origin_without_creating_sidecars_or_touching_mtime(tmp_path):
     fx = _fixture(tmp_path)
     db = fx["origin"] / "pipeline-workspace" / "state" / "study-kb.sqlite"
@@ -463,7 +490,7 @@ def test_reuse_source_mapping_origin_state_and_target_state_drift_fail_closed(tm
     target_before = _tree_bytes(fx["target"])
     origin_state_drift = _run([*fx["args"], "--apply"], fx["target"])
     assert origin_state_drift.returncode != 0
-    assert "must be pdf lint/published" in (origin_state_drift.stdout + origin_state_drift.stderr)
+    assert "must be a published ingest" in (origin_state_drift.stdout + origin_state_drift.stderr)
     assert _tree_bytes(fx["target"]) == target_before
 
     con = sqlite3.connect(origin_db)

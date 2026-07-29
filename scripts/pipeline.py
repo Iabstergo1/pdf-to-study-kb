@@ -42,6 +42,12 @@ def _read_jsonl(path) -> list:
     return source_artifacts.read_jsonl(path)
 
 
+def _ingestable_formats() -> tuple:
+    """可摄取格式的单一真值（source_profile），供 argparse choices 使用。"""
+    import source_profile
+    return source_profile.INGESTABLE_FORMATS
+
+
 def _require_vault_lock(db, source_id: str):
     """写 ingest 进度/收工前必须确认当前 source 仍持有 vault 锁。"""
     import locks
@@ -778,7 +784,7 @@ def cmd_reuse_source(args):
         print(f"[warning] {warning['rule']} {warning['path']}: {warning['detail']}")
     fully_recorded = (plan["evidence_verified"] and plan["source_verified"]
                       and plan["state_verified"])
-    derived_findings = source_reuse.derived_violations(plan["vault"]) \
+    derived_findings = wiki_gate.derived_violations(plan["vault"]) \
         if fully_recorded else []
     for finding in derived_findings:
         print(f"[warning] reuse-derived-drift: {finding}; --apply will rebuild under lock")
@@ -2592,7 +2598,7 @@ def main():
     asp.add_argument("--source", required=True, help="source_id")
     asp.add_argument("--domain", required=True, help="所属领域")
     asp.add_argument("--path", required=True, help="原始文件路径")
-    asp.add_argument("--fmt", required=True, choices=["pdf", "md", "docx", "pptx"], help="来源格式")
+    asp.add_argument("--fmt", required=True, choices=list(_ingestable_formats()), help="来源格式")
     pfp = subparsers.add_parser("profile", help="逐页 profile + needs_vision 标记")
     pfp.add_argument("--source", required=True, help="source_id")
     winp = subparsers.add_parser("windows", help="生成确定性 processing windows")
@@ -2646,8 +2652,8 @@ def main():
     rsp.add_argument("--source", required=True, help="目标 vault 的 source_id")
     rsp.add_argument("--title", required=True, help="目标 canonical source 页标题")
     rsp.add_argument("--domain", required=True, help="目标来源领域")
-    rsp.add_argument("--path", required=True, help="原始 PDF 的当前本地路径")
-    rsp.add_argument("--sha256", required=True, help="原始 PDF 的预期 SHA-256")
+    rsp.add_argument("--path", required=True, help="原始来源文件（pdf/md/docx/pptx）的当前本地路径")
+    rsp.add_argument("--sha256", required=True, help="原始来源文件的预期 SHA-256")
     rsp.add_argument("--origin-root", required=True, dest="origin_root",
                      help="只读 origin pipeline workspace 根目录")
     rsp.add_argument("--origin-source", required=True, dest="origin_source",

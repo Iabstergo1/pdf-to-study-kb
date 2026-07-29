@@ -18,12 +18,18 @@ from pathlib import Path
 
 import yaml
 
+import evidence_fs
 import mdpage
 import wiki_gate
 
 
-class AdoptionError(Exception):
-    pass
+class AdoptionError(evidence_fs.EvidenceBoundaryError):
+    """既有 vault 接管的契约违规（与 ReuseError 平级，互不为别名）。"""
+
+
+sha256_file = evidence_fs.sha256_file
+_json_bytes = evidence_fs.json_bytes
+_resolved_inside = evidence_fs.resolved_inside
 
 
 _SOURCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -35,51 +41,13 @@ _STATE_TABLES = {"sources", "source_stage_runs", "artifacts", "work_orders",
                  "ingest_progress", "window_reads", "source_locks"}
 
 
-def sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with Path(path).open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _json_bytes(value: dict) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
-
-
 def _violation(path: str, rule: str, detail: str) -> dict:
     return {"path": path, "rule": rule, "detail": detail}
 
 
-def _resolved_inside(path: Path, root: Path) -> Path | None:
-    """返回 strict-resolved path；父目录 symlink/junction 逃出 root 时返回 None。"""
-    try:
-        resolved = path.resolve(strict=True)
-    except OSError:
-        return None
-    root = root.resolve(strict=True)
-    return resolved if resolved != root and root in resolved.parents else None
-
-
 def _assert_direct_contained(path: Path, root: Path, label: str) -> None:
     """拒绝输出路径或最近既有祖先经 symlink/junction 重定向到锚点外（或别处）。"""
-    root = root.resolve(strict=True)
-    candidate = Path(path)
-    while not candidate.exists():
-        if candidate.is_symlink():
-            raise AdoptionError(f"{label} uses a symlink outside its direct workspace path: {candidate}")
-        if candidate == root or candidate.parent == candidate:
-            break
-        candidate = candidate.parent
-    try:
-        resolved = candidate.resolve(strict=True)
-    except OSError as exc:
-        raise AdoptionError(f"cannot resolve {label}: {candidate}") from exc
-    if resolved != root and root not in resolved.parents:
-        raise AdoptionError(f"{label} escapes workspace boundary: {candidate} -> {resolved}")
-    lexical = Path(os.path.abspath(str(candidate)))
-    if candidate.is_symlink() or os.path.normcase(str(resolved)) != os.path.normcase(str(lexical)):
-        raise AdoptionError(f"{label} uses a redirected symlink/junction path: {candidate} -> {resolved}")
+    evidence_fs.assert_direct_contained(path, root, label, error=AdoptionError)
 
 
 def _validate_args(source: str, title: str, domain: str, archive: Path,
@@ -219,23 +187,8 @@ def _state_snapshot(db: Path, source: str) -> dict | None:
 
 def _reject_lock(snapshot: dict | None, ttl_seconds: int,
                  allowed_holder: str | None = None) -> None:
-    if not snapshot or not snapshot.get("lock"):
-        return
-    lock = snapshot["lock"]
-    if allowed_holder is not None and lock["holder"] == allowed_holder:
-        return
-    try:
-        heartbeat = datetime.fromisoformat(lock["heartbeat_at"])
-        if heartbeat.tzinfo is None:
-            heartbeat = heartbeat.replace(tzinfo=timezone.utc)
-        age = (datetime.now(timezone.utc) - heartbeat).total_seconds()
-    except (TypeError, ValueError):
-        age = 0
-    if age <= ttl_seconds:
-        raise AdoptionError(
-            f"active vault lock held by {lock['holder']} since {lock['started_at']}")
-    raise AdoptionError(
-        f"stale vault lock held by {lock['holder']}; run unlock before adopt-vault")
+    evidence_fs.reject_lock(snapshot, ttl_seconds, allowed_holder,
+                            command="adopt-vault", error=AdoptionError)
 
 
 def _knowledge_files(vault: Path, source_rel: str) -> list[Path]:

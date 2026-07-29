@@ -16,15 +16,23 @@ from pathlib import Path
 
 import yaml
 
+import evidence_fs
 import mdpage
-import vault_adoption
+import source_profile
 
 
-ReuseError = vault_adoption.AdoptionError
-sha256_file = vault_adoption.sha256_file
-_json_bytes = vault_adoption._json_bytes
-_resolved_inside = vault_adoption._resolved_inside
-_assert_direct_contained = vault_adoption._assert_direct_contained
+class ReuseError(evidence_fs.EvidenceBoundaryError):
+    """跨 vault 复用的契约违规（与 AdoptionError 平级，互不为别名）。"""
+
+
+sha256_file = evidence_fs.sha256_file
+_json_bytes = evidence_fs.json_bytes
+_resolved_inside = evidence_fs.resolved_inside
+
+
+def _assert_direct_contained(path: Path, root: Path, label: str) -> None:
+    evidence_fs.assert_direct_contained(path, root, label, error=ReuseError)
+
 
 _SOURCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _SHA256 = re.compile(r"[0-9a-fA-F]{64}")
@@ -167,10 +175,13 @@ def _origin_state_snapshot(origin_root: Path, source: str, pdf_path: Path,
     if len(rows) != 1:
         raise ReuseError(f"origin state must contain exactly one source row for {source!r}")
     row = rows[0]
-    if (row.get("format"), row.get("current_stage"), row.get("current_status")) != \
-            ("pdf", "lint", "published"):
+    # 复用要求的是"origin 走完了一次正常 ingest 并发布"，与来源是 PDF 还是 DOCX/PPTX/MD 无关；
+    # legacy-vault / external-vault-reuse 这类旁路终态格式没有 raw_source 证据链，仍然拒绝。
+    if (row.get("current_stage"), row.get("current_status")) != ("lint", "published") \
+            or row.get("format") not in source_profile.INGESTABLE_FORMATS:
         raise ReuseError(
-            f"origin source {source!r} must be pdf lint/published, got "
+            f"origin source {source!r} must be a published ingest "
+            f"({'/'.join(source_profile.INGESTABLE_FORMATS)}) at lint/published, got "
             f"{row.get('format')}/{row.get('current_stage')}/{row.get('current_status')}")
     lint_rows = [r for r in exported["source_stage_runs"] if r.get("stage") == "lint"]
     if not lint_rows or lint_rows[-1].get("status") != "done":
@@ -691,7 +702,8 @@ def build_plan(*, workspace: Path, source: str, title: str, domain: str,
         source_verified = True
 
     snapshot = _target_state_snapshot(db, source)
-    vault_adoption._reject_lock(snapshot, lock_ttl_seconds, allowed_lock_holder)
+    evidence_fs.reject_lock(snapshot, lock_ttl_seconds, allowed_lock_holder,
+                            command="reuse-source", error=ReuseError)
     state_errors = _target_state_violations(snapshot, plan=plan)
     if state_errors:
         raise ReuseError(state_errors[0])
@@ -710,114 +722,6 @@ def validate_output_paths(plan: dict) -> None:
     _assert_direct_contained(plan["evidence_dir"], plan["workspace"], "reuse evidence")
     _assert_direct_contained(plan["source_path"], plan["vault"], "reuse source page")
     _assert_direct_contained(plan["db"], plan["workspace"], "target state database")
-
-
-def derived_violations(vault: Path) -> list[str]:
-    """Read-only proof that every formal derived artifact matches current published pages.
-
-    Graph ``generated_at`` is intentionally preserved from the live canonical artifact while
-    every semantic byte is recomputed; rebuilding solely to manufacture a new timestamp would
-    violate the exact-repeat byte/mtime no-op contract.
-    """
-    import concept_store
-    import graph_analysis
-    import graph_data
-    import graph_html
-    import graph_lint
-    import graph_model
-    import wiki_gate
-
-    vault = Path(vault)
-    formal = (
-        "concepts/_registry.yaml",
-        "index.generated.md",
-        "graph-data.generated.json",
-        "knowledge-graph.generated.html",
-        "quiz-index.generated.md",
-        "propositions.generated.md",
-    )
-    raw: dict[str, bytes] = {}
-    findings: list[str] = []
-    for rel in formal:
-        path = vault / rel
-        if (not path.is_file() or path.is_symlink()
-                or _resolved_inside(path, vault) is None):
-            findings.append(f"derived artifact missing/redirected: {rel}")
-            continue
-        try:
-            raw[rel] = path.read_bytes()
-        except OSError as exc:
-            findings.append(f"derived artifact unreadable: {rel}: {exc}")
-    aliases = vault / "aliases.md"
-    if os.path.lexists(str(aliases)):
-        findings.append("retired derived artifact still exists: aliases.md")
-
-    try:
-        registry, errors, _warnings = concept_store.build_registry(
-            concept_store.scan_concept_pages(vault))
-        if errors:
-            findings.append(f"derived registry input invalid: {errors[0]}")
-        else:
-            expected = yaml.safe_dump(
-                {key: registry[key] for key in sorted(registry)},
-                allow_unicode=True, sort_keys=True, default_flow_style=False,
-            ).encode("utf-8")
-            if raw.get("concepts/_registry.yaml") != expected:
-                findings.append("derived artifact drift: concepts/_registry.yaml")
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
-        findings.append(f"derived registry verification failed: {exc}")
-
-    for rel, builder in (
-            ("index.generated.md", wiki_gate.build_index),
-            ("quiz-index.generated.md", wiki_gate.build_quiz_index),
-            ("propositions.generated.md", wiki_gate.build_propositions_index)):
-        try:
-            expected = builder(vault).encode("utf-8")
-        except (OSError, UnicodeError, yaml.YAMLError) as exc:
-            findings.append(f"derived artifact verification failed: {rel}: {exc}")
-        else:
-            if raw.get(rel) != expected:
-                findings.append(f"derived artifact drift: {rel}")
-
-    graph_rel = "graph-data.generated.json"
-    html_rel = "knowledge-graph.generated.html"
-    graph = None
-    expected_graph = None
-    if graph_rel in raw:
-        try:
-            graph = json.loads(raw[graph_rel].decode("utf-8"))
-            generated_at = graph.get("generated_at") if isinstance(graph, dict) else None
-            if not isinstance(generated_at, str) or not re.fullmatch(
-                    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", generated_at):
-                raise ValueError("generated_at is not canonical UTC seconds")
-            model = graph_model.build_graph_model(vault)
-            analyzed = graph_analysis.analyze_graph(model)
-            expected_graph = graph_data.to_graph_data(analyzed)
-            expected_graph["generated_at"] = generated_at
-            lint = graph_lint.validate_graph_data(graph, vault=vault)
-            if lint["errors"]:
-                findings.append(f"derived graph structure invalid: {lint['errors'][0]}")
-            expected_bytes = (json.dumps(expected_graph, ensure_ascii=False, indent=2)
-                              + "\n").encode("utf-8")
-            if raw[graph_rel] != expected_bytes:
-                findings.append(f"derived artifact drift: {graph_rel}")
-        except (OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
-            findings.append(f"derived graph verification failed: {exc}")
-
-    if html_rel in raw:
-        try:
-            html = raw[html_rel].decode("utf-8")
-            html_errors = graph_lint.validate_html(html)
-            if html_errors:
-                findings.append(f"derived graph HTML invalid: {html_errors[0]}")
-            if expected_graph is not None:
-                expected_html = graph_html.to_html(
-                    expected_graph, vault_root=vault.resolve().as_posix()).encode("utf-8")
-                if raw[html_rel] != expected_html:
-                    findings.append(f"derived artifact drift: {html_rel}")
-        except (OSError, UnicodeError, ValueError, TypeError) as exc:
-            findings.append(f"derived graph HTML verification failed: {exc}")
-    return findings
 
 
 def _verify_live_entry(root: Path, entry: dict, label: str) -> bytes:

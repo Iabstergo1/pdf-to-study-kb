@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import concept_store
+import evidence_fs
 import mdpage
 import page_rules
 import thresholds  # 门禁阈值单一真值（env 可覆盖）
@@ -544,6 +545,119 @@ def _published_pages(vault: Path) -> list[tuple[str, dict]]:
         if meta.get("status") == "published":
             out.append((rel, meta))
     return out
+
+
+def derived_violations(vault: Path) -> list[str]:
+    """Read-only proof that every formal derived artifact matches current published pages.
+
+    全库通用的派生产物一致性校验：只读、纯核对，不重建也不写盘。`reuse-source` 用它决定
+    "精确重跑能否直接 byte no-op 返回"，但这条规则本身与跨库复用无关，任何需要证明
+    registry/index/graph/quiz/propositions 与当前 published 页一致的调用方都可以用。
+
+    Graph ``generated_at`` is intentionally preserved from the live canonical artifact while
+    every semantic byte is recomputed; rebuilding solely to manufacture a new timestamp would
+    violate the exact-repeat byte/mtime no-op contract.
+    """
+    import graph_analysis
+    import graph_data
+    import graph_html
+    import graph_lint
+    import graph_model
+    import json
+    import os
+    import yaml
+
+    vault = Path(vault)
+    formal = (
+        "concepts/_registry.yaml",
+        "index.generated.md",
+        "graph-data.generated.json",
+        "knowledge-graph.generated.html",
+        "quiz-index.generated.md",
+        "propositions.generated.md",
+    )
+    raw: dict[str, bytes] = {}
+    findings: list[str] = []
+    for rel in formal:
+        path = vault / rel
+        if (not path.is_file() or path.is_symlink()
+                or evidence_fs.resolved_inside(path, vault) is None):
+            findings.append(f"derived artifact missing/redirected: {rel}")
+            continue
+        try:
+            raw[rel] = path.read_bytes()
+        except OSError as exc:
+            findings.append(f"derived artifact unreadable: {rel}: {exc}")
+    aliases = vault / "aliases.md"
+    if os.path.lexists(str(aliases)):
+        findings.append("retired derived artifact still exists: aliases.md")
+
+    try:
+        registry, errors, _warnings = concept_store.build_registry(
+            concept_store.scan_concept_pages(vault))
+        if errors:
+            findings.append(f"derived registry input invalid: {errors[0]}")
+        else:
+            expected = yaml.safe_dump(
+                {key: registry[key] for key in sorted(registry)},
+                allow_unicode=True, sort_keys=True, default_flow_style=False,
+            ).encode("utf-8")
+            if raw.get("concepts/_registry.yaml") != expected:
+                findings.append("derived artifact drift: concepts/_registry.yaml")
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        findings.append(f"derived registry verification failed: {exc}")
+
+    for rel, builder in (
+            ("index.generated.md", build_index),
+            ("quiz-index.generated.md", build_quiz_index),
+            ("propositions.generated.md", build_propositions_index)):
+        try:
+            expected = builder(vault).encode("utf-8")
+        except (OSError, UnicodeError, yaml.YAMLError) as exc:
+            findings.append(f"derived artifact verification failed: {rel}: {exc}")
+        else:
+            if raw.get(rel) != expected:
+                findings.append(f"derived artifact drift: {rel}")
+
+    graph_rel = "graph-data.generated.json"
+    html_rel = "knowledge-graph.generated.html"
+    graph = None
+    expected_graph = None
+    if graph_rel in raw:
+        try:
+            graph = json.loads(raw[graph_rel].decode("utf-8"))
+            generated_at = graph.get("generated_at") if isinstance(graph, dict) else None
+            if not isinstance(generated_at, str) or not re.fullmatch(
+                    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", generated_at):
+                raise ValueError("generated_at is not canonical UTC seconds")
+            model = graph_model.build_graph_model(vault)
+            analyzed = graph_analysis.analyze_graph(model)
+            expected_graph = graph_data.to_graph_data(analyzed)
+            expected_graph["generated_at"] = generated_at
+            lint = graph_lint.validate_graph_data(graph, vault=vault)
+            if lint["errors"]:
+                findings.append(f"derived graph structure invalid: {lint['errors'][0]}")
+            expected_bytes = (json.dumps(expected_graph, ensure_ascii=False, indent=2)
+                              + "\n").encode("utf-8")
+            if raw[graph_rel] != expected_bytes:
+                findings.append(f"derived artifact drift: {graph_rel}")
+        except (OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
+            findings.append(f"derived graph verification failed: {exc}")
+
+    if html_rel in raw:
+        try:
+            html = raw[html_rel].decode("utf-8")
+            html_errors = graph_lint.validate_html(html)
+            if html_errors:
+                findings.append(f"derived graph HTML invalid: {html_errors[0]}")
+            if expected_graph is not None:
+                expected_html = graph_html.to_html(
+                    expected_graph, vault_root=vault.resolve().as_posix()).encode("utf-8")
+                if raw[html_rel] != expected_html:
+                    findings.append(f"derived artifact drift: {html_rel}")
+        except (OSError, UnicodeError, ValueError, TypeError) as exc:
+            findings.append(f"derived graph HTML verification failed: {exc}")
+    return findings
 
 
 def build_index(vault) -> str:

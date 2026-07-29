@@ -43,9 +43,10 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 | `pipeline.py` | CLI 分发 + 各阶段编排（每个 `cmd_*` 一个子命令，共 48 个） | `main()`、`cmd_*` 函数族、`_workspace_root()`、`_vault_dir()`、`_staging_dir()` |
 | `state_store.py` | 单一业务 SQLite 状态机（**8 张表**）+ 原子阶段 API + 轮次 token | `STAGES`、`NEXT`、`start_stage/complete_stage/fail_stage`、`should_run_stage`、`adopt_source`、`reuse_source`、`reopen_source`、`reset_source`、`RESETTABLE_TARGETS`、`resolve_review_proposals`、`source_stats`、`*_window`、`round_anchor`、`window_reads_in_round`、`export_source_rows`、`purge_source_ledgers` |
 | `vault_adoption.py` | 既有 vault 的只读接管计划、ZIP/页面集合核验、不可变逐页证据、canonical source 页与历史基线/接管后 live drift 分层 | `AdoptionError`、`build_plan`、`write_evidence`、`write_source_page` |
-| `source_reuse.py` | published origin vault 的只读状态/PDF/概念与主题页核验、mapping 覆盖集相等性与目标归因边界、不可变 origin/target evidence 与 live target drift 分层 | `ReuseError`、`build_plan`、`write_evidence`、`write_source_page` |
+| `source_reuse.py` | published origin vault 的只读状态/来源文件/概念与主题页核验、mapping 覆盖集相等性与目标归因边界、不可变 origin/target evidence 与 live target drift 分层 | `ReuseError`、`build_plan`、`write_evidence`、`write_source_page` |
+| `evidence_fs.py` | 两条零 LLM 旁路共用的证据落盘底座：路径边界、canonical JSON、流式哈希、vault 锁前置检查（纯函数、无业务语义；`AdoptionError`/`ReuseError` 都继承它的基类但互不为别名） | `EvidenceBoundaryError`、`sha256_file`、`json_bytes`、`resolved_inside`、`assert_direct_contained`、`reject_lock` |
 | `locks.py` | 单 vault 写锁（scope 固定 `"vault"`） | `acquire/release/heartbeat/is_stale/break_stale` |
-| `source_profile.py` | L1 逐页 profile + `needs_vision` 判定（公式/图/表/扫描信号） | `profile_source`、`profile_page`、`needs_vision_reasons`、`vision_tier`、`is_scanned_source`、`render_pages_png`、`PROFILER_VERSION="5"` |
+| `source_profile.py` | L1 逐页 profile + `needs_vision` 判定（公式/图/表/扫描信号）+ 可摄取格式单一真值 | `profile_source`、`profile_page`、`needs_vision_reasons`、`vision_tier`、`is_scanned_source`、`render_pages_png`、`INGESTABLE_FORMATS`、`PROFILER_VERSION="5"` |
 | `source_convert.py` | L1 dispatcher：选后端 → 调后端 → 落 artifact | `convert`、`select_backend`、`classify_source`、`converted_input_hash` |
 | `source_backends/` | 三个解析后端 | `pymupdf_backend`、`markdown_backend`、`mineru_backend`、`mineru_runner` |
 | `source_artifacts.py` | L2 数据契约（blocks/parse_report/reconciliation 形状 + 序列化） | `SourceBlock`、`build_parse_report`、`build_reconciliation_report`、`ARTIFACT_VERSION="6"` |
@@ -57,7 +58,7 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 | `preflight_eval.py` | L4 确定性验收门（**13 项** check） | `evaluate`、`check_*` 函数族（见 §8） |
 | `concept_store.py` | 概念归一唯一入口 + registry/aliases 派生 | `resolve_or_create_concept`、`build_registry`、`canonical_id`、`scan_concept_pages` |
 | `promotion.py` | 跨域提升（候选检测 + 人工确认后机械提升） | `find_candidates`、`promote_to_shared` |
-| `wiki_gate.py` | 收尾 lint 门禁 + promote + index 重建 + **quiz/命题两个派生阅读层** | `lint_pages`、`collect_proposed`、`promote`、`write_index`、`lint_risk_traceability`、`build_quiz_index`/`write_quiz_index`、`collect_propositions`/`build_propositions_index`/`write_propositions_index`/`duplicate_proposition_names` |
+| `wiki_gate.py` | 收尾 lint 门禁 + promote + index 重建 + **quiz/命题两个派生阅读层** + 派生产物一致性只读校验 | `lint_pages`、`collect_proposed`、`promote`、`write_index`、`lint_risk_traceability`、`build_quiz_index`/`write_quiz_index`、`collect_propositions`/`build_propositions_index`/`write_propositions_index`/`duplicate_proposition_names`、`derived_violations` |
 | `page_rules.py` | 页正文确定性文本规则（纯函数原语） | `REQUIRED_SECTIONS`（键保留值已清空）、`REQUIRED_FRONTMATTER`、`missing_frontmatter`、`missing_sections`、`bare_pipe_wikilink_in_table`、`leading_h1_duplicates_filename`、`extract_question_stems`、`extract_propositions`、`footnote_*` |
 | `mdpage.py` | Markdown 页 frontmatter 读写（round-trip） | `read_page`、`write_page` |
 | `ingest_guards.py` | 写前守卫（写入边界 glob + 覆盖保护三条件 + registry 新鲜度） | `in_write_scope`、`can_overwrite`、`registry_fresh` |
@@ -448,8 +449,11 @@ published status、归档/证据/source/state/三类 ingest 台账完整性是 h
 
 这是另一个不进入普通 `STAGES/NEXT` 的零 LLM 旁路。`source_reuse.build_plan` 先从 SQLite header
 要求非 WAL（拒绝 WAL 模式）且不存在 `-wal/-shm` sidecar，再以 URI `mode=ro` + 显式 `BEGIN` 的 shared-lock 一致快照
-只读打开 origin state；要求 origin source 为 `pdf/lint/published`、最后一次 lint 成功，且
-`raw_source` artifact 与显式 PDF path/SHA-256 一致；canonical source 页必须 published。随后扫描
+只读打开 origin state；要求 origin source 处于 `lint/published`、格式属于
+`source_profile.INGESTABLE_FORMATS`（pdf/md/docx/pptx——复用要的是"走完一次正常 ingest 并发布"，
+与来源是不是 PDF 无关；`legacy-vault`/`external-vault-reuse` 这类旁路终态没有 `raw_source`
+证据链，仍然拒绝）、最后一次 lint 成功，且
+`raw_source` artifact 与显式来源文件 path/SHA-256 一致；canonical source 页必须 published。随后扫描
 source_refs，收集该来源拥有的全部 published concept / topic（至少一张 concept），并逐页计算
 SHA-256。origin 与 target workspace 必须是互不包含的直接路径；origin 有锁即拒绝，命令从不在 origin
 创建锁、目录、journal 或任何业务行。正式 origin 同时承载 CLI 代码，因此所有 dry-run/apply 调用还必须
@@ -460,8 +464,8 @@ targets 与每组 origin 路径都要排序、无重复；**mapping 覆盖的 or
 实际拥有的集合相等**——这一条即蕴含不遗漏、不多余、各映射一次，因此 target 张数与非空/零映射比例
 不再另设门禁（曾把一次 MySQL 迁移的 37/3/8=6+2 写死进通用命令，任何别的来源必然失败）。
 `--expect-concepts` / `--expect-topics` 是可选的形状确认，默认关闭。非空 target 必须是现有 published concept 且已含
-`source_refs: source: mysql`，两张显式零映射 target 必须不含
-mysql；mapping 外任何 mysql source_ref 同样 fail-closed，因此 CLI 只验证人工 merge，绝不制造归因。
+`source_refs: source: <src>`，显式零映射 target 必须不含该来源；mapping 外任何该来源的
+source_ref 同样 fail-closed，因此 CLI 只验证人工 merge，绝不制造归因。
 
 `--apply` 在目标 vault 锁内重新规划，再原子写 `pipeline-workspace/reuses/<src>/`：canonical manifest、
 原始 `mapping.json`、canonical `origin-state.json`、origin source 页与全部 concept/topic 页字节和首次 target merge 页字节；
