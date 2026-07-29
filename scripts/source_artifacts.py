@@ -52,13 +52,20 @@ def write_blocks(path, blocks) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def read_blocks(path) -> list:
-    """读 blocks.jsonl 为 dict 列表（windowing 等消费方用 dict，不依赖本模块类型）。"""
+def read_jsonl(path) -> list:
+    """读取由 LF 分隔的 JSON Lines；保留 JSON 字符串内的其他 Unicode 行分隔符。"""
     out = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
+    # JSON Lines 的记录边界是 LF。str.splitlines() 还会切 U+0085/U+2028/U+2029，
+    # 而 ensure_ascii=False 会把这些合法 JSON 字符原样写入字符串值，导致记录被误拆。
+    for line in Path(path).read_text(encoding="utf-8").split("\n"):
         if line.strip():
             out.append(json.loads(line))
     return out
+
+
+def read_blocks(path) -> list:
+    """读 blocks.jsonl 为 dict 列表（windowing 等消费方用 dict，不依赖本模块类型）。"""
+    return read_jsonl(path)
 
 
 @dataclass

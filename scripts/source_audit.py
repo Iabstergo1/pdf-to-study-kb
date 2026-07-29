@@ -166,7 +166,7 @@ def reconcile(primary_pages, primary_blocks, review_blocks, *, source_type: str,
 def _read_jsonl(path: Path) -> list:
     if not path.exists():
         return []
-    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    return sa.read_jsonl(path)
 
 
 def _default_mineru_review(raw_path, out_dir, input_hash):

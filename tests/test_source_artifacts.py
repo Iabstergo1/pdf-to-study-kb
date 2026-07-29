@@ -28,6 +28,28 @@ def test_write_read_blocks_roundtrip(tmp_path):
     assert got[1]["text_level"] == 2 and got[1]["heading_path"] == "T"
 
 
+def test_write_read_blocks_preserves_non_lf_line_separators(tmp_path):
+    """JSONL records are delimited only by LF; payload line separators stay inside JSON strings."""
+    text = "page one\fpage two\u0085page three\u2028page four\u2029page five"
+    block = sa.SourceBlock(
+        block_id="b000001",
+        type="text",
+        text=text,
+        page=1,
+        char_start=0,
+        char_end=len(text),
+        source_ref="p0001#b000001",
+    )
+    path = tmp_path / "blocks.jsonl"
+
+    sa.write_blocks(path, [block])
+
+    raw = path.read_bytes()
+    assert b"\\f" in raw  # json.dumps escapes ASCII form feed without changing the value.
+    assert "\u2028".encode("utf-8") in raw  # ensure_ascii=False keeps Unicode separators literal.
+    assert sa.read_blocks(path)[0]["text"] == text
+
+
 def test_artifact_version_bumped():
     # L2 "1"→"2"(chapter_id + source_type/backend_reason)；C1 "2"→"3"(element_id)；
     # dual-audit "3"→"4"(parse_report.dual_audit_required + reconciliation.json 契约)；

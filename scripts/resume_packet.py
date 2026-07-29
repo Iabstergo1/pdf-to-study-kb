@@ -22,6 +22,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import locks
+import source_artifacts as sa
 import state_store
 
 MARK_START = "<!-- resume-critical:start -->"
@@ -137,8 +138,7 @@ def build_resume_packet(*, db_path, staging_dir, repo_root, source_id,
     if problems:
         raise ResumePacketError(problems, source_id)
 
-    wins = [json.loads(ln) for ln in windows_file.read_text(encoding="utf-8").splitlines()
-            if ln.strip()]
+    wins = sa.read_jsonl(windows_file)
     win_ids = [w["window_id"] for w in wins]
     status_by_id = {r["window_id"]: r["status"]
                     for r in state_store.window_progress(db_path, source_id)}

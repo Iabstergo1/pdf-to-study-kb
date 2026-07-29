@@ -36,6 +36,12 @@ def _staging_dir(source_id: str) -> Path:
     return _workspace_root() / "pipeline-workspace/staging" / source_id
 
 
+def _read_jsonl(path) -> list:
+    """统一按 JSON Lines 的 LF 记录边界读取。"""
+    import source_artifacts
+    return source_artifacts.read_jsonl(path)
+
+
 def _require_vault_lock(db, source_id: str):
     """写 ingest 进度/收工前必须确认当前 source 仍持有 vault 锁。"""
     import locks
@@ -125,7 +131,6 @@ def cmd_source_convert(args):
     import state_store
     import source_convert
     import source_profile
-    import json as _json
     db = _vault_state_db()
     raw = _raw_path(db, state_store, args.source)
     src_row = state_store.get_source(db, args.source)
@@ -134,8 +139,7 @@ def cmd_source_convert(args):
     policy = getattr(args, "mineru_policy", "conservative")
     # profile pages（供 auto 路由 + 扫描件再协调）；docx/pptx 为空。
     pj = _staging_dir(args.source) / "pages.jsonl"
-    pages = ([_json.loads(l) for l in pj.read_text(encoding="utf-8").splitlines() if l.strip()]
-             if pj.exists() else [])
+    pages = _read_jsonl(pj) if pj.exists() else []
     name, _consumed = source_convert.select_backend(fmt, pages, backend=backend, policy=policy)
     # route-B 仅适合 born-digital 少数难页：整本扫描件若仍要走 PyMuPDF 且未 --force → 阻断，
     # 引导用 MinerU（默认 auto 已把扫描件路由给 MinerU；仅在选定后端确为 pymupdf 时才探测此条）。
@@ -455,8 +459,7 @@ def cmd_arbitration_apply(args):
     decisions = _json.loads(dec_path.read_text(encoding="utf-8")).get("decisions", [])
     blocks = sa.read_blocks(staging / "blocks.jsonl")
     pj = staging / "pages.jsonl"
-    pages = ([_json.loads(l) for l in pj.read_text(encoding="utf-8").splitlines() if l.strip()]
-             if pj.exists() else [])
+    pages = _read_jsonl(pj) if pj.exists() else []
     render_pgs = arb.render_pages(decisions)
     if render_pgs:
         source_profile.render_pages_png(raw, render_pgs, staging / "assets", prefix="p")  # 补整页图进 assets/
@@ -974,8 +977,7 @@ def cmd_show_window(args):
     staging = _staging_dir(args.source)
     md = (staging / "source.md").read_text(encoding="utf-8")
     selected = None
-    for line in (staging / "windows.jsonl").read_text(encoding="utf-8").splitlines():
-        w = json.loads(line)
+    for w in _read_jsonl(staging / "windows.jsonl"):
         if w["window_id"] == args.window:
             selected = w
             break
@@ -1013,10 +1015,8 @@ def cmd_show_window(args):
         page_meta = {}
         pages_path = staging / "pages.jsonl"
         if pages_path.exists():
-            for line in pages_path.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    obj = json.loads(line)
-                    page_meta[int(obj["page"])] = obj
+            for obj in _read_jsonl(pages_path):
+                page_meta[int(obj["page"])] = obj
         asset_lines = []
         for page in pages:
             meta = page_meta.get(page)
@@ -1513,11 +1513,9 @@ def _mineru_risk_violations(source_id, proposed, written):
     risk_block_ids: set = set()
     wf = staging / "windows.jsonl"
     if wf.exists():
-        for line in wf.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                w = json.loads(line)
-                if wiki_gate.RISK_FLAGS & set(w.get("risk_flags") or []):
-                    risk_block_ids.update(w.get("block_ids") or [])
+        for w in _read_jsonl(wf):
+            if wiki_gate.RISK_FLAGS & set(w.get("risk_flags") or []):
+                risk_block_ids.update(w.get("block_ids") or [])
     return wiki_gate.lint_risk_traceability(proposed, source_id=source_id,
                                             risk_block_ids=risk_block_ids, written=written)
 
@@ -1727,8 +1725,7 @@ def cmd_lint(args):
             snap = {e.get("path") for e in (wo.get("other_pages_snapshot") or [])}
             wfile = _staging_dir(args.source) / "windows.jsonl"
             if f"sources/{args.source}.md" not in snap and wfile.exists():
-                all_ids = [json.loads(ln)["window_id"]
-                           for ln in wfile.read_text(encoding="utf-8").splitlines() if ln.strip()]
+                all_ids = [window["window_id"] for window in _read_jsonl(wfile)]
                 missing = [wid for wid in all_ids if wid not in round_reads]
                 if missing:
                     violations.append({"path": "(windows)", "rule": "windows-unread",

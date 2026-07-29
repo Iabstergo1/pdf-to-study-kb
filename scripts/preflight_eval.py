@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import thresholds  # 观测阈值（env 可覆盖）
 import source_audit  # PDF_TYPES（双审适用范围单一真值）
+import source_artifacts as sa
 import arbitration   # 分歧闭环验收（check_closure）
 
 # 严重度排序：high > warn > info（strict 判定取 high）。状态：ok / warn / fail。
@@ -349,7 +350,7 @@ def check_detection_distribution(pages: list, *, ratio_high=None) -> dict:
 def _read_jsonl(path: Path) -> list:
     if not path.exists():
         return []
-    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    return sa.read_jsonl(path)
 
 
 def evaluate(staging_dir) -> dict:
