@@ -1,9 +1,9 @@
 ---
 name: ingest
-description: End-to-end add a new external source (PDF/DOCX/PPTX/Markdown) to the study knowledge base, or deterministically adopt an already-populated Obsidian vault baseline. Use for "add/ingest/index/weave this source" or "adopt/onboard this existing vault". Normal ingest preprocesses and writes proposed pages; legacy adoption is a separate zero-LLM branch. Read-only requests like "summarize/explain/translate this" must never trigger it.
+description: End-to-end add a new external source (PDF/DOCX/PPTX/Markdown), deterministically adopt an already-populated Obsidian vault baseline, or register selective reuse from another published pipeline vault. Use for "add/ingest/index/weave this source", "adopt/onboard this existing vault", or "reuse this published source". Normal ingest preprocesses and writes proposed pages; legacy adoption and external-vault reuse are separate zero-LLM branches. Read-only requests like "summarize/explain/translate this" must never trigger it.
 ---
 
-# ingest — weave or adopt a source (normal ingest is the only LLM write step)
+# ingest — weave, adopt, or reuse a source (normal ingest is the only LLM write step)
 
 You are the maintainer of the knowledge base. Weave the user's source into the wiki **concept/topic-first**;
 lessons are an **optional, downgraded** secondary layer (only for continuous teaching/example/exercise stretches
@@ -14,6 +14,8 @@ detail from sibling `references/*` on demand. Project truth: `AGENTS.md` / `CLAU
 
 If the request is to adopt an already-populated vault, take the dedicated zero-LLM `adopt-vault` branch in §6
 **before** any work-order, window or LLM writing step; that branch does not use the normal ingest transaction protocol.
+If the request is to register selective reuse from another pipeline vault whose source is already published, take
+the zero-LLM `reuse-source` branch in §6; target merge pages/source_refs must already exist and are never written by it.
 
 > **Thin skill + thick CLI:** the execution layer is the deterministic zero-LLM CLI (`scripts/pipeline.py`);
 > this skill carries no business code, only orchestrates it. `<src>` = this source's source_id; run commands
@@ -21,7 +23,7 @@ If the request is to adopt an already-populated vault, take the dedicated zero-L
 
 ## 1. Triggers / Non-triggers
 
-- **Triggers:** "add this book/PDF to the KB", "ingest \<source\>", "index this document", "weave this file into the wiki", "adopt/onboard this existing Obsidian vault".
+- **Triggers:** "add this book/PDF to the KB", "ingest \<source\>", "index this document", "weave this file into the wiki", "adopt/onboard this existing Obsidian vault", "reuse this source from the published vault".
 - **Non-triggers (never fire):** "summarize this", "explain this", "translate this", "answer a trivia question", "what is this PDF about" (a question, not an ingest request).
 
 ## 2. Inputs
@@ -32,6 +34,10 @@ If the request is to adopt an already-populated vault, take the dedicated zero-L
 - For existing-vault adoption, instead require `<src>`, `<title>`, `<domain>`, a baseline archive path and its
   independently recorded 64-hex SHA-256. Confirm all five inputs; do not silently calculate a new expected hash
   and treat it as prior baseline evidence.
+- For cross-vault reuse, require `<src>/<title>/<domain>`, the current PDF path + independently expected SHA-256,
+  a disjoint read-only `<origin-root>` + matching `<origin-source>`, and an explicit mapping v1 JSON. The mapping
+  must cover the 37 origin concepts exactly once; non-empty targets already carry this source_ref, while the two
+  explicit zero-mapping targets must not. This branch verifies the merge; it never performs it.
 - Read: `wiki/_meta/purpose.md` **first — it is the authority on writing style, structure, depth and
   terminology** (the user's learning goals / teaching preference). The deterministic layer only guards
   order/safety/provenance; **form is purpose-driven, not template-driven.** Then read
@@ -45,6 +51,9 @@ If the request is to adopt an already-populated vault, take the dedicated zero-L
 - Adoption exception: `adopt-vault --apply` adds only a deterministic canonical `sources/<src>.md` with
   `format: legacy-vault`, `status: published`, plus immutable evidence/state; it never automatically rewrites
   existing knowledge pages.
+- Reuse exception: `reuse-source --apply` likewise adds a deterministic canonical source page with
+  `format: external-vault-reuse`, `status: published`, plus immutable origin/mapping/first-target evidence and
+  `reused/published` state; it never writes any mapped target page.
 - Derived files (`_registry.yaml` / `index.generated.md`) are **not written by this skill** — the finishing
   CLI rebuilds them. **`aliases.md` is retired** (B2): English aliases live only in the concept page's
   `aliases:` frontmatter (Obsidian reads them natively for search/autocomplete).
@@ -65,11 +74,14 @@ If the request is to adopt an already-populated vault, take the dedicated zero-L
 - `ingest_progress` (per-window accounting, machine state). Rollback snapshots in `pipeline-workspace/snapshots/`.
 - Adoption branch only: `pipeline-workspace/adoptions/<src>/manifest.json` + verbatim page bytes under `files/`,
   one canonical source page and one `adoption_evidence` artifact; no staging/workorder/window ledgers.
+- Reuse branch only: `pipeline-workspace/reuses/<src>/{manifest.json,mapping.json,origin-state.json,origin-files/**,target-files/**}`,
+  one canonical source page and one `reuse_evidence` artifact; no staging/workorder/window ledgers.
 
 ## 6. CLI commands (orchestration order)
 
 ```text
 legacy vault (zero LLM)  adopt-vault --source <src> --title <title> --domain <domain> --baseline-archive <archive> --baseline-sha256 <sha256> [--apply]
+published source reuse (zero LLM)  reuse-source --source <src> --title <title> --domain <domain> --path <pdf> --sha256 <sha256> --origin-root <root> --origin-source <src> --mapping <mapping.json> [--apply]
 preprocess + auto-arbitration  init-vault → add-source → profile → source-convert → source-audit →[ arbitration-status → if pending: agent arbitrates queue → arbitration-apply ]→ windows → workorder
 start / per-window (LLM)  ingest-start → read chapters.json (build whole-book understanding) → write per-chapter content-routing table into digest (advisory; references/content-routing.md)
                           →[ in chapter order: window-start → show-window → write pages per routing orientation (read hard-page source images as evidence; re-express natively — never embed them; deviations logged) → window-done --writes ]×N
@@ -87,6 +99,22 @@ incremental reopen        reopen → ingest-start →[ per-window backfill ]→ 
 > no-op. Later live-page evolution only reports `post-adoption-live-drift`; it never rewrites the historical
 > manifest/evidence or fails adoption. Archive, evidence, source-page, adoption metadata or state drift still
 > fails closed. Use `vault-lint` / `graph-lint` afterward to pay down the warning-only legacy content debt.
+
+> **published-source reuse:** before both dry-run and apply, set `PYTHONDONTWRITEBYTECODE=1` and invoke
+> `python -B scripts/pipeline.py reuse-source ...`; the origin may also be this CLI code repository, so ordinary
+> imports are not allowed to update its `scripts/__pycache__`. Run without `--apply` first. The origin state DB
+> must use a non-WAL rollback journal and have no `-wal/-shm` sidecar. The plan must report the expected PDF hash,
+> read-only origin `lint/published` state, canonical source page, exactly 37 published concepts + 3 topics, and
+> a strict eight-target mapping (six non-empty + two explicit zero-mapping) covering all 37 concepts exactly once.
+> Non-empty target pages must already carry
+> this source_ref; zero-mapping targets must not. Apply takes only the target vault lock, freezes origin state/pages,
+> raw mapping and the first target merge bytes, rebuilds every derived layer, then records
+> `external-vault-reuse` as `reused/published`; all three ingest ledgers remain zero. Exact repeat is whole-tree
+> byte/mtime no-op only after registry/index/graph/quiz/propositions are recomputed and verified; missing or corrupt
+> derived output is rebuilt under the target lock. Later target live evolution is `post-reuse-target-live-drift`
+> warning-only; origin/PDF/mapping/
+> evidence/source/state drift fails closed. The temporary mapping path is not identity: after success, replay with
+> the immutable evidence `mapping.json` and remove the temporary input.
 
 > **Backend selection / dual-audit / reading windows:** `source-convert` defaults to `--backend auto` —
 > Markdown / born-digital PDF take the lightweight PyMuPDF path; scanned / low-text PDF, DOCX / PPTX take
@@ -152,5 +180,10 @@ on a stale RESUME instead of emitting a half-true packet); otherwise auto-advanc
   `adopted/published`, preserves existing knowledge-page bytes, and reports all three ingest-ledger counts as zero.
   A fully verified exact rerun is a whole-tree byte no-op; later live-page drift is warning-only and leaves the
   historical manifest/evidence unchanged, while archive/evidence/source/adoption-state drift remains a hard stop.
+- Reuse alternative: dry-run is byte-zero-write and proves origin read-only published truth, PDF SHA, 37+3 page
+  hashes, the 37→target exactly-once mapping and the two zero-mapping non-attributions. Apply preserves every
+  existing target-page byte, rebuilds derived artifacts before `reused/published`, and keeps all three ingest
+  ledgers at zero. Exact replay (including from evidence mapping) is whole-tree byte no-op; target live drift is
+  warning-only, while origin/mapping/evidence/source/reuse-state drift is a hard stop.
 - Reporting: quote the promoted count from `lint` separately; use `ingest-stats --json`
   `page_inventory.total/by_type` for the complete delivered inventory — never use `pages_estimate` as the delivery total.

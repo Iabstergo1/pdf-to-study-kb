@@ -9,7 +9,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
   source_id      TEXT PRIMARY KEY,
   domain         TEXT NOT NULL,
-  format         TEXT NOT NULL,            -- pdf|docx|pptx|md|legacy-vault
+  format         TEXT NOT NULL,            -- pdf|docx|pptx|md|legacy-vault|external-vault-reuse
   added_at       TEXT NOT NULL,
   current_stage  TEXT NOT NULL,            -- registered..lint
   current_status TEXT NOT NULL             -- pending|running|done|failed|proposed|published
@@ -237,6 +237,84 @@ def adopt_source(db_path, source_id: str, *, domain: str,
             if n:
                 raise InvalidTransition(
                     f"internal adoption invariant failed: {table} contains {n} row(s)")
+        con.commit()
+        return True
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+def reuse_source(db_path, source_id: str, *, domain: str,
+                 manifest_path: str, manifest_sha256: str,
+                 lock_holder: str | None = None) -> bool:
+    """原子登记跨 vault 复用终态；完全相同的重复调用幂等返回 False。
+
+    external-vault-reuse 不是本 vault 的 PDF ingest：只登记 ``reused/published``、一条
+    reused stage 和一条不可变 reuse evidence artifact；三类 ingest 台账必须始终为零。
+    """
+    init_db(db_path)
+    con = connect(db_path)
+    now = _now()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        lock = con.execute("SELECT holder FROM source_locks WHERE scope='vault'").fetchone()
+        if lock is not None and lock["holder"] != lock_holder:
+            raise InvalidTransition(f"active vault lock held by {lock['holder']}")
+        ledger_counts = {
+            table: con.execute(
+                f"SELECT COUNT(*) AS n FROM {table} WHERE source_id=?", (source_id,)
+            ).fetchone()["n"]
+            for table in ("work_orders", "ingest_progress", "window_reads")
+        }
+        if any(ledger_counts.values()):
+            raise InvalidTransition(
+                f"reused source {source_id!r} must have zero ingest ledgers: {ledger_counts}")
+        source = con.execute("SELECT * FROM sources WHERE source_id=?", (source_id,)).fetchone()
+        stages = con.execute(
+            "SELECT stage,status,input_hash,output_hash FROM source_stage_runs "
+            "WHERE source_id=? ORDER BY id", (source_id,)).fetchall()
+        artifacts = con.execute(
+            "SELECT kind,path,sha256 FROM artifacts WHERE source_id=? ORDER BY id",
+            (source_id,)).fetchall()
+        expected_source = (domain, "external-vault-reuse", "reused", "published")
+        expected_stage = ("reused", "done", manifest_sha256, manifest_sha256)
+        expected_artifact = ("reuse_evidence", manifest_path, manifest_sha256)
+        if source is not None:
+            actual_source = (source["domain"], source["format"],
+                             source["current_stage"], source["current_status"])
+            actual_stages = [(r["stage"], r["status"], r["input_hash"], r["output_hash"])
+                             for r in stages]
+            actual_artifacts = [(r["kind"], r["path"], r["sha256"]) for r in artifacts]
+            if (actual_source == expected_source and actual_stages == [expected_stage]
+                    and actual_artifacts == [expected_artifact]):
+                con.commit()
+                return False
+            raise InvalidTransition(
+                f"conflicting existing source {source_id!r}; expected reused/published "
+                "external-vault-reuse with the same immutable manifest")
+        if stages or artifacts:
+            raise InvalidTransition(
+                f"orphan reuse state exists for unknown source {source_id!r}")
+        con.execute(
+            "INSERT INTO sources(source_id,domain,format,added_at,current_stage,current_status) "
+            "VALUES (?,?,?,?,?,?)",
+            (source_id, domain, "external-vault-reuse", now, "reused", "published"))
+        con.execute(
+            "INSERT INTO source_stage_runs(source_id,stage,status,started_at,finished_at,"
+            "input_hash,output_hash,error) VALUES (?,?,?,?,?,?,?,NULL)",
+            (source_id, "reused", "done", now, now, manifest_sha256, manifest_sha256))
+        con.execute(
+            "INSERT INTO artifacts(source_id,kind,path,sha256,created_at) VALUES (?,?,?,?,?)",
+            (source_id, "reuse_evidence", manifest_path, manifest_sha256, now))
+        for table in ("work_orders", "ingest_progress", "window_reads"):
+            n = con.execute(
+                f"SELECT COUNT(*) AS n FROM {table} WHERE source_id=?", (source_id,)
+            ).fetchone()["n"]
+            if n:
+                raise InvalidTransition(
+                    f"internal reuse invariant failed: {table} contains {n} row(s)")
         con.commit()
         return True
     except Exception:

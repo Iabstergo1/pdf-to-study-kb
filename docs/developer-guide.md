@@ -3,7 +3,7 @@
 > 本文面向开发者，描述仓库 `D:\pdf-to-study-kb` 的架构、模块职责、数据契约、命令层与测试。
 > 所有结论以**源码为准**。
 > 面向使用者的操作说明见 [用户使用说明](user-guide.md)。
-> 版本锚点：当前工作树（2026-07-28 增量核对）；**47 个 CLI 子命令**（含 `adopt-vault` 基线接管）/ 11 个技能。测试数量以 `pytest --collect-only -q` 为准——本轮两次证明精确计数写进文档当场就腐烂，故不再保留任何快照。
+> 版本锚点：当前工作树（2026-07-28 增量核对）；**48 个 CLI 子命令**（含 `adopt-vault` 基线接管与 `reuse-source` 跨 vault 来源复用）/ 11 个技能。测试数量以 `pytest --collect-only -q` 为准——本轮两次证明精确计数写进文档当场就腐烂，故不再保留任何快照。
 > 2026-07-11 六阶段重构后的新机制（§7 已更新，其余章节以源码为准）：统一 callout 解析器
 > `page_rules.parse_callouts`（唯一语法入口，错误不吞节点）、渲染安全唯一实现 + **vault preflight
 > 事务隔离**（published 旧伤阻断 promote 但不回滚当前批）、`vault-lint` 全库健康门禁、归属≠记账
@@ -30,7 +30,7 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 
 | 入口 | 文件 | 说明 |
 |------|------|------|
-| 唯一 CLI 入口 | `scripts/pipeline.py` → `main()` | argparse 分发 **47 个**子命令（见 §3；2026-07-28 新增 `adopt-vault` 确定性旁路）。 |
+| 唯一 CLI 入口 | `scripts/pipeline.py` → `main()` | argparse 分发 **48 个**子命令（见 §3；2026-07-28 新增 `adopt-vault` / `reuse-source` 两条确定性旁路）。 |
 | LLM 编排入口 | `.claude/skills/ingest/SKILL.md`（+ `references/*`） | 端到端入库 skill；常规 ingest 是唯一 LLM 写库步骤，legacy-vault 接管分支为零 LLM。 |
 | 无人值守续跑 | `scripts/resume-ingest.ps1` | OS 调度触发的有界续跑脚本（PowerShell）。 |
 | 可选后端安装 | `scripts/install_mineru.py` → `main()` | 按机型自动安装 MinerU + 匹配 CUDA torch。 |
@@ -40,9 +40,10 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 
 | 模块 | 职责 | 关键符号 |
 |------|------|----------|
-| `pipeline.py` | CLI 分发 + 各阶段编排（每个 `cmd_*` 一个子命令，共 47 个） | `main()`、`cmd_*` 函数族、`_workspace_root()`、`_vault_dir()`、`_staging_dir()` |
-| `state_store.py` | 单一业务 SQLite 状态机（**8 张表**）+ 原子阶段 API + 轮次 token | `STAGES`、`NEXT`、`start_stage/complete_stage/fail_stage`、`should_run_stage`、`adopt_source`、`reopen_source`、`reset_source`、`RESETTABLE_TARGETS`、`resolve_review_proposals`、`source_stats`、`*_window`、`round_anchor`、`window_reads_in_round`、`export_source_rows`、`purge_source_ledgers` |
+| `pipeline.py` | CLI 分发 + 各阶段编排（每个 `cmd_*` 一个子命令，共 48 个） | `main()`、`cmd_*` 函数族、`_workspace_root()`、`_vault_dir()`、`_staging_dir()` |
+| `state_store.py` | 单一业务 SQLite 状态机（**8 张表**）+ 原子阶段 API + 轮次 token | `STAGES`、`NEXT`、`start_stage/complete_stage/fail_stage`、`should_run_stage`、`adopt_source`、`reuse_source`、`reopen_source`、`reset_source`、`RESETTABLE_TARGETS`、`resolve_review_proposals`、`source_stats`、`*_window`、`round_anchor`、`window_reads_in_round`、`export_source_rows`、`purge_source_ledgers` |
 | `vault_adoption.py` | 既有 vault 的只读接管计划、ZIP/页面集合核验、不可变逐页证据、canonical source 页与历史基线/接管后 live drift 分层 | `AdoptionError`、`build_plan`、`write_evidence`、`write_source_page` |
+| `source_reuse.py` | published origin vault 的只读状态/PDF/37+3 页核验、37→目标 mapping 归因边界、不可变 origin/target evidence 与 live target drift 分层 | `ReuseError`、`build_plan`、`write_evidence`、`write_source_page` |
 | `locks.py` | 单 vault 写锁（scope 固定 `"vault"`） | `acquire/release/heartbeat/is_stale/break_stale` |
 | `source_profile.py` | L1 逐页 profile + `needs_vision` 判定（公式/图/表/扫描信号） | `profile_source`、`profile_page`、`needs_vision_reasons`、`vision_tier`、`is_scanned_source`、`render_pages_png`、`PROFILER_VERSION="5"` |
 | `source_convert.py` | L1 dispatcher：选后端 → 调后端 → 落 artifact | `convert`、`select_backend`、`classify_source`、`converted_input_hash` |
@@ -178,6 +179,7 @@ content-routing.md` 定义的 5 分类：理论型/方法型/案例型/参考型
 | `pipeline-workspace/state/study-kb.sqlite` | 业务状态机 SQLite（单库） | gitignore |
 | `pipeline-workspace/staging/<src>/` | 每源预处理产物（source.md / blocks / windows / workorder / assets / evidence / arbitration / digest） | gitignore |
 | `pipeline-workspace/adoptions/<src>/` | legacy-vault 接管的不可变 `manifest.json` + `files/` 逐页原始字节证据 | gitignore |
+| `pipeline-workspace/reuses/<src>/` | external-vault-reuse 的不可变 manifest、mapping、origin state、origin/首次 target 页字节证据 | gitignore |
 | `pipeline-workspace/snapshots/<src>/` | 就地 merge 前回滚快照 | gitignore |
 | `pipeline-workspace/query-sessions/<run_id>/` | kb-query / kb-save 会话 | gitignore |
 | `pipeline-workspace/skill-evolution/` | `backlog.yaml`（只计 open proposals，每簇带 `last_seen`）+ 候选提案 + audit | gitignore |
@@ -296,6 +298,7 @@ pdf-to-study-kb/
 | 列出各源下一步动作 | `next` | `cmd_next` → `state_store.next_actions` | state db | 终端打印 | 无 | `test_pipeline_status.py` | 准确 |
 | 建 vault 脚手架 | `init-vault` | `cmd_init_vault` | `templates/overview.md` | `wiki/` 目录 + overview/log/purpose + `.obsidian/{graph,app}.json` | 写盘（幂等不覆盖） | `test_vault_init_cli.py` | 准确 |
 | 接管既有 vault 基线 | `adopt-vault --source --title --domain --baseline-archive --baseline-sha256 [--apply]` | `cmd_adopt_vault` → `vault_adoption.build_plan/write_evidence/write_source_page` + 派生重建 + `state_store.adopt_source` | 已有 `wiki/` + 接管前 ZIP 及预期 SHA-256 | 默认只打印逐页计划；apply 在锁内落不可变证据/canonical source 页，派生层全成功后登记 `legacy-vault` 的 `adopted/published` | 首次 legacy 内容债 warning-only，安全/ZIP/证据/source/state/台账完整性 hard-block；精确重跑 byte no-op，登记后 live drift 只 warning、历史证据不变；`work_orders/ingest_progress/window_reads=0` | `test_adopt_vault_cli.py` | 准确 |
+| 复用 published vault 来源 | `reuse-source --source --title --domain --path --sha256 --origin-root --origin-source --mapping [--apply]` | `cmd_reuse_source` → `source_reuse.build_plan/write_evidence/write_source_page` + 派生重建 + `state_store.reuse_source` | 只读 origin root + PDF/SHA + mapping v1 + 已完成 merge/source_refs 的目标页 | 默认 byte-zero-write；apply 在目标锁内冻结 origin state/source/37 concept+3 topic、mapping 与首次 target snapshot，派生成功后登记 `external-vault-reuse` 的 `reused/published` | 37 origin concept 恰好一次主映射，2 张零映射页不得获 mysql 归因；精确重跑 no-op，target live drift warning-only，origin/mapping/evidence/source/state drift fail-closed；三台账为 0 | `test_reuse_source_cli.py` | 准确 |
 | 回收 stale 锁 | `unlock [--ttl 1800]` | `cmd_unlock` → `locks.break_stale` | state db | 释放锁 | 删锁行（活锁拒绝） | `test_locks.py` | 准确 |
 | 崩溃阶段标 failed | `fail --source --stage --error` | `cmd_fail` → `state_store.fail_stage` | state db | 标记 failed | 改状态 | `test_state_store.py` | 准确 |
 | 重建 registry | `rebuild-registry` | `cmd_rebuild_registry` → `concept_store.build_registry/write_registry` + `remove_stale_aliases` | 概念页 frontmatter | `_registry.yaml`（aliases.md 已退休，若残留则删除） | 写派生文件 | `test_concept_store.py` | 准确 |
@@ -339,7 +342,7 @@ pdf-to-study-kb/
 | 全库渲染安全门禁 | `vault-lint` | `cmd_vault_lint` → `wiki_gate.vault_render_safety(published∪proposed)` | 全 vault | 违规清单，非零退出（可 CI） | 只读，零写入 | `test_lint_republish_cli.py` | 准确 |
 | 跨域提升候选 | `promotion-candidates [--propose]` | `cmd_promotion_candidates` → `promotion.find_candidates` | registry | 终端 + (可选)Review-Queue | — | `test_promotion.py` | 准确 |
 | 机械提升概念 | `promote-concept --id concept.<domain>.<slug>` | `cmd_promote_concept` → `promotion.promote_to_shared` | 概念页 | 移动到 `concepts/` + 全 vault 链接重写 | 目标冲突 → 中止 | `test_concept_promotion_cli.py` | 准确 |
-| query-session 契约 | `check-session --id <run_id> [--saved]` | `cmd_check_session` → `query_session.check_session` | session 目录 | ok / 问题列表 | 缺文件 → exit 非零 | `test_query_session*.py` | 准确 |
+| query-session 契约 | `check-session --id <run_id> [--saved]` | `cmd_check_session` → 单层目录校验 + `query_session.check_session` | session 目录 | ok / 问题列表 | 路径型 run_id 拒绝；saved 模式缺 candidate/evidence/decision/授权、非 canonical/重复/结构或一一对应错误 → exit 非零 | `test_query_session*.py` | 准确 |
 
 ### 3.6 skill 自进化命令
 
@@ -440,6 +443,37 @@ published status、归档/证据/source/state/三类 ingest 台账完整性是 h
 精确重跑在加锁前返回，整个 workspace byte no-op。归档、evidence、canonical source、接管元数据/
 状态漂移或存在任一 ingest 台账时仍 fail-closed。legacy 内容债随后由正式 `vault-lint` / `graph-lint`
 治理，而不是反向阻塞基线登记。
+
+### 4.2.2 跨 Vault 来源复用（`reuse-source`）
+
+这是另一个不进入普通 `STAGES/NEXT` 的零 LLM 旁路。`source_reuse.build_plan` 先从 SQLite header
+要求非 WAL（拒绝 WAL 模式）且不存在 `-wal/-shm` sidecar，再以 URI `mode=ro` + 显式 `BEGIN` 的 shared-lock 一致快照
+只读打开 origin state；要求 origin source 为 `pdf/lint/published`、最后一次 lint 成功，且
+`raw_source` artifact 与显式 PDF path/SHA-256 一致；canonical source 页必须 published。随后扫描
+source_refs，固定要求 MySQL origin 恰为 37 张 published concept + 3 张 published topic，并逐页计算
+SHA-256。origin 与 target workspace 必须是互不包含的直接路径；origin 有锁即拒绝，命令从不在 origin
+创建锁、目录、journal 或任何业务行。正式 origin 同时承载 CLI 代码，因此所有 dry-run/apply 调用还必须
+在解释器启动前设置 `PYTHONDONTWRITEBYTECODE=1` 并使用 `python -B`，避免 import 写入 origin 的 pycache。
+
+mapping v1 顶层字段严格为 `version/source_id/targets`；target 项严格为 `target/origin_concepts`。
+targets 与每组 origin 路径都要排序、无重复；37 张 concept 的集合必须全局恰好覆盖一次，整体形状严格为
+8 张 target（6 张非空 + 2 张零映射）。非空 target 必须是现有 published concept 且已含
+`source_refs: source: mysql`，两张显式零映射 target 必须不含
+mysql；mapping 外任何 mysql source_ref 同样 fail-closed，因此 CLI 只验证人工 merge，绝不制造归因。
+
+`--apply` 在目标 vault 锁内重新规划，再原子写 `pipeline-workspace/reuses/<src>/`：canonical manifest、
+原始 `mapping.json`、canonical `origin-state.json`、origin source/37+3 页字节和首次 target merge 页字节；
+随后写 canonical source 页并重建 index/registry/graph/quiz/propositions。全部成功后，
+`state_store.reuse_source` 才原子登记 `format=external-vault-reuse`、`reused/published`、一条
+`reused/done` stage 与一条 `reuse_evidence` artifact；三类 ingest 台账必须为 0。派生失败保留
+evidence/source 恢复锚点但不发布状态。
+
+完全验证重跑只有在 canonical evidence/source/state 与 registry/index/graph JSON+HTML/quiz/propositions
+六类派生文件都按当前 published 页重新计算一致后才在加锁前返回，是全 workspace byte/mtime no-op；派生缺失/
+损坏则进入目标锁内重建。published 后 target 页可被后续来源合法修改，
+只报 `post-reuse-target-live-drift`，历史 target copies 不重算；origin live、PDF、mapping raw bytes、
+evidence/source/state 任一漂移仍 fail-closed。manifest 不把临时 mapping 路径当身份，成功后可删除临时
+输入，并以 evidence 自带的 `mapping.json` 重放。
 
 ### 4.3 输入注册 / 添加流程（`add-source`）
 
@@ -548,6 +582,11 @@ ingest_waiting → ingesting → ingested → lint`。完成 `ingested` 置 `pro
 一条 `adoption_evidence` artifact；`work_orders`、`ingest_progress`、`window_reads` 必须全为 0。
 完全验证状态可 byte-no-op 核验；历史归档/证据/参数/状态或账本漂移 fail-closed，接管后 live 页变化只 warning。
 
+**来源复用旁路**同样不属于线性状态机：`reuse-source --apply` 在 evidence/source/派生全部成功后登记
+`external-vault-reuse` 的 `reused/published`，只写一条 `reused/done` stage 与一条 `reuse_evidence`
+artifact；三类 ingest 台账也必须全为 0。历史 origin/mapping/target snapshots 不可变，只有 target live
+演进是 warning-only。
+
 ### 5.2 预处理产物（`pipeline-workspace/staging/<src>/`）
 
 | 产物 | 创建者 | 字段/形状 | 消费方 | 性质 |
@@ -579,7 +618,7 @@ ingest_waiting → ingesting → ingested → lint`。完成 `ingested` 置 `pro
 | `topics/*.md` | ingest（LLM） | `topic` | 概念之上的导航分类层；无运行时模板（已删），结构由 purpose.md + 内容决定 |
 | `comparisons/*.md` | ingest（LLM） | `comparison` | 横向对比；同上，无运行时模板 |
 | `synthesis/*.md` | ingest / kb-save | `synthesis` | 深度综合；同上，无运行时模板 |
-| `sources/<src>.md` | ingest（LLM）/ adopt-vault（后者确定性） | `source` | 普通来源摘要；legacy 接管为 `legacy-vault`，直接 published。常规 ingest 中**必须存在**，缺失阻断发布（`source-page-missing`） |
+| `sources/<src>.md` | ingest（LLM）/ adopt-vault / reuse-source（后两者确定性） | `source` | 普通来源摘要；legacy 接管为 `legacy-vault`，跨库复用为 `external-vault-reuse`，两者均直接 published。常规 ingest 中**必须存在**，缺失阻断发布（`source-page-missing`） |
 | `overview.md` | init-vault 种子（`templates/overview.md`）→ ingest 增量 | `overview` | vault 入口综合页；仍含占位符时新概念产出会阻断发布（`overview-seed`）。**永久基础设施**：`retract-source --apply` 后必定存在——独占本源则旧版进证据包、删后经 `_seed_overview` 从模板重建（派生层重建前），shared/human 字节不变 |
 | `index.generated.md` | 收尾 CLI 派生 | — | 只收录 published，按 type 分组 |
 | `graph-data.generated.json` | lint / rebuild-graph（graph_model/graph_data） | Knowledge Graph v2.0 | 节点/边/社区（Louvain）；topic_membership 骨架 |
@@ -592,7 +631,7 @@ ingest_waiting → ingesting → ingested → lint`。完成 `ingested` 置 `pro
 
 **派生文件系列**（`_registry.yaml` / `index.generated.md` / `graph-data.generated.json` +
 `knowledge-graph.generated.html` / `quiz-index.generated.md` / `propositions.generated.md`）一律由收尾
-CLI 从 frontmatter/正文重建（`adopt-vault --apply` 在登记终态前重建），skill **绝不手写**，手改会被下次收尾覆盖。**`aliases.md` 已退休**（别名保留
+CLI 从 frontmatter/正文重建（`adopt-vault --apply` / `reuse-source --apply` 都在登记终态前重建），skill **绝不手写**，手改会被下次收尾覆盖。**`aliases.md` 已退休**（别名保留
 在概念页 `aliases:` frontmatter，`rebuild-registry` 主动清理残留）。
 
 **页面正文的强制项已从"小节标题"转移到"frontmatter 字段"**：`page_rules.REQUIRED_SECTIONS` 七个页型键

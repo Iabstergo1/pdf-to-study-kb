@@ -116,6 +116,20 @@ python scripts/pipeline.py adopt-vault --source <src> --title "<title>" --domain
 
 `adopt-vault` 默认 **byte-zero-write**。首次接管只对安全/可读性/published status、ZIP↔live 知识页集合与字节、锁及证据/source/state/三类 ingest 台账完整性做 hard-block；现行 `wiki_gate` 发现的 legacy 内容债全部列为 warning-only，接管本身不是质量证书。`--apply` 在 vault 锁内新增不可变 manifest/逐页原始字节证据与 canonical `wiki/sources/<src>.md`，重建 index、registry、graph、quiz、propositions，全部成功后才登记 `format=legacy-vault`、`adopted/published`；它**不会自动改写既有知识页**，也不会伪造 `work_orders`、`ingest_progress` 或 `window_reads`。完全验证的精确重跑是全树 byte no-op；接管后 live 知识页的正常演进只报 `post-adoption-live-drift` warning，历史 manifest/evidence 不变，不会因此 fail-closed。归档、证据、source 页、接管元数据或状态漂移仍 fail-closed；内容债请随后用正式 `vault-lint` / `graph-lint` 治理。
 
+### 可选分支：从只读 published Vault 复用一个来源
+
+若另一个 pipeline vault 已把同一 PDF 完整发布，而目标 vault 已人工完成选择性合并，可用显式 mapping 登记复用事实，不必伪造一次新的 ingest。mapping v1 只含 `version`、`source_id`、`targets[]`；每项为 `target` 与排序后的 `origin_concepts[]`。命令要求 origin 恰有 37 张 MySQL concept + 3 张 topic，37 张 concept 全局各主映射一次，且 mapping 形状固定为 8 张目标页（6 张非空 + 2 张显式零映射）；非空目标须预先有 `source_refs: source: mysql`，零映射目标反而不得有该归因。
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE=1
+python -B scripts/pipeline.py reuse-source --source mysql --title "MySQL是怎样运行的" --domain sql `
+  --path "C:\books\mysql.pdf" --sha256 <64位SHA256> `
+  --origin-root "D:\pdf-to-study-kb" --origin-source mysql --mapping "C:\tmp\mysql-mapping.json"
+# 核对 37 concepts / 3 topics / 6 mapped + 2 zero-mapping targets 后，加 --apply
+```
+
+`reuse-source` 默认 byte-zero-write，origin 全程以 read-only SQLite 和文件读取方式核验；origin state DB 必须使用非 WAL rollback journal，且调用前不得存在 `-wal/-shm` sidecar，否则在打开前 fail-closed。若 origin 同时是 CLI 代码仓库（正式 MySQL 场景即如此），dry-run 与 apply 都必须像上例同时设置 `PYTHONDONTWRITEBYTECODE=1` 并用 `python -B`，避免 import 更新 origin 下的 `scripts/__pycache__`。`--apply` 在目标 vault 锁内冻结 PDF、origin state/source/37+3 页、mapping 与首次 target merge snapshot，新增 canonical source 页，重建全部派生层后才登记 `format=external-vault-reuse`、`reused/published`；三类 ingest 台账始终为 0。精确重跑会先验证 registry/index/graph/quiz/propositions 全部派生文件，再作全树 byte/mtime no-op；缺失或损坏则进入锁内重建。后续 target 页合法演进仅报 `post-reuse-target-live-drift`。origin/PDF/mapping/evidence/source/state 漂移 fail-closed。临时 mapping 可在成功后删除，正式重放改用 `pipeline-workspace/reuses/mysql/mapping.json`。
+
 ### ② 一句话入库（ingest）
 
 把 **PDF / DOCX / PPTX / Markdown** 放进 `books/<name>/input/`，然后对 agent 说一句话即可。下例用占位符 `<...>` 表示你自己的文件与领域：
@@ -206,9 +220,9 @@ pdf-to-study-kb/
 ├── README.md                 # 本文件
 ├── requirements.txt          # 基础依赖 PyMuPDF + PyYAML + pytest（生产格式另需 MinerU，见末尾可选段）
 ├── scripts/
-│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（47 子命令，全部业务逻辑在此）
+│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（48 子命令，全部业务逻辑在此）
 │   ├── state_store.py / locks.py                # 业务 SQLite 状态机 / 单-ingest 并发锁
-│   ├── vault_adoption.py                         # 既有 vault 只读规划 / 不可变证据 / 漂移拒绝
+│   ├── vault_adoption.py / source_reuse.py       # 既有 vault 接管 / 跨库来源复用：只读规划 + 不可变证据 + 漂移拒绝
 │   ├── source_profile.py / source_convert.py / source_artifacts.py / chaptering.py   # L1 解析 + L2 结构契约
 │   ├── source_backends/      # 后端：pymupdf（fast path）/ markdown / 可选 mineru（结构化）
 │   ├── windowing.py / workorder.py / preflight_eval.py   # L3 切窗 / 事务契约 / L4 验收门
@@ -254,14 +268,14 @@ pdf-to-study-kb/
 
 所有 skill 背后调用的都是 `python scripts/pipeline.py <command>`（零 LLM、可独立运行，**全部业务逻辑与安全守卫都在这里**）。日常对话无需手动输入；该接口面向**精细控制、问题排查、手动重跑某一阶段、无人值守脚本化**等高级场景。
 
-命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 47 个子命令（以 `python scripts/pipeline.py --help` 为准）：
+命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 48 个子命令（以 `python scripts/pipeline.py --help` 为准）：
 
 <details>
 <summary><b>展开：完整 CLI 命令参考</b></summary>
 
 ### 状态与维护
 
-> **为什么有这组**：ingest 是可中断的长任务，且同一 vault 受并发锁保护。这组命令让你不依赖 LLM 就能"看清现状 + 崩溃自救"——`status`/`next` 回答"每个来源走到哪一步、锁在谁手里、下一步该做什么"；`fail` 把崩溃残留的 `running` 阶段标记 `failed` 以便重跑；`unlock` 受控回收超时的 stale 锁（活锁拒绝，防误删）；`adopt-vault` 以不可变基线接管既有库；`rebuild-registry` 从概念页 frontmatter 重建派生索引；`rebuild-graph` 从 published 图谱重建 graph-data + 离线 HTML 力导向图（派生阅读层，fail-hard）、`graph-lint` 校验图谱产物；`rebuild-quiz` 从 published 页的 `[!question]` 重建自测题库索引（复习入口，派生阅读层）；`rebuild-propositions` 从 published 页的具名命题（`**命题（名）**：…`）重建命题总表（全库结论清单，名字即锚点）；`init-vault` 幂等搭起空脚手架。
+> **为什么有这组**：ingest 是可中断的长任务，且同一 vault 受并发锁保护。这组命令让你不依赖 LLM 就能"看清现状 + 崩溃自救"——`status`/`next` 回答"每个来源走到哪一步、锁在谁手里、下一步该做什么"；`fail` 把崩溃残留的 `running` 阶段标记 `failed` 以便重跑；`unlock` 受控回收超时的 stale 锁（活锁拒绝，防误删）；`adopt-vault` 以不可变基线接管既有库；`reuse-source` 从只读 published vault 登记选择性复用；`rebuild-registry` 从概念页 frontmatter 重建派生索引；`rebuild-graph` 从 published 图谱重建 graph-data + 离线 HTML 力导向图（派生阅读层，fail-hard）、`graph-lint` 校验图谱产物；`rebuild-quiz` 从 published 页的 `[!question]` 重建自测题库索引（复习入口，派生阅读层）；`rebuild-propositions` 从 published 页的具名命题（`**命题（名）**：…`）重建命题总表（全库结论清单，名字即锚点）；`init-vault` 幂等搭起空脚手架。
 
 | 命令 | 作用 | 关键参数 |
 |------|------|------|
@@ -269,6 +283,7 @@ pdf-to-study-kb/
 | `next` | 列出每个 source 的**下一步人工动作** + stale 锁清理建议 | — |
 | `init-vault` | 建 `wiki/` 脚手架 + 种子文件（幂等，不覆盖） | — |
 | `adopt-vault` | 接管既有 vault 基线：默认零写 dry-run；legacy `wiki_gate` 内容债 warning-only，安全/ZIP/证据/source/state/台账完整性才 hard-block；`--apply` 在锁内落不可变证据、重建派生层，成功后登记 `legacy-vault` 的 `adopted/published`，既有知识页不改写、三类 ingest 台账为零；精确重跑全树 byte no-op，接管后 live 演进只报 drift warning，历史归档/证据/状态漂移仍 fail-closed | `--source --title --domain --baseline-archive --baseline-sha256 [--apply]` |
+| `reuse-source` | 从只读 published vault 复用来源：默认零写；核验 PDF SHA、origin state/source/37 concept+3 topic、37→目标页 mapping 与归因边界；apply 冻结 origin/mapping/首次 target snapshot，派生成功后登记 `external-vault-reuse` 的 `reused/published`，三类 ingest 台账为零；target live 演进 warning-only，origin/mapping/evidence/source/state 漂移 fail-closed | `--source --title --domain --path --sha256 --origin-root --origin-source --mapping [--apply]` |
 | `unlock` | 受控回收 stale vault 锁；活锁拒绝 | `--ttl 1800` |
 | `fail` | 把崩溃残留的 `running` 阶段标记 `failed` | `--source --stage --error` |
 | `rebuild-registry` | 从概念页 frontmatter 重建 `_registry.yaml`（`aliases.md` 已退休，别名只在概念页 frontmatter；残留会被主动清理） | — |

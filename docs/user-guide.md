@@ -121,6 +121,24 @@ python scripts/pipeline.py adopt-vault --source legacy-kb --title "既有知识�
 
 该分支完成后，不要再为同一基线执行下面的“放入来源 → ingest”步骤；以后若要新增外部文档，再按常规流程注册新的 source。
 
+### 第 0B 步（仅跨 Vault 复用）：登记一个已发布来源
+
+另一个 pipeline vault 已把同一 PDF 发布，而当前 vault 已把 37 张 origin concept 选择性合并进现有目标页时，使用 `reuse-source`；它不是重新 ingest，也不会修改目标知识页。mapping v1 的顶层字段只能是 `version/source_id/targets`，每个 target 项只能有 vault-relative `target` 与排序后的 `origin_concepts`。37 张 origin concept 必须全局恰好各出现一次；本 MySQL 复用固定要求 8 张目标页，其中 6 张非空映射、2 张显式 `origin_concepts: []`。
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE=1
+python -B scripts/pipeline.py reuse-source --source mysql --title "MySQL是怎样运行的" --domain sql `
+  --path "C:\books\mysql.pdf" --sha256 <64位SHA256> `
+  --origin-root "D:\pdf-to-study-kb" --origin-source mysql --mapping "C:\tmp\mysql-mapping.json"
+```
+
+- **启动契约**：dry-run 与 apply 都先设 `PYTHONDONTWRITEBYTECODE=1` 并用 `python -B`，因为正式 origin 也承载 CLI 代码；否则 Python import 可能更新 origin 的 `scripts/__pycache__`。origin state DB 必须是非 WAL rollback-journal 模式，且预先没有 `-wal/-shm` sidecar。
+- **默认行为**：byte-zero-write；PDF SHA、origin 的 read-only SQLite published state、canonical source 页、37 张 concept + 3 张 topic 哈希、8=6+2 mapping 和目标归因边界任一不符即拒绝。
+- **目标归因前置**：非空映射目标必须已含 `source_refs: source: mysql`；两张零映射页必须不含 mysql，命令绝不替用户补写或伪造归因。
+- **确认后执行**：加 `--apply`。目标 vault 锁内写 `pipeline-workspace/reuses/mysql/` 的 manifest、原始 mapping、origin state、origin/target 首次快照和 canonical `wiki/sources/mysql.md`；派生层全成功后才登记 `external-vault-reuse`、`reused/published`。
+- **重复与漂移**：精确重跑先逐项验证 registry/index/graph/quiz/propositions 派生文件，再作全树 byte/mtime no-op；缺失/损坏会在目标锁内重建。后续 SQL 来源修改 target 页只报 `post-reuse-target-live-drift`，历史 target snapshot 不变。origin/PDF/mapping/evidence/source/state 漂移 fail-closed。成功后可删除临时 mapping，重放时把 `--mapping` 指向 evidence 自带的 `mapping.json`。
+- **台账边界**：本 vault 的 `work_orders`、`ingest_progress`、`window_reads` 对该来源始终为 0；origin 全程只读。
+
 ### 第 1 步（可选但推荐）：填学习目标
 
 - **目的**：让产出贴合你的需求。
@@ -214,7 +232,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 ### 5.3 底层 CLI 操作（高级排障 / 手动重跑）
 
 > 所有 skill 背后都是 `python scripts/pipeline.py <command>`。下面按生命周期分组，标注**必填/可选参数**。
-> 共 **47 个**子命令（完整实现映射见开发文档 §3；含 `adopt-vault` 既有库基线接管、`vault-lint` 全库渲染安全健康门禁、`lint --source kb-save --session <run_id>` 会话发布路径与 `retract-source` 证据先行撤库）。
+> 共 **48 个**子命令（完整实现映射见开发文档 §3；含 `adopt-vault` 既有库基线接管、`reuse-source` 跨 vault 来源复用、`vault-lint` 全库渲染安全健康门禁、`lint --source kb-save --session <run_id>` 会话发布路径与 `retract-source` 证据先行撤库）。
 
 **状态与维护：**
 
@@ -224,6 +242,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | `next` | 看每源下一步动作 | — | — | `python scripts/pipeline.py next` |
 | `init-vault` | 建 `wiki/` 脚手架（幂等） | — | — | `python scripts/pipeline.py init-vault` |
 | `adopt-vault` | 接管既有 vault；默认 byte-zero-write dry-run，legacy 内容门禁债 warning-only，安全/ZIP/证据/source/state/台账完整性 hard-block；`--apply` 在锁内落证据并重建派生层，成功后才登记 `adopted/published`；精确重跑 byte no-op，接管后 live 演进只报 drift warning，历史证据/状态漂移 fail-closed | `--source --title --domain --baseline-archive --baseline-sha256` | `--apply` | `... adopt-vault --source legacy-kb --title "既有库" --domain general --baseline-archive "C:\backups\wiki.zip" --baseline-sha256 <SHA256>` |
+| `reuse-source` | 从只读 published vault 登记选择性来源复用；核验 PDF/origin state/source/37+3 页、37→目标 mapping 与 2 张零映射归因边界；apply 冻结 evidence，派生成功后才登记 `reused/published`；精确重跑 byte no-op，target live 演进 warning-only，origin/mapping/evidence/source/state 漂移 fail-closed | `--source --title --domain --path --sha256 --origin-root --origin-source --mapping` | `--apply` | `... reuse-source --source mysql --title "MySQL" --domain sql --path "C:\books\mysql.pdf" --sha256 <SHA256> --origin-root "D:\pdf-to-study-kb" --origin-source mysql --mapping "C:\tmp\mysql.json"` |
 | `unlock` | 回收 stale vault 锁（活锁拒绝） | — | `--ttl 1800` | `python scripts/pipeline.py unlock` |
 | `fail` | 把崩溃残留的 running 阶段标 failed | `--source --stage --error` | — | `... fail --source X --stage converted --error "原因"` |
 | `rebuild-registry` | 从概念页重建 `_registry.yaml`（aliases.md 已退休，残留自动清理） | — | — | `... rebuild-registry` |
@@ -421,7 +440,7 @@ python scripts/pipeline.py source-convert --source micro-econ
 | `wiki/topics/*.md` | 主题综合页（概念之上的导航分类层） | 否 | overview → topic → concept |
 | `wiki/comparisons/*.md` | 横向对比页 | 否 | 主题内对比差异维度 |
 | `wiki/synthesis/*.md` | 深度综合页 | 否 | — |
-| `wiki/sources/<src>.md` | 每来源一页摘要（"来过哪些书"台账）；`adopt-vault` 的 apply 分支确定性新增 canonical source 页 | 否 | — |
+| `wiki/sources/<src>.md` | 每来源一页摘要（"来过哪些书"台账）；`adopt-vault` 与 `reuse-source` 的 apply 分支确定性新增各自 canonical source 页 | 否 | — |
 | `wiki/assets/<src>/p*.png` | 难页（公式/矢量图/表/标题）整页截图 | 否（确定性渲染） | 仅供 LLM 阅读，**published 正文禁嵌源图**（D-1） |
 | `wiki/concepts/_registry.yaml` | 概念派生索引 | **否**（手改会被覆盖） | 收尾 CLI 重建 |
 | `wiki/index.generated.md` | 内容目录（只收 published） | **否**（同上） | — |
@@ -434,6 +453,7 @@ python scripts/pipeline.py source-convert --source micro-econ
 | `wiki/log.md` | 操作日志（append-only） | 否 | 回溯 |
 | `pipeline-workspace/staging/<src>/` | 预处理中间产物（source.md/blocks/windows/workorder/assets...） | 否 | ingest 读取；可清理后重跑预处理 |
 | `pipeline-workspace/adoptions/<src>/` | 既有 vault 接管的不可变 `manifest.json` + `files/` 逐页原始字节证据 | **否**（改动会触发漂移拒绝） | `adopt-vault` 重跑时逐字核验 |
+| `pipeline-workspace/reuses/<src>/` | 跨 vault 复用的不可变 manifest、`mapping.json`、origin state、origin/首次 target 页字节证据 | **否**（改动会触发漂移拒绝） | `reuse-source` 重跑时逐字核验；临时 mapping 清理后可直接重放 evidence mapping |
 | `pipeline-workspace/state/study-kb.sqlite` | 状态机数据库 | **否**（机器状态真值） | status/next 读取 |
 
 > **重要提醒**：`published` ≠ 已核对。它只代表通过了**结构门禁**（断链/孤儿/重复 canonical_id/源图禁嵌正文/

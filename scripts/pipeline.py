@@ -739,6 +739,123 @@ def cmd_adopt_vault(args):
           "work_orders=0 ingest_progress=0 window_reads=0")
 
 
+def cmd_reuse_source(args):
+    """选择性复用另一个只读 published vault；默认严格只读，--apply 才登记终态。"""
+    import concept_store
+    import locks
+    import os
+    import sqlite3
+    import source_reuse
+    import state_store
+    import wiki_gate
+
+    def build(*, allowed_holder=None):
+        return source_reuse.build_plan(
+            workspace=_workspace_root(), source=args.source, title=args.title,
+            domain=args.domain, pdf_path=Path(args.path), pdf_sha256=args.sha256,
+            origin_root=Path(args.origin_root), origin_source=args.origin_source,
+            mapping_path=Path(args.mapping), lock_ttl_seconds=LOCK_TTL_SECONDS,
+            allowed_lock_holder=allowed_holder)
+
+    try:
+        plan = build()
+    except (source_reuse.ReuseError, OSError, sqlite3.Error) as exc:
+        raise SystemExit(str(exc))
+    print(f"[plan] reuse-source source={args.source} target=reused/published "
+          "format=external-vault-reuse")
+    print(f"[plan] PDF={plan['pdf_path']} sha256={plan['pdf_sha256']}")
+    print(f"[plan] origin={plan['origin_root']} source={plan['origin_source']} "
+          f"concepts={len(plan['origin_concepts'])} topics={len(plan['origin_topics'])}")
+    print(f"[plan] mapping={plan['mapping_path']} sha256={plan['mapping_sha256']} "
+          f"mapped-targets={plan['mapped_target_count']} "
+          f"zero-mapping-targets={plan['zero_mapping_target_count']}")
+    print(f"[plan] evidence={plan['manifest_path']} sha256={plan['manifest_sha256']}")
+    print(f"[plan] source-page={plan['source_path']}; target knowledge pages unchanged")
+    for item in plan["mapping"]["targets"]:
+        print(f"[mapping] {item['target']} <- {len(item['origin_concepts'])} origin concept(s)")
+    for warning in plan["warnings"]:
+        print(f"[warning] {warning['rule']} {warning['path']}: {warning['detail']}")
+    fully_recorded = (plan["evidence_verified"] and plan["source_verified"]
+                      and plan["state_verified"])
+    derived_findings = source_reuse.derived_violations(plan["vault"]) \
+        if fully_recorded else []
+    for finding in derived_findings:
+        print(f"[warning] reuse-derived-drift: {finding}; --apply will rebuild under lock")
+    if not args.apply:
+        print("[dry-run] byte-zero-write; origin read-only; "
+              "work_orders=0 ingest_progress=0 window_reads=0; rerun with --apply")
+        return
+    if fully_recorded and not derived_findings:
+        print(f"[OK] reuse-source {args.source}: reused/published fully verified; "
+              "derived artifacts unchanged; work_orders=0 ingest_progress=0 window_reads=0")
+        return
+
+    db = _vault_state_db()
+    holder = f"reuse-source:{args.source}:{os.getpid()}"
+    try:
+        source_reuse.validate_output_paths(plan)
+    except source_reuse.ReuseError as exc:
+        raise SystemExit(str(exc))
+    state_store.init_db(db)
+    if not locks.acquire(db, scope="vault", holder=holder, pid=os.getpid()):
+        current = locks.get(db, scope="vault")
+        owner = current["holder"] if current else "unknown"
+        raise SystemExit(f"active vault lock held by {owner}")
+    try:
+        try:
+            # 目标锁内重新核验；origin 永远只读，并在 evidence copy 前再次逐字复核。
+            plan = build(allowed_holder=holder)
+            evidence_created = source_reuse.write_evidence(plan)
+            source_created = source_reuse.write_source_page(plan)
+        except (source_reuse.ReuseError, OSError, sqlite3.Error) as exc:
+            raise SystemExit(str(exc))
+
+        # evidence/source 是失败恢复锚点；全部派生层成功后才提交 reused/published。
+        vault = plan["vault"]
+        wiki_gate.write_index(vault)
+        metas = concept_store.scan_concept_pages(vault)
+        registry, errors, warnings = concept_store.build_registry(metas)
+        for warning in warnings:
+            print(f"[warn] {warning}")
+        if errors:
+            for error in errors:
+                print(f"[error] {error}", file=sys.stderr)
+            raise SystemExit("registry not written (validation changed during reuse-source)")
+        concept_store.write_registry(vault, registry)
+        concept_store.remove_stale_aliases(vault)
+        try:
+            _data, graph_result = _rebuild_graph_artifacts(vault)
+        except GraphBuildError as exc:
+            for error in exc.args[0]:
+                print(f"[ERR] graph fail-hard: {error}")
+            raise SystemExit(2)
+        for warning in graph_result["warnings"]:
+            print(f"[warn] {warning}")
+        wiki_gate.write_quiz_index(vault)
+        props = wiki_gate.collect_propositions(vault)
+        wiki_gate.write_propositions_index(vault)
+        for duplicate in wiki_gate.duplicate_proposition_names(props):
+            print(f"[warn] 命题重名（名字即锚点，域内应唯一）：{duplicate}")
+        try:
+            # Derived rebuild may be long; recheck all external truth immediately before
+            # committing reused/published so recovery cannot publish stale origin inputs.
+            source_reuse.verify_live_inputs(plan)
+            state_created = state_store.reuse_source(
+                db, args.source, domain=args.domain,
+                manifest_path=str(plan["manifest_path"].resolve()),
+                manifest_sha256=plan["manifest_sha256"], lock_holder=holder)
+        except (source_reuse.ReuseError, OSError, sqlite3.Error,
+                state_store.InvalidTransition) as exc:
+            raise SystemExit(str(exc))
+    finally:
+        locks.release(db, scope="vault", holder=holder)
+    print(f"[OK] reuse-source {args.source}: reused/published; "
+          f"evidence={'created' if evidence_created else 'verified'}, "
+          f"source-page={'created' if source_created else 'verified'}, "
+          f"state={'created' if state_created else 'verified'}; "
+          "work_orders=0 ingest_progress=0 window_reads=0")
+
+
 def _overview_retract_action(cls: dict, vault) -> str:
     """撤库后 overview 的处置：'reseed'（独占本源被删 / 撤前已缺失 → 删后从模板重建 seed）或
     'keep'（shared / human / 无关且在场 → 保留不动、字节不变）。仅读，供 dry-run 与 apply 一致展示。"""
@@ -2523,6 +2640,21 @@ def main():
                      help="基线归档的预期 SHA-256")
     adp.add_argument("--apply", action="store_true",
                      help="执行接管（默认仅扫描、核验并打印计划，零写入）")
+    rsp = subparsers.add_parser(
+        "reuse-source", help="复用只读 published vault 的来源（默认 dry-run；--apply 登记专用终态）")
+    rsp.add_argument("--source", required=True, help="目标 vault 的 source_id")
+    rsp.add_argument("--title", required=True, help="目标 canonical source 页标题")
+    rsp.add_argument("--domain", required=True, help="目标来源领域")
+    rsp.add_argument("--path", required=True, help="原始 PDF 的当前本地路径")
+    rsp.add_argument("--sha256", required=True, help="原始 PDF 的预期 SHA-256")
+    rsp.add_argument("--origin-root", required=True, dest="origin_root",
+                     help="只读 origin pipeline workspace 根目录")
+    rsp.add_argument("--origin-source", required=True, dest="origin_source",
+                     help="origin published source_id（必须与 --source 相同）")
+    rsp.add_argument("--mapping", required=True,
+                     help="显式 37→目标页 mapping JSON；成功后可改用 evidence/mapping.json 重放")
+    rsp.add_argument("--apply", action="store_true",
+                     help="执行复用（默认只读核验并打印计划，byte-zero-write）")
     subparsers.add_parser("apply-obsidian-style",
                           help="落地学习库观感 CSS snippet + merge appearance.json（幂等，纯配置层零内容改动）")
     subparsers.add_parser("rebuild-registry", help="从概念页 frontmatter 重建 _registry.yaml（aliases.md 已废弃，别名只在概念页 frontmatter）")
@@ -2662,6 +2794,7 @@ def main():
         'fail': cmd_fail,
         'init-vault': cmd_init_vault,
         'adopt-vault': cmd_adopt_vault,
+        'reuse-source': cmd_reuse_source,
         'apply-obsidian-style': cmd_apply_obsidian_style,
         'rebuild-registry': cmd_rebuild_registry,
         'rebuild-graph': cmd_rebuild_graph,

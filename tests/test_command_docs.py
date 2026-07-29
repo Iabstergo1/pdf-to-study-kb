@@ -62,6 +62,19 @@ def test_developer_guide_has_no_hardcoded_lint_rule_count():
     assert not hits, f"developer-guide 仍硬编码 lint 规则总数 {hits}"
 
 
+def test_reuse_source_readonly_launch_contract_is_documented():
+    paths = [
+        "README.md", "docs/user-guide.md", "docs/developer-guide.md",
+        ".agents/skills/ingest/SKILL.md", ".claude/skills/ingest/SKILL.md",
+    ]
+    for rel in paths:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        assert "PYTHONDONTWRITEBYTECODE=1" in text, rel
+        assert "python -B" in text, rel
+        assert "non-WAL" in text or "非 WAL" in text, rel
+    assert (ROOT / paths[-2]).read_bytes() == (ROOT / paths[-1]).read_bytes()
+
+
 def test_docs_no_stale_source_image_or_scaffold_claims():
     # 文档守卫：git 追踪的全部 markdown（含 docs/skill-runtime、templates）不得再出现
     # "嵌原图/内嵌的源图/强制内嵌"这类肯定式嵌图措辞（D-1；明确的"禁止嵌入"说明不含这些词）；
