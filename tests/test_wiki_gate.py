@@ -387,6 +387,20 @@ def test_render_safety_violations_shared_rules():
         "x.md", "> [!question] 自测\n> 题干？\n> > [!success]- 参考答案\n> > 答案。\n") == []
 
 
+def test_render_safety_blocks_mermaid_wikilinks_but_not_code_literals(tmp_path):
+    body = ("```mermaid\nflowchart LR\nA[\"[[domains/x/concepts/a|A]]\"]\n```\n\n"
+            "```python\nlink = '[[literal]]'\n```\n")
+    violations = wiki_gate.render_safety_violations("x.md", body)
+    assert [v["rule"] for v in violations] == ["mermaid-wikilink"]
+    assert "第 3 行" in violations[0]["detail"]
+    page = {"rel_path": "domains/d/lessons/x.md",
+            "meta": {"type": "lesson", "status": "proposed", "managed_by": "pipeline"},
+            "body": body + ("足够长的正文。" * 20)}
+    assert "mermaid-wikilink" in {
+        v["rule"] for v in wiki_gate.lint_pages(tmp_path, [page], phase_e=False)
+    }
+
+
 def test_vault_render_safety_scans_published_with_owner(tmp_path):
     # published 旧伤复检：带 owner（source_refs 首源），proposed 页不在 published 扫描范围
     _page(tmp_path, "domains/d/lessons/old.md",

@@ -142,7 +142,7 @@ content-routing.md` 定义的 5 分类：理论型/方法型/案例型/参考型
 - **预处理验收门**：`preflight-eval --strict`（`check_dual_audit` + `check_evidence_bundle` 等）。
 - **收尾发布门**：`lint`——fail-closed，两段事务隔离：vault preflight（published 渲染旧伤 → 阻断
   promote + Review-Queue 去重登记，**不回滚当前批**）→ batch lint（当前批违规才回滚 + Review-Queue；
-  共 33 个违规标识，见 §7）。同一渲染安全扫描可用 `vault-lint` 独立跑。
+  完整违规标识见 §7，以实现与测试为真值）。同一渲染安全扫描可用 `vault-lint` 独立跑。
 - **写前守卫**：`check-write`（`ingest_guards.in_write_scope` + `can_overwrite`）。
 - **概念去重门**：`resolve-concept`（唯一入口）+ lint 的 `duplicate-canonical`。
 - **并发门**：`source_locks`（单 vault 锁）+ `ingest-start` 的 stale registry 校验。
@@ -331,7 +331,7 @@ pdf-to-study-kb/
 
 | 操作 | 命令 | 实现函数 | 输入 | 输出/产物 | 失败处理 | 测试 | 实现状态 |
 |---|---|---|---|---|---|---|---|
-| 收尾门禁 | `lint --source <src>`；kb-save 会话发布：`lint --source kb-save --session <run_id>` | `cmd_lint` → vault preflight（`wiki_gate.vault_render_safety`）→ `wiki_gate.lint_pages` + `promote` + `_rebuild_graph_artifacts` + `write_quiz_index` + `write_propositions_index` | proposed 页 | promote→published + 重建 index/registry + 知识图谱 v2.0 + quiz-index + propositions（后三者各自 publish-isolated） + log | preflight 旧伤 → 阻断不回滚（vault-health 队列）；当前批违规 → 回滚快照 + Review-Queue + exit 非零（33 个违规标识，见 §7） | `test_lint_republish_cli.py`、`test_wiki_gate.py` | 准确 |
+| 收尾门禁 | `lint --source <src>`；kb-save 会话发布：`lint --source kb-save --session <run_id>` | `cmd_lint` → vault preflight（`wiki_gate.vault_render_safety`）→ `wiki_gate.lint_pages` + `promote` + `_rebuild_graph_artifacts` + `write_quiz_index` + `write_propositions_index` | proposed 页 | promote→published + 重建 index/registry + 知识图谱 v2.0 + quiz-index + propositions（后三者各自 publish-isolated） + log | preflight 旧伤 → 阻断不回滚（vault-health 队列）；当前批违规 → 回滚快照 + Review-Queue + exit 非零（完整标识见 §7） | `test_lint_republish_cli.py`、`test_wiki_gate.py` | 准确 |
 | 全库渲染安全门禁 | `vault-lint` | `cmd_vault_lint` → `wiki_gate.vault_render_safety(published∪proposed)` | 全 vault | 违规清单，非零退出（可 CI） | 只读，零写入 | `test_lint_republish_cli.py` | 准确 |
 | 跨域提升候选 | `promotion-candidates [--propose]` | `cmd_promotion_candidates` → `promotion.find_candidates` | registry | 终端 + (可选)Review-Queue | — | `test_promotion.py` | 准确 |
 | 机械提升概念 | `promote-concept --id concept.<domain>.<slug>` | `cmd_promote_concept` → `promotion.promote_to_shared` | 概念页 | 移动到 `concepts/` + 全 vault 链接重写 | 目标冲突 → 中止 | `test_concept_promotion_cli.py` | 准确 |
@@ -390,7 +390,7 @@ pdf-to-study-kb/
 | 「概念去重唯一入口 resolve-concept」 | `concept_store.resolve_or_create_concept`（准确） |
 | 「两阶段发布」 | proposed → lint → published（准确） |
 | 「覆盖保护三条件」 | `ingest_guards.can_overwrite`（准确） |
-| 「fail-closed lint（order/safety/provenance，共 33 个违规标识）」 | `wiki_gate.lint_pages`/`render_safety_violations` + `lint_risk_traceability` + `pipeline.cmd_lint` 自身；vault preflight 与当前批回滚事务隔离；**正文小节标题不是门禁**（D-4） |
+| 「fail-closed lint（order/safety/provenance）」 | `wiki_gate.lint_pages`/`render_safety_violations` + `lint_risk_traceability` + `pipeline.cmd_lint` 自身；完整违规标识见 §7，vault preflight 与当前批回滚事务隔离；**正文小节标题不是门禁**（D-4） |
 
 ---
 
@@ -704,8 +704,9 @@ python -m pytest tests --collect-only -q --basetemp=$bt   # 只看分层收集
 list 字段**带内容却归一成空文本的条目数，如 Office 列表 `list_items` 未读；凭 provenance 区分真空白 vs
 漏读——真空白页/扫描空白页 `content_dropped=0`，不误伤） / `check_detection_distribution`。`--strict` 遇 high/fail → exit 2。
 
-**lint 发布门禁规则集 = 33 个违规标识**（`wiki_gate.lint_pages`/`render_safety_violations`/
-`lint_risk_traceability` + `pipeline.cmd_lint` 自身，order/safety/provenance；2026-07-12 静态提取核对）：
+**lint 发布门禁规则集**（`wiki_gate.lint_pages`/`render_safety_violations`/
+`lint_risk_traceability` + `pipeline.cmd_lint` 自身，order/safety/provenance；以实现与测试为真值，
+不在文档硬编码会随提交漂移的规则总数）：
 `L1`（裸 evidence id）/ `evidence-footnote` / `source-image-embed`（D-1/G1 正文禁嵌源图）/
 `frontmatter-incomplete`（G2，非 source 内容页必带 `source_refs`）/ `title-duplicate-h1` /
 `formula-table-pipe` / **`table-wikilink-pipe`**（表格行内 wikilink 别名竖线必须转义为 `[[path\|alias]]`，
@@ -715,6 +716,7 @@ vault preflight 复检全库 published 页、`vault-lint` CLI 可独立跑）**�
 消费统一 callout 解析器 `page_rules.parse_callouts` 的节点+错误头）/ `callout-nested-malformed`
 （块内同级 `[!type]` 头渲染成字面量、折叠答案泄漏；嵌套须 `> > [!type]`）/
 `math-delimiter-nonobsidian`（`\(…\)`/`\[…\]` Obsidian 不渲染）/ `question-stem-empty`（空题干） /
+`mermaid-wikilink`（Mermaid 代码块内不得放 Obsidian `[[wikilink]]`，改用纯文本标签） /
 `L7-synthesis-missing` / `topics-missing`（两者与 `overview-seed` 同属 ingest 阶段 E 义务，kb-save 会话
 批豁免） / `placeholder-unfilled`（本轮 proposed 与已 published 页两处判定） / **`overview-seed`**
 （2026-07-08 新增，防"lint 失败回滚吃掉 overview 就地编辑、重跑无人复查"） / `concepts-uncovered` /

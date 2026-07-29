@@ -9,6 +9,12 @@ _BARE_EVIDENCE = re.compile(r"\[E-[A-Za-z0-9_.\-]+\]")
 _FENCED_CODE = re.compile(r"```.*?```", re.DOTALL)
 _INLINE_CODE = re.compile(r"`[^`\n]+`")
 
+# Mermaid 会把 fenced block 当图表 DSL 解析，里面的 Obsidian wikilink 不会先展开，
+# `[[path|label]]` 因而会破坏节点语法。普通 fenced code 里的同样字面量仍是合法示例，
+# 所以不能复用 strip_code_blocks 后的全局 wikilink 检查，必须只看 mermaid fence。
+_FENCE_HEAD = re.compile(r"^\s*(`{3,}|~{3,})\s*([^\s`]*)[^\r\n]*$")
+_WIKILINK_LITERAL = re.compile(r"\[\[[^\]\n]+\]\]")
+
 
 def strip_code_blocks(text: str) -> str:
     """剔除围栏代码块与行内代码，返回仅含散文/标记的文本。
@@ -16,6 +22,34 @@ def strip_code_blocks(text: str) -> str:
     正则负字符类 `[^a-z]`（会被脚注引用正则 `[^...]` 误判）、`[E.. ` 字面量、`[[ ` 等，
     它们是代码而非 wiki 标记，须先剔除避免 fail-closed 误拦（对任意含代码的来源通用）。"""
     return _INLINE_CODE.sub(" ", _FENCED_CODE.sub("\n", text))
+
+
+def mermaid_fenced_wikilinks(text: str) -> list[dict]:
+    """返回 Mermaid fenced block 中的 wikilink 字面量及 1-based 行号。
+
+    只扫描 info string 为 ``mermaid``（大小写不敏感）的围栏；其它代码块和普通散文
+    不命中。结束围栏须使用与开头相同字符且长度不少于开头，贴近 CommonMark 语义。
+    """
+    hits: list[dict] = []
+    fence_char = ""
+    fence_len = 0
+    in_mermaid = False
+    for line_no, line in enumerate(text.splitlines(), 1):
+        if not fence_char:
+            m = _FENCE_HEAD.match(line)
+            if not m:
+                continue
+            marker, info = m.group(1), m.group(2).lower()
+            fence_char, fence_len = marker[0], len(marker)
+            in_mermaid = info == "mermaid"
+            continue
+        if re.match(rf"^\s*{re.escape(fence_char)}{{{fence_len},}}\s*$", line):
+            fence_char, fence_len, in_mermaid = "", 0, False
+            continue
+        if in_mermaid:
+            hits.extend({"line": line_no, "wikilink": m.group(0)}
+                        for m in _WIKILINK_LITERAL.finditer(line))
+    return hits
 # 脚注引用 [^e1]（行内）；(?!:) 排除定义行
 _FOOTNOTE_REF = re.compile(r"\[\^([A-Za-z0-9_\-]+)\](?!:)")
 # 脚注定义行 [^e1]: …

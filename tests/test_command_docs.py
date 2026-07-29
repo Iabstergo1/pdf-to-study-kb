@@ -54,6 +54,14 @@ def test_docs_no_hardcoded_test_counts():
         assert not hits, f"{rel} 仍硬编码测试数量 {hits}（会随提交漂移；以 collect-only 为准）"
 
 
+def test_developer_guide_has_no_hardcoded_lint_rule_count():
+    # 规则会随实现演进；文档保留逐项说明，但不再维护一个独立、易漂移的总数。
+    import re
+    text = (ROOT / "docs/developer-guide.md").read_text(encoding="utf-8")
+    hits = re.findall(r"\d+\s*个违规标识", text)
+    assert not hits, f"developer-guide 仍硬编码 lint 规则总数 {hits}"
+
+
 def test_docs_no_stale_source_image_or_scaffold_claims():
     # 文档守卫：git 追踪的全部 markdown（含 docs/skill-runtime、templates）不得再出现
     # "嵌原图/内嵌的源图/强制内嵌"这类肯定式嵌图措辞（D-1；明确的"禁止嵌入"说明不含这些词）；

@@ -44,6 +44,15 @@ def test_strip_code_blocks_removes_fenced_and_inline():
     assert refs == {"e1"} and (refs - page_rules.footnote_defs(body)) == set()
 
 
+def test_mermaid_fenced_wikilinks_only_flags_mermaid_blocks():
+    body = ("```mermaid\nflowchart LR\nA[\"[[domains/x/concepts/a|A]]\"]\n```\n\n"
+            "```python\nlink = '[[literal-not-wikilink]]'\n```\n\n"
+            "普通散文 [[domains/x/concepts/b|B]]。\n")
+    assert page_rules.mermaid_fenced_wikilinks(body) == [
+        {"line": 3, "wikilink": "[[domains/x/concepts/a|A]]"}
+    ]
+
+
 def test_required_sections_cleared_d4():
     # D-4：必需小节已全清空——各页型不再强制任何逐字小节标题
     for t in ("concept", "topic", "comparison", "overview", "source"):

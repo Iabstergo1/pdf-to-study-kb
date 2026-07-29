@@ -256,11 +256,17 @@ _MATH_DELIM = re.compile(r"(?<!\\)\\[\(\[]")
 
 def render_safety_violations(rel: str, body: str) -> list[dict]:
     """已知、确定性、可高置信识别的渲染陷阱（唯一实现）：proposed 批（lint_pages）与
-    published preflight（vault_render_safety）共用。覆盖：callout 未知类型 / 块内同级
-    callout 头 / 非 Obsidian 数学分隔符 / 空题干。未知渲染陷阱不在此穷举——由
+    published preflight（vault_render_safety）共用。覆盖：Mermaid fence 内 wikilink /
+    callout 未知类型 / 块内同级 callout 头 / 非 Obsidian 数学分隔符 / 空题干。
+    未知渲染陷阱不在此穷举——由
     kb-postmortem 循环发现后立法。纯函数、无 I/O。"""
     import page_rules
     vs: list[dict] = []
+    for hit in page_rules.mermaid_fenced_wikilinks(body):
+        vs.append({"path": rel, "rule": "mermaid-wikilink",
+                   "detail": f"Mermaid fenced block 第 {hit['line']} 行含 wikilink "
+                             f"`{hit['wikilink']}`；Mermaid 节点只放普通 label，真实 wikilink "
+                             "移到代码块外的 Markdown 散文中"})
     b = page_rules.strip_code_blocks(body)
     nodes, errors = page_rules.parse_callouts(b)
     # 类型白名单直接遍历解析器视野（节点 + 结构错误头）——曾有第二套正则只认 ASCII 开头，
