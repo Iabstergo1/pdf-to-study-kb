@@ -43,7 +43,7 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 | `pipeline.py` | CLI 分发 + 各阶段编排（每个 `cmd_*` 一个子命令，共 48 个） | `main()`、`cmd_*` 函数族、`_workspace_root()`、`_vault_dir()`、`_staging_dir()` |
 | `state_store.py` | 单一业务 SQLite 状态机（**8 张表**）+ 原子阶段 API + 轮次 token | `STAGES`、`NEXT`、`start_stage/complete_stage/fail_stage`、`should_run_stage`、`adopt_source`、`reuse_source`、`reopen_source`、`reset_source`、`RESETTABLE_TARGETS`、`resolve_review_proposals`、`source_stats`、`*_window`、`round_anchor`、`window_reads_in_round`、`export_source_rows`、`purge_source_ledgers` |
 | `vault_adoption.py` | 既有 vault 的只读接管计划、ZIP/页面集合核验、不可变逐页证据、canonical source 页与历史基线/接管后 live drift 分层 | `AdoptionError`、`build_plan`、`write_evidence`、`write_source_page` |
-| `source_reuse.py` | published origin vault 的只读状态/来源文件/概念与主题页核验、mapping 覆盖集相等性与目标归因边界、不可变 origin/target evidence 与 live target drift 分层 | `ReuseError`、`build_plan`、`write_evidence`、`write_source_page` |
+| `source_reuse.py` | published origin vault 的只读状态/来源文件/概念与主题页核验、mapping v1/v2 解析与覆盖集相等性、concept 与 topic 两维的目标归因边界、不可变 origin/target evidence 与 live target drift 分层 | `ReuseError`、`build_plan`、`write_evidence`、`write_source_page` |
 | `evidence_fs.py` | 两条零 LLM 旁路共用的证据落盘底座：路径边界、canonical JSON、流式哈希、vault 锁前置检查（纯函数、无业务语义；`AdoptionError`/`ReuseError` 都继承它的基类但互不为别名） | `EvidenceBoundaryError`、`sha256_file`、`json_bytes`、`resolved_inside`、`assert_direct_contained`、`reject_lock` |
 | `locks.py` | 单 vault 写锁（scope 固定 `"vault"`） | `acquire/release/heartbeat/is_stale/break_stale` |
 | `source_profile.py` | L1 逐页 profile + `needs_vision` 判定（公式/图/表/扫描信号）+ 可摄取格式单一真值 | `profile_source`、`profile_page`、`needs_vision_reasons`、`vision_tier`、`is_scanned_source`、`render_pages_png`、`INGESTABLE_FORMATS`、`PROFILER_VERSION="5"` |
@@ -299,7 +299,7 @@ pdf-to-study-kb/
 | 列出各源下一步动作 | `next` | `cmd_next` → `state_store.next_actions` | state db | 终端打印 | 无 | `test_pipeline_status.py` | 准确 |
 | 建 vault 脚手架 | `init-vault` | `cmd_init_vault` | `templates/overview.md` | `wiki/` 目录 + overview/log/purpose + `.obsidian/{graph,app}.json` | 写盘（幂等不覆盖） | `test_vault_init_cli.py` | 准确 |
 | 接管既有 vault 基线 | `adopt-vault --source --title --domain --baseline-archive --baseline-sha256 [--apply]` | `cmd_adopt_vault` → `vault_adoption.build_plan/write_evidence/write_source_page` + 派生重建 + `state_store.adopt_source` | 已有 `wiki/` + 接管前 ZIP 及预期 SHA-256 | 默认只打印逐页计划；apply 在锁内落不可变证据/canonical source 页，派生层全成功后登记 `legacy-vault` 的 `adopted/published` | 首次 legacy 内容债 warning-only，安全/ZIP/证据/source/state/台账完整性 hard-block；精确重跑 byte no-op，登记后 live drift 只 warning、历史证据不变；`work_orders/ingest_progress/window_reads=0` | `test_adopt_vault_cli.py` | 准确 |
-| 复用 published vault 来源 | `reuse-source --source --title --domain --path --sha256 --origin-root --origin-source --mapping [--apply]` | `cmd_reuse_source` → `source_reuse.build_plan/write_evidence/write_source_page` + 派生重建 + `state_store.reuse_source` | 只读 origin root + PDF/SHA + mapping v1 + 已完成 merge/source_refs 的目标页 | 默认 byte-zero-write；apply 在目标锁内冻结 origin state/source 页与全部 concept/topic 页、mapping 与首次 target snapshot，派生成功后登记 `external-vault-reuse` 的 `reused/published` | mapping 覆盖集 == origin 概念集（故各恰好一次），零映射目标不得获该来源归因；精确重跑 no-op，target live drift warning-only，origin/mapping/evidence/source/state drift fail-closed；三台账为 0 | `test_reuse_source_cli.py` | 准确 |
+| 复用 published vault 来源 | `reuse-source --source --title --domain --path --sha256 --origin-root --origin-source --mapping [--apply]` | `cmd_reuse_source` → `source_reuse.build_plan/write_evidence/write_source_page` + 派生重建 + `state_store.reuse_source` | 只读 origin root + PDF/SHA + mapping v1 + 已完成 merge/source_refs 的目标页 | 默认 byte-zero-write；apply 在目标锁内冻结 origin state/source 页与全部 concept/topic 页、mapping（v1/v2）与首次 concept+topic target snapshot，派生成功后登记 `external-vault-reuse` 的 `reused/published` | mapping 覆盖集 == origin 概念集（故各恰好一次）；v2 的 topic 维度只校验引用存在性与不重复，不要求全覆盖；两维的零映射目标都不得获该来源归因；精确重跑 no-op，target live drift warning-only，origin/mapping/evidence/source/state drift fail-closed；三台账为 0 | `test_reuse_source_cli.py` | 准确 |
 | 回收 stale 锁 | `unlock [--ttl 1800]` | `cmd_unlock` → `locks.break_stale` | state db | 释放锁 | 删锁行（活锁拒绝） | `test_locks.py` | 准确 |
 | 崩溃阶段标 failed | `fail --source --stage --error` | `cmd_fail` → `state_store.fail_stage` | state db | 标记 failed | 改状态 | `test_state_store.py` | 准确 |
 | 重建 registry | `rebuild-registry` | `cmd_rebuild_registry` → `concept_store.build_registry/write_registry` + `remove_stale_aliases` | 概念页 frontmatter | `_registry.yaml`（aliases.md 已退休，若残留则删除） | 写派生文件 | `test_concept_store.py` | 准确 |
@@ -461,13 +461,32 @@ SHA-256。origin 与 target workspace 必须是互不包含的直接路径；ori
 创建锁、目录、journal 或任何业务行。正式 origin 同时承载 CLI 代码，因此所有 dry-run/apply 调用还必须
 在解释器启动前设置 `PYTHONDONTWRITEBYTECODE=1` 并使用 `python -B`，避免 import 写入 origin 的 pycache。
 
-mapping v1 顶层字段严格为 `version/source_id/targets`；target 项严格为 `target/origin_concepts`。
-targets 与每组 origin 路径都要排序、无重复；**mapping 覆盖的 origin concept 集合必须与 origin
+**mapping 有 v1 / v2 两个版本，`_load_mapping` 都接受。** v1 顶层字段严格为
+`version/source_id/targets`；target 项严格为 `target/origin_concepts`。v2 在顶层多一个
+`topic_targets`，项严格为 `target/origin_topics`，形状与 concept 维度完全对称（同一个
+`_load_mapping_dimension` 校验，`seen_target_keys` 跨维度共享，因此同一张目标页不能同时出现在两个维度里）。
+两维的 target 与每组 origin 路径都要排序、无重复。
+
+**两个维度的完备性要求刻意不同**：**mapping 覆盖的 origin concept 集合必须与 origin
 实际拥有的集合相等**——这一条即蕴含不遗漏、不多余、各映射一次，因此 target 张数与非空/零映射比例
 不再另设门禁（曾把一次 MySQL 迁移的 37/3/8=6+2 写死进通用命令，任何别的来源必然失败）。
-`--expect-concepts` / `--expect-topics` 是可选的形状确认，默认关闭。非空 target 必须是现有 published concept 且已含
+**topic 维度只要求引用到的 origin topic 真实存在且不被重复引用，不要求全覆盖**：强制全覆盖会逼人
+为每张 origin topic 在目标库造一张页，正是核心约束 7 要禁的"门禁制造内容"。
+`--expect-concepts` / `--expect-topics` 是可选的形状确认，默认关闭。
+
+两维的归因边界一致：非空 target 必须是现有 published concept / topic 页且已含
 `source_refs: source: <src>`，显式零映射 target 必须不含该来源；mapping 外任何该来源的
-source_ref 同样 fail-closed，因此 CLI 只验证人工 merge，绝不制造归因。
+source_ref 同样 fail-closed，因此 CLI 只验证人工 merge，绝不制造归因。topic 维度存在的理由正是
+这条边界——v2 之前，一张合法聚合了该来源内容的 topic 页无处声明，只会被判成
+`unmapped-target-false-attribution`：数据真实，但审计对不上。
+
+**v1 向后兼容是硬要求，靠"键只在需要时出现"实现。** manifest 是 canonical JSON（`sort_keys`），
+多一个键就换一份 sha256，既存 v1 evidence 会立刻被判成 metadata drift。因此
+`topic_target_pages` **只在 mapping 真的声明了 `topic_targets` 时**才写进 manifest；source 页正文
+里的 topic 段落同理。v1 mapping 走下来的 manifest 与 source 页与升级前逐字节相同，既存证据无需迁移，
+重放仍是全树 byte/mtime no-op。manifest 的 `version` 是**证据格式**版本（保持 1），与 mapping 的
+version 是两件事——后者记在 `mapping.json` 里并由 `mapping_sha256` 冻结。拿 v2 mapping 重放一份 v1
+证据（或反之）会因键集合不同而 fail-closed，不会被悄悄升级。
 
 `--apply` 在目标 vault 锁内重新规划，再原子写 `pipeline-workspace/reuses/<src>/`：canonical manifest、
 原始 `mapping.json`、canonical `origin-state.json`、origin source 页与全部 concept/topic 页字节和首次 target merge 页字节；

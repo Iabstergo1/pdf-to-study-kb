@@ -62,17 +62,29 @@ def test_developer_guide_has_no_hardcoded_lint_rule_count():
     assert not hits, f"developer-guide 仍硬编码 lint 规则总数 {hits}"
 
 
+_REUSE_DOCS = [
+    "README.md", "docs/user-guide.md", "docs/developer-guide.md",
+    ".agents/skills/ingest/SKILL.md", ".claude/skills/ingest/SKILL.md",
+]
+
+
 def test_reuse_source_readonly_launch_contract_is_documented():
-    paths = [
-        "README.md", "docs/user-guide.md", "docs/developer-guide.md",
-        ".agents/skills/ingest/SKILL.md", ".claude/skills/ingest/SKILL.md",
-    ]
-    for rel in paths:
+    for rel in _REUSE_DOCS:
         text = (ROOT / rel).read_text(encoding="utf-8")
         assert "PYTHONDONTWRITEBYTECODE=1" in text, rel
         assert "python -B" in text, rel
         assert "non-WAL" in text or "非 WAL" in text, rel
-    assert (ROOT / paths[-2]).read_bytes() == (ROOT / paths[-1]).read_bytes()
+    assert (ROOT / _REUSE_DOCS[-2]).read_bytes() == (ROOT / _REUSE_DOCS[-1]).read_bytes()
+
+
+def test_mapping_v2_topic_dimension_and_v1_compatibility_are_documented():
+    # v2 是可选维度、v1 不需要迁移——这两点漏写一处就会有人去"升级"已冻结的证据。
+    for rel in _REUSE_DOCS:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        assert "topic_targets" in text, f"{rel} 未记录 mapping v2 的 topic 维度"
+        assert ("v1" in text and ("no migration" in text or "无需迁移" in text
+                                  or "不需要迁移" in text)), \
+            f"{rel} 未写明既有 v1 mapping/evidence 无需迁移"
 
 
 def test_docs_no_stale_source_image_or_scaffold_claims():

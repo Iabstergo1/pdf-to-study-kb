@@ -784,12 +784,18 @@ def cmd_reuse_source(args):
     print(f"[plan] origin={plan['origin_root']} source={plan['origin_source']} "
           f"concepts={len(plan['origin_concepts'])} topics={len(plan['origin_topics'])}")
     print(f"[plan] mapping={plan['mapping_path']} sha256={plan['mapping_sha256']} "
+          f"version={plan['mapping']['version']} "
           f"mapped-targets={plan['mapped_target_count']} "
           f"zero-mapping-targets={plan['zero_mapping_target_count']}")
+    if plan["mapping"]["topic_targets"]:
+        print(f"[plan] topic-mapping mapped-topic-targets={plan['mapped_topic_target_count']} "
+              f"zero-mapping-topic-targets={plan['zero_mapping_topic_target_count']}")
     print(f"[plan] evidence={plan['manifest_path']} sha256={plan['manifest_sha256']}")
     print(f"[plan] source-page={plan['source_path']}; target knowledge pages unchanged")
     for item in plan["mapping"]["targets"]:
         print(f"[mapping] {item['target']} <- {len(item['origin_concepts'])} origin concept(s)")
+    for item in plan["mapping"]["topic_targets"]:
+        print(f"[topic-mapping] {item['target']} <- {len(item['origin_topics'])} origin topic(s)")
     for warning in plan["warnings"]:
         print(f"[warning] {warning['rule']} {warning['path']}: {warning['detail']}")
     fully_recorded = (plan["evidence_verified"] and plan["source_verified"]
@@ -2680,7 +2686,8 @@ def main():
     rsp.add_argument("--origin-source", required=True, dest="origin_source",
                      help="origin published source_id（必须与 --source 相同）")
     rsp.add_argument("--mapping", required=True,
-                     help="显式 origin concept→目标页 mapping JSON；成功后可改用 evidence/mapping.json 重放")
+                     help="mapping JSON（v1 只有 concept 维度；v2 另加 topic_targets 维度）；"
+                          "成功后可改用 evidence/mapping.json 重放")
     rsp.add_argument("--expect-concepts", dest="expect_concepts", type=int, default=None,
                      help="可选：断言 origin 恰好有 N 张 published concept（默认不限制数量）")
     rsp.add_argument("--expect-topics", dest="expect_topics", type=int, default=None,

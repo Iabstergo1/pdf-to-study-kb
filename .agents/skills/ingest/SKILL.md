@@ -35,11 +35,15 @@ the zero-LLM `reuse-source` branch in §6; target merge pages/source_refs must a
   independently recorded 64-hex SHA-256. Confirm all five inputs; do not silently calculate a new expected hash
   and treat it as prior baseline evidence.
 - For cross-vault reuse, require `<src>/<title>/<domain>`, the current PDF path + independently expected SHA-256,
-  a disjoint read-only `<origin-root>` + matching `<origin-source>`, and an explicit mapping v1 JSON. The mapping's
-  covered origin-concept set must equal the set the origin actually owns, so nothing is missed, duplicated or
-  double-mapped; target count and the non-empty/zero-mapping split are the mapping's own shape, not a gate.
-  Non-empty targets already carry this source_ref, while explicit zero-mapping targets must not.
-  This branch verifies the merge; it never performs it.
+  a disjoint read-only `<origin-root>` + matching `<origin-source>`, and an explicit mapping JSON (v1 or v2 —
+  both supported). The mapping's covered origin-concept set must equal the set the origin actually owns, so
+  nothing is missed, duplicated or double-mapped; target count and the non-empty/zero-mapping split are the
+  mapping's own shape, not a gate. A v2 mapping adds a symmetric `topic_targets` dimension so topic pages that
+  legitimately aggregate this source can declare it; unlike concepts, origin topics need **not** be covered
+  exhaustively — only referenced ones must exist and must not be referenced twice. Non-empty targets in either
+  dimension already carry this source_ref, while explicit zero-mapping targets must not.
+  This branch verifies the merge; it never performs it. Existing v1 mappings and frozen v1 evidence
+  need no migration: a v1 run is byte-identical to before.
 - Read: `wiki/_meta/purpose.md` **first — it is the authority on writing style, structure, depth and
   terminology** (the user's learning goals / teaching preference). The deterministic layer only guards
   order/safety/provenance; **form is purpose-driven, not template-driven.** Then read
@@ -107,10 +111,12 @@ incremental reopen        reopen → ingest-start →[ per-window backfill ]→ 
 > imports are not allowed to update its `scripts/__pycache__`. Run without `--apply` first. The origin state DB
 > must use a non-WAL rollback journal and have no `-wal/-shm` sidecar. The plan must report the expected PDF hash,
 > read-only origin `lint/published` state, canonical source page, the published concept/topic counts it found, and
-> a mapping whose covered origin-concept set equals the origin's own set (hence exactly once each). Target count is
-> the mapping's shape, not a gate; `--expect-concepts` / `--expect-topics` are optional confirmations.
-> Non-empty target pages must already carry
-> this source_ref; zero-mapping targets must not. Apply takes only the target vault lock, freezes origin state/pages,
+> a mapping (v1 or v2) whose covered origin-concept set equals the origin's own set (hence exactly once each).
+> Target count is the mapping's shape, not a gate; `--expect-concepts` / `--expect-topics` are optional
+> confirmations. A v2 mapping also reports its `topic_targets` dimension — topic coverage is deliberately partial,
+> so only referenced origin topics must exist and must not repeat. Non-empty target pages in either dimension must
+> already carry this source_ref; zero-mapping targets must not. Replaying frozen v1 evidence stays a byte no-op;
+> mixing a v1 evidence set with a v2 mapping (or vice versa) fails closed rather than silently upgrading. Apply takes only the target vault lock, freezes origin state/pages,
 > raw mapping and the first target merge bytes, rebuilds every derived layer, then records
 > `external-vault-reuse` as `reused/published`; all three ingest ledgers remain zero. Exact repeat is whole-tree
 > byte/mtime no-op only after registry/index/graph/quiz/propositions are recomputed and verified; missing or corrupt

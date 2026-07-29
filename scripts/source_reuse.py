@@ -261,77 +261,133 @@ def _origin_pages(origin_root: Path, source: str, *, expected_domain: str,
     return source_entry, concepts, topics
 
 
-def _load_mapping(path: Path, source: str, origin_concepts: list[dict]) -> tuple[bytes, dict]:
+_MAPPING_FIELDS = {
+    1: {"version", "source_id", "targets"},
+    2: {"version", "source_id", "targets", "topic_targets"},
+}
+
+
+def _load_mapping_dimension(items, *, label: str, origin_key: str, noun: str,
+                            seen_target_keys: set[str]) -> tuple[list[dict], set[str]]:
+    """一个映射维度（concept 或 topic）的通用校验；两维形状与措辞完全对称。
+
+    返回 (归一化后的映射项, 该维度覆盖到的 origin 路径集合)。``seen_target_keys`` 跨维度共享，
+    因此同一张目标页不能同时出现在两个维度里。
+    """
+    out: list[dict] = []
+    covered: set[str] = set()
+    covered_keys: set[str] = set()
+    if not isinstance(items, list):
+        raise ReuseError(f"mapping {label} must be a list")
+    for index, item in enumerate(items):
+        if not isinstance(item, dict) or set(item) != {"target", origin_key}:
+            raise ReuseError(
+                f"mapping {label}[{index}] fields must be exactly target/{origin_key}")
+        target = _safe_rel(item["target"], f"mapping {label}[{index}].target")
+        origins = item[origin_key]
+        if not isinstance(origins, list):
+            raise ReuseError(f"mapping {origin_key} for {target} must be a list")
+        normalised = [_safe_rel(value, f"mapping origin for {target}") for value in origins]
+        origin_keys = [value.casefold() for value in normalised]
+        if normalised != sorted(normalised) or len(set(origin_keys)) != len(origin_keys):
+            raise ReuseError(f"mapping {origin_key} must be sorted and unique for {target}")
+        target_key = target.casefold()
+        if target_key in seen_target_keys:
+            raise ReuseError(f"mapping target is duplicated: {target}")
+        seen_target_keys.add(target_key)
+        for origin in normalised:
+            key = origin.casefold()
+            if key in covered_keys:
+                raise ReuseError(f"origin {noun} mapped more than once: {origin}")
+            covered_keys.add(key)
+            covered.add(origin)
+        out.append({"target": target, origin_key: normalised})
+    paths = [item["target"] for item in out]
+    if paths != sorted(paths):
+        raise ReuseError(f"mapping {label} must be sorted by target path")
+    return out, covered
+
+
+def _load_mapping(path: Path, source: str, origin_concepts: list[dict],
+                  origin_topics: list[dict]) -> tuple[bytes, dict]:
+    """解析并校验 mapping。v1 与 v2 都接受；v1 语义一字未改。
+
+    - **v1**（`version/source_id/targets`）：只有 concept 维度。
+    - **v2**（额外 `topic_targets`，项为 `target`/`origin_topics`）：把 topic 页的归因也纳入
+      可重放核验。**concept 与 topic 的完备性要求刻意不同**——concept 维度要求 mapping 覆盖集
+      与 origin 概念集**相等**（复用的前提就是"origin 的每张概念页都落到了某处"）；topic 维度
+      只要求引用的 origin topic 真实存在且不重复引用，**不要求全覆盖**：强制覆盖等于逼人为
+      每张 origin topic 在目标库造一张页，那正是"门禁不得制造内容"要禁的事（核心约束 7）。
+
+    返回的归一化 dict 对 v1 也带一个空 `topic_targets`，好让下游只有一套代码；这只是内存表示，
+    不进 manifest、不进任何字节产物，所以既存 v1 证据的重放仍逐字不变。
+    """
     raw = path.read_bytes()
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ReuseError("mapping must be valid UTF-8 JSON") from exc
-    if not isinstance(data, dict) or set(data) != {"version", "source_id", "targets"}:
-        raise ReuseError("mapping top-level fields must be exactly version/source_id/targets")
-    if data["version"] != 1 or data["source_id"] != source or not isinstance(data["targets"], list):
-        raise ReuseError("mapping requires version=1, matching source_id, and a targets list")
-    targets: list[dict] = []
-    seen_targets: set[str] = set()
-    seen_origins: set[str] = set()
-    seen_origin_keys: set[str] = set()
-    for index, item in enumerate(data["targets"]):
-        if not isinstance(item, dict) or set(item) != {"target", "origin_concepts"}:
-            raise ReuseError(
-                f"mapping targets[{index}] fields must be exactly target/origin_concepts")
-        target = _safe_rel(item["target"], f"mapping targets[{index}].target")
-        origins = item["origin_concepts"]
-        if not isinstance(origins, list):
-            raise ReuseError(f"mapping origins for {target} must be a list")
-        normalised = [_safe_rel(value, f"mapping origin for {target}") for value in origins]
-        origin_keys = [value.casefold() for value in normalised]
-        if normalised != sorted(normalised) or len(set(origin_keys)) != len(origin_keys):
-            raise ReuseError(f"mapping origin_concepts must be sorted and unique for {target}")
-        target_key = target.casefold()
-        if target_key in seen_targets:
-            raise ReuseError(f"mapping target is duplicated: {target}")
-        seen_targets.add(target_key)
-        for origin in normalised:
-            origin_key = origin.casefold()
-            if origin_key in seen_origin_keys:
-                raise ReuseError(f"origin concept mapped more than once: {origin}")
-            seen_origin_keys.add(origin_key)
-            seen_origins.add(origin)
-        targets.append({"target": target, "origin_concepts": normalised})
-    target_paths = [item["target"] for item in targets]
-    if target_paths != sorted(target_paths):
-        raise ReuseError("mapping targets must be sorted by target path")
+    if not isinstance(data, dict) or data.get("version") not in _MAPPING_FIELDS:
+        raise ReuseError(
+            f"mapping version must be one of {sorted(_MAPPING_FIELDS)}; "
+            f"got {data.get('version') if isinstance(data, dict) else type(data).__name__}")
+    version = data["version"]
+    if set(data) != _MAPPING_FIELDS[version]:
+        raise ReuseError(
+            f"mapping v{version} top-level fields must be exactly "
+            f"{'/'.join(sorted(_MAPPING_FIELDS[version]))}")
+    if data["source_id"] != source:
+        raise ReuseError("mapping source_id must match --source")
+
+    seen_target_keys: set[str] = set()
+    targets, covered_concepts = _load_mapping_dimension(
+        data["targets"], label="targets", origin_key="origin_concepts", noun="concept",
+        seen_target_keys=seen_target_keys)
     expected = {item["path"] for item in origin_concepts}
-    if seen_origins != expected:
-        missing = sorted(expected - seen_origins)
-        extra = sorted(seen_origins - expected)
+    if covered_concepts != expected:
+        missing = sorted(expected - covered_concepts)
+        extra = sorted(covered_concepts - expected)
         raise ReuseError(
             f"mapping must cover all {len(expected)} origin concepts exactly once "
             f"(missing={len(missing)}, extra={len(extra)})")
-    # targets 的张数由 mapping 作者决定，不是安全属性：上面的集合相等 + 每个 origin
-    # concept 至多出现一次，已经把"不遗漏、不多余、各映射一次"钉死；非空/零映射目标的
+
+    topic_targets: list[dict] = []
+    if version >= 2:
+        topic_targets, covered_topics = _load_mapping_dimension(
+            data["topic_targets"], label="topic_targets", origin_key="origin_topics",
+            noun="topic", seen_target_keys=seen_target_keys)
+        known_topics = {item["path"] for item in origin_topics}
+        unknown = sorted(covered_topics - known_topics)
+        if unknown:
+            raise ReuseError(
+                f"mapping references {len(unknown)} origin topic(s) the source does not own: "
+                f"{unknown[0]}")
+    # 目标张数由 mapping 作者决定，不是安全属性：concept 维度的集合相等 + 每个 origin
+    # 条目至多出现一次，已经把"不遗漏、不多余、各映射一次"钉死；非空/零映射目标的
     # 归因边界另由 _target_pages 逐页核验。
-    return raw, {"version": 1, "source_id": source, "targets": targets}
+    return raw, {"version": version, "source_id": source,
+                 "targets": targets, "topic_targets": topic_targets}
 
 
-def _target_pages(vault: Path, source: str, mapping: dict) -> tuple[list[dict], list[dict]]:
+def _target_dimension_pages(vault: Path, source: str, items: list[dict], *,
+                            origin_key: str, page_type: str) -> tuple[list[dict], set[str]]:
+    """核验一个维度的目标页：类型/状态 + 归因边界。返回 (页条目, 非空映射的路径集合)。"""
     entries: list[dict] = []
-    warnings: list[dict] = []
     mapped_paths: set[str] = set()
-    for item in mapping["targets"]:
+    for item in items:
         rel = item["target"]
         path = vault / rel
         if not path.is_file():
             raise ReuseError(f"mapping target does not exist: {rel}")
-        entry = _page_entry(path, vault, rel, mapped_origin_count=len(item["origin_concepts"]))
+        count = len(item[origin_key])
+        entry = _page_entry(path, vault, rel, mapped_origin_count=count)
         try:
             meta, _body = mdpage.read_page(path)
         except (OSError, UnicodeError, yaml.YAMLError) as exc:
             raise ReuseError(f"cannot read mapping target {rel}: {exc}") from exc
-        if meta.get("type") != "concept" or meta.get("status") != "published":
-            raise ReuseError(f"mapping target must be a published concept page: {rel}")
+        if meta.get("type") != page_type or meta.get("status") != "published":
+            raise ReuseError(f"mapping target must be a published {page_type} page: {rel}")
         attributed = _has_source_ref(meta, source)
-        count = len(item["origin_concepts"])
         if count and not attributed:
             raise ReuseError(
                 f"mapped-target-missing-source-ref: {rel} must already contain source_refs source={source}")
@@ -341,8 +397,26 @@ def _target_pages(vault: Path, source: str, mapping: dict) -> tuple[list[dict], 
         if count:
             mapped_paths.add(rel)
         entries.append(entry)
+    return entries, mapped_paths
+
+
+def _target_pages(vault: Path, source: str,
+                  mapping: dict) -> tuple[list[dict], list[dict], list[dict]]:
+    """返回 (concept 目标页, topic 目标页, warnings)。
+
+    v1 的 mapping 归一化后 ``topic_targets`` 为空，topic 目标页因而是空列表——
+    对既存 v1 证据是彻底的 no-op。
+    """
+    warnings: list[dict] = []
+    entries, mapped_paths = _target_dimension_pages(
+        vault, source, mapping["targets"], origin_key="origin_concepts", page_type="concept")
+    topic_entries, mapped_topic_paths = _target_dimension_pages(
+        vault, source, mapping["topic_targets"], origin_key="origin_topics", page_type="topic")
+    mapped_paths |= mapped_topic_paths
 
     # Mapping 是归因边界：非空映射目标之外，任何已有本来源 source_ref 都是未声明归因。
+    # v2 之前 topic 页无处安放——一张合法聚合本来源内容的 topic 页会被判成"未声明归因"，
+    # 数据真实但审计对不上；topic 维度就是为此存在的。
     attributed_paths: set[str] = set()
     for path in sorted(vault.rglob("*.md")):
         rel = path.relative_to(vault).as_posix()
@@ -367,7 +441,7 @@ def _target_pages(vault: Path, source: str, mapping: dict) -> tuple[list[dict], 
     if missing:
         raise ReuseError(
             f"mapped-target-missing-source-ref: source={source} absent from {missing[0]}")
-    return entries, warnings
+    return entries, topic_entries, warnings
 
 
 def _load_stored_manifest(evidence_dir: Path) -> tuple[dict, bytes] | None:
@@ -388,7 +462,11 @@ def _load_stored_manifest(evidence_dir: Path) -> tuple[dict, bytes] | None:
         "origin_state_sha256", "origin_topics", "pdf_path", "pdf_sha256", "source_id",
         "target_pages", "title", "version", "zero_mapping_target_count",
     }
-    if not isinstance(data, dict) or set(data) != required or raw != _json_bytes(data):
+    # topic_target_pages 是 mapping v2 才有的可选维度：v1 证据一个字节都不多，
+    # v2 证据多这一个键。除它之外的键集合两者相同。
+    optional = {"topic_target_pages"}
+    if not isinstance(data, dict) or not required <= set(data) \
+            or set(data) - required - optional or raw != _json_bytes(data):
         raise ReuseError("reuse evidence manifest schema/canonical bytes drift")
     if data.get("version") != 1 or data.get("format") != "external-vault-reuse":
         raise ReuseError("reuse evidence manifest version/format drift")
@@ -398,9 +476,10 @@ def _load_stored_manifest(evidence_dir: Path) -> tuple[dict, bytes] | None:
 def _evidence_expected_files(manifest: dict) -> set[str]:
     origin_entries = ([manifest["origin_source_page"]] + manifest["origin_concepts"]
                       + manifest["origin_topics"])
+    target_entries = manifest["target_pages"] + manifest.get("topic_target_pages", [])
     return ({"manifest.json", "mapping.json", "origin-state.json"}
             | {f"origin-files/{entry['path']}" for entry in origin_entries}
-            | {f"target-files/{entry['path']}" for entry in manifest["target_pages"]})
+            | {f"target-files/{entry['path']}" for entry in target_entries})
 
 
 def _validate_evidence(evidence_dir: Path, manifest_bytes: bytes,
@@ -431,7 +510,8 @@ def _validate_evidence(evidence_dir: Path, manifest_bytes: bytes,
     origin_entries = ([manifest["origin_source_page"]] + manifest["origin_concepts"]
                       + manifest["origin_topics"])
     for prefix, entries in (("origin-files", origin_entries),
-                            ("target-files", manifest["target_pages"])):
+                            ("target-files", manifest["target_pages"]
+                             + manifest.get("topic_target_pages", []))):
         for entry in entries:
             copied = evidence_dir / prefix / entry["path"]
             try:
@@ -489,6 +569,25 @@ def _source_page_bytes(plan: dict) -> bytes:
         "",
         *links,
         "",
+    ]
+    # v2 的 topic 维度只在 mapping 真的声明了 topic_targets 时才写进正文；v1 走下来这里
+    # 什么都不加，source 页因此与本次改动前逐字节相同（既存证据不需要迁移）。
+    topic_mapped = [item for item in plan["mapping"]["topic_targets"] if item["origin_topics"]]
+    if plan["mapping"]["topic_targets"]:
+        topic_zero = plan["zero_mapping_topic_target_count"]
+        topic_zero_note = (f"另有 {topic_zero} 张 topic 页被显式登记为零映射，同样没有获得"
+                           "本来源的 source_refs 归因。" if topic_zero else "")
+        body += [
+            "映射到本 vault 的 topic 页（mapping v2 的 topic 维度：登记聚合归因，"
+            "不要求覆盖 origin 的每张 topic）：",
+            "",
+            *[f"- [[{item['target']}|{Path(item['target']).stem}]]："
+              f"聚合 {len(item['origin_topics'])} 个 origin topic。" for item in topic_mapped],
+            "",
+        ]
+        if topic_zero_note:
+            body += [topic_zero_note, ""]
+    body += [
         zero_note
         + "本旁路不创建 work order、processing window 或 window read/write ledger。",
         "",
@@ -619,11 +718,13 @@ def build_plan(*, workspace: Path, source: str, title: str, domain: str,
     origin_source_page, origin_concepts, origin_topics = _origin_pages(
         origin_root, origin_source, expected_domain=origin_state["sources"][0]["domain"],
         expect_concepts=expect_concepts, expect_topics=expect_topics)
-    mapping_bytes, mapping = _load_mapping(mapping_path, source, origin_concepts)
+    mapping_bytes, mapping = _load_mapping(mapping_path, source, origin_concepts, origin_topics)
     mapping_sha = hashlib.sha256(mapping_bytes).hexdigest()
-    target_pages, warnings = _target_pages(vault, source, mapping)
+    target_pages, topic_target_pages, warnings = _target_pages(vault, source, mapping)
     mapped_count = sum(bool(item["origin_concepts"]) for item in mapping["targets"])
     zero_count = len(mapping["targets"]) - mapped_count
+    mapped_topic_count = sum(bool(item["origin_topics"]) for item in mapping["topic_targets"])
+    zero_topic_count = len(mapping["topic_targets"]) - mapped_topic_count
 
     stored = _load_stored_manifest(evidence_dir)
     current_manifest = {
@@ -645,12 +746,27 @@ def build_plan(*, workspace: Path, source: str, title: str, domain: str,
         "version": 1,
         "zero_mapping_target_count": zero_count,
     }
+    # **v1 证据的字节稳定性**：manifest 是 canonical JSON（sort_keys），多一个键就换一份
+    # sha256，既存 v1 evidence 会立刻判成 metadata drift 而 fail-closed。所以 topic 维度的
+    # 键**只在 mapping 真的声明了 topic_targets 时**才出现——v1 mapping 走下来的 manifest
+    # 与本次改动前逐字节相同，无需任何证据迁移。
+    # manifest_version 与 mapping 的 version 是两件事：前者是证据格式（保持 1），后者记在
+    # mapping.json 里并由 mapping_sha256 冻结，所以这里不必也不应该跟着涨。
+    if mapping["topic_targets"]:
+        current_manifest["topic_target_pages"] = topic_target_pages
     if stored is None:
         manifest_data = current_manifest
         manifest_bytes = _json_bytes(manifest_data)
     else:
         manifest_data, manifest_bytes = stored
-        stable_keys = set(current_manifest) - {"target_pages"}
+        # target 页字节允许在登记之后合法演进（只报 warning），所以两个 *_pages 键都不进
+        # 稳定键集合；键集合本身仍被比较——v1 证据配 v2 mapping（或反之）会在这里 fail-closed。
+        volatile = {"target_pages", "topic_target_pages"}
+        stable_keys = set(current_manifest) - volatile
+        if set(current_manifest) != set(manifest_data):
+            raise ReuseError(
+                "reuse manifest schema drift: stored evidence and current mapping declare "
+                "different dimensions (v1 evidence replayed with a v2 mapping, or vice versa)")
         if any(current_manifest[key] != manifest_data.get(key) for key in stable_keys):
             if (current_manifest["origin_concepts"] != manifest_data.get("origin_concepts")
                     or current_manifest["origin_topics"] != manifest_data.get("origin_topics")
@@ -658,8 +774,9 @@ def build_plan(*, workspace: Path, source: str, title: str, domain: str,
                     or current_manifest["origin_state_sha256"] != manifest_data.get("origin_state_sha256")):
                 raise ReuseError("origin snapshot drift from immutable reuse manifest")
             raise ReuseError("reuse manifest metadata/mapping/PDF drift")
-        old_targets = {entry["path"]: entry for entry in manifest_data["target_pages"]}
-        new_targets = {entry["path"]: entry for entry in target_pages}
+        old_targets = {entry["path"]: entry for entry in
+                       manifest_data["target_pages"] + manifest_data.get("topic_target_pages", [])}
+        new_targets = {entry["path"]: entry for entry in target_pages + topic_target_pages}
         if (set(old_targets) != set(new_targets)
                 or any(old_targets[path].get("mapped_origin_count")
                        != new_targets[path].get("mapped_origin_count") for path in old_targets)):
@@ -683,6 +800,9 @@ def build_plan(*, workspace: Path, source: str, title: str, domain: str,
         "mapping_bytes": mapping_bytes, "mapping_sha256": mapping_sha, "mapping": mapping,
         "target_pages": target_pages, "mapped_target_count": mapped_count,
         "zero_mapping_target_count": zero_count, "warnings": warnings,
+        "topic_target_pages": topic_target_pages,
+        "mapped_topic_target_count": mapped_topic_count,
+        "zero_mapping_topic_target_count": zero_topic_count,
         "evidence_dir": evidence_dir, "manifest_path": manifest_path,
         "manifest_data": manifest_data, "manifest_bytes": manifest_bytes,
         "manifest_sha256": manifest_sha, "source_path": source_path, "db": db,
@@ -781,8 +901,9 @@ def write_evidence(plan: dict) -> bool:
             target = temp / "origin-files" / entry["path"]
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(raw)
-        # First write only: target_pages are the current immutable reuse baseline.
-        for entry in plan["manifest_data"]["target_pages"]:
+        # First write only: target pages (concept + topic) are the immutable reuse baseline.
+        for entry in (plan["manifest_data"]["target_pages"]
+                      + plan["manifest_data"].get("topic_target_pages", [])):
             raw = _verify_live_entry(plan["vault"], entry, "target")
             target = temp / "target-files" / entry["path"]
             target.parent.mkdir(parents=True, exist_ok=True)

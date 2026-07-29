@@ -41,14 +41,23 @@ def _write_page(path, meta, body="可复用知识页正文。" * 40):
     path.write_text(f"---\n{fm}---\n{body}\n", encoding="utf-8", newline="\n")
 
 
-def _fixture(tmp_path, *, concepts=37, topics=3, group_sizes=(7, 6, 6, 6, 6, 6, 0, 0)):
+def _fixture(tmp_path, *, concepts=37, topics=3, group_sizes=(7, 6, 6, 6, 6, 6, 0, 0),
+             version=1, topic_group_sizes=()):
     """Build one origin+target pair of an arbitrary shape.
 
     The default is the MySQL migration's shape (37 concepts / 3 topics / 8 targets = 6 mapped +
-    2 zero-mapping).  ``group_sizes`` must sum to ``concepts``; the command itself asserts no
-    particular shape, so every count here is a fixture parameter rather than a CLI contract.
+    2 zero-mapping) with a **v1** mapping — the exact shape of the frozen evidence in the wild.
+    ``group_sizes`` must sum to ``concepts``; the command itself asserts no particular shape,
+    so every count here is a fixture parameter rather than a CLI contract.
+
+    ``version=2`` additionally emits a ``topic_targets`` dimension driven by
+    ``topic_group_sizes`` (one entry per topic target page; 0 = an explicit zero-mapping topic
+    target). Unlike concepts, origin topics need **not** be covered exhaustively.
     """
     assert sum(group_sizes) == concepts, (group_sizes, concepts)
+    assert version in (1, 2)
+    assert not topic_group_sizes or version == 2, "topic_targets 只在 v2 存在"
+    assert sum(topic_group_sizes) <= topics, (topic_group_sizes, topics)
     origin = tmp_path / "origin"
     origin_vault = origin / "wiki"
     pdf = tmp_path / "mysql.pdf"
@@ -126,10 +135,26 @@ def _fixture(tmp_path, *, concepts=37, topics=3, group_sizes=(7, 6, 6, 6, 6, 6, 
             meta["source_refs"] = [{"source": "mysql", "sections": [f"mapped-{i}"]}]
         _write_page(target_vault / rel, meta)
 
+    origin_topics = [f"topics/origin-topic-{i}.md" for i in range(topics)]
+    topic_targets = []
+    cursor = 0
+    for i, size in enumerate(topic_group_sizes):
+        rel = f"topics/target-topic-{i}.md"
+        mapped = origin_topics[cursor:cursor + size]
+        cursor += size
+        topic_targets.append({"target": rel, "origin_topics": mapped})
+        meta = {"domain": "sql", "managed_by": "pipeline", "status": "published",
+                "title": f"Target Topic {i}", "type": "topic"}
+        if mapped:
+            meta["source_refs"] = [{"source": "mysql", "sections": [f"topic-mapped-{i}"]}]
+        _write_page(target_vault / rel, meta)
+
     mapping = tmp_path / "mapping.json"
-    mapping.write_text(json.dumps({
-        "version": 1, "source_id": "mysql", "targets": targets,
-    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+    document = {"version": version, "source_id": "mysql", "targets": targets}
+    if version == 2:
+        document["topic_targets"] = topic_targets
+    mapping.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+                       encoding="utf-8", newline="\n")
     args = [
         "reuse-source", "--source", "mysql", "--title", "MySQL是怎样运行的",
         "--domain", "sql", "--path", str(pdf), "--sha256", pdf_sha,
@@ -137,10 +162,14 @@ def _fixture(tmp_path, *, concepts=37, topics=3, group_sizes=(7, 6, 6, 6, 6, 6, 
         "--mapping", str(mapping),
     ]
     mapped_count = sum(1 for size in group_sizes if size)
+    mapped_topic_count = sum(1 for size in topic_group_sizes if size)
     return {"origin": origin, "target": target, "pdf": pdf, "mapping": mapping,
             "origins": origins, "targets": targets, "args": args,
+            "origin_topics": origin_topics, "topic_targets": topic_targets,
             "concepts": concepts, "topics": topics, "mapped": mapped_count,
-            "zero": len(group_sizes) - mapped_count}
+            "zero": len(group_sizes) - mapped_count, "version": version,
+            "mapped_topics": mapped_topic_count,
+            "zero_topics": len(topic_group_sizes) - mapped_topic_count}
 
 
 def test_reuse_source_dry_run_is_byte_zero_write(tmp_path):
@@ -429,6 +458,192 @@ def test_reuse_source_accepts_every_ingestable_origin_format(tmp_path, fmt, acce
         assert result.returncode != 0
         assert "must be a published ingest" in (result.stdout + result.stderr)
     assert _tree_bytes(fx["target"]) == before
+
+
+def _v2_fixture(tmp_path):
+    """v2：5 concepts / 3 topics；concept 3 张目标（含 1 零映射）+ topic 3 张（2 映射 + 1 零映射）。
+
+    刻意只覆盖 3 张 origin topic 中的 2 张，钉住"topic 维度不要求全覆盖"。
+    """
+    return _fixture(tmp_path, concepts=5, topics=3, group_sizes=(3, 2, 0),
+                    version=2, topic_group_sizes=(1, 1, 0))
+
+
+def test_reuse_source_v2_topic_dimension_end_to_end(tmp_path):
+    fx = _v2_fixture(tmp_path)
+    origin_before = _tree_bytes(fx["origin"])
+
+    dry = _run(fx["args"], fx["target"])
+    assert dry.returncode == 0, dry.stdout + dry.stderr
+    assert "version=2" in dry.stdout
+    assert "mapped-topic-targets=2 zero-mapping-topic-targets=1" in dry.stdout
+    assert "[topic-mapping] topics/target-topic-0.md <- 1 origin topic(s)" in dry.stdout
+    assert not (fx["target"] / "pipeline-workspace").exists()
+
+    applied = _run([*fx["args"], "--apply"], fx["target"])
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    evidence = fx["target"] / "pipeline-workspace" / "reuses" / "mysql"
+    manifest = json.loads((evidence / "manifest.json").read_text(encoding="utf-8"))
+    assert [e["path"] for e in manifest["topic_target_pages"]] == [
+        "topics/target-topic-0.md", "topics/target-topic-1.md", "topics/target-topic-2.md"]
+    assert [e["mapped_origin_count"] for e in manifest["topic_target_pages"]] == [1, 1, 0]
+    # topic 目标页的字节同样冻进 target-files/。
+    for rel in ("topics/target-topic-0.md", "topics/target-topic-2.md"):
+        assert (evidence / "target-files" / rel).read_bytes() == \
+               (fx["target"] / "wiki" / rel).read_bytes()
+    source_page = (fx["target"] / "wiki" / "sources" / "mysql.md").read_text(encoding="utf-8")
+    assert "映射到本 vault 的 topic 页" in source_page
+    assert "另有 1 张 topic 页被显式登记为零映射" in source_page
+
+    stable = _tree_state(fx["target"])
+    repeat = _run([*fx["args"], "--apply"], fx["target"])
+    assert repeat.returncode == 0, repeat.stdout + repeat.stderr
+    assert "fully verified" in repeat.stdout
+    assert _tree_state(fx["target"]) == stable
+    assert _tree_bytes(fx["origin"]) == origin_before
+
+
+def test_reuse_source_v1_manifest_and_source_page_are_byte_identical_under_v2_code(tmp_path):
+    """向后兼容硬要求：v1 mapping 走下来，manifest 与 source 页不得多出任何 topic 维度字节。"""
+    fx = _fixture(tmp_path, concepts=5, topics=3, group_sizes=(3, 2, 0))
+    assert fx["version"] == 1
+    assert _run([*fx["args"], "--apply"], fx["target"]).returncode == 0
+
+    evidence = fx["target"] / "pipeline-workspace" / "reuses" / "mysql"
+    manifest = json.loads((evidence / "manifest.json").read_text(encoding="utf-8"))
+    assert "topic_target_pages" not in manifest, sorted(manifest)
+    assert sorted(manifest) == [
+        "domain", "format", "mapped_target_count", "mapping_sha256", "origin_concepts",
+        "origin_root", "origin_source", "origin_source_page", "origin_state_sha256",
+        "origin_topics", "pdf_path", "pdf_sha256", "source_id", "target_pages", "title",
+        "version", "zero_mapping_target_count"]
+    # target-files/ 只冻 concept 目标页；没有任何 topics/ 条目混进来。
+    frozen = {p.relative_to(evidence / "target-files").as_posix()
+              for p in (evidence / "target-files").rglob("*") if p.is_file()}
+    assert frozen == {"domains/sql/concepts/target-0.md", "domains/sql/concepts/target-1.md",
+                      "domains/sql/concepts/target-2.md"}
+    source_page = (fx["target"] / "wiki" / "sources" / "mysql.md").read_text(encoding="utf-8")
+    assert "topic 页" not in source_page and "mapping v2" not in source_page
+
+
+def test_reuse_source_v1_frozen_evidence_replays_as_byte_noop_under_v2_code(tmp_path):
+    """回归用例：先用 v1 落一份证据，再原样重放——必须仍是全树 byte/mtime no-op。"""
+    fx = _fixture(tmp_path, concepts=5, topics=3, group_sizes=(3, 2, 0))
+    first = _run([*fx["args"], "--apply"], fx["target"])
+    assert first.returncode == 0, first.stdout + first.stderr
+    frozen_tree = _tree_state(fx["target"])
+
+    # ① 用原始 v1 mapping 重放
+    replay = _run([*fx["args"], "--apply"], fx["target"])
+    assert replay.returncode == 0, replay.stdout + replay.stderr
+    assert "fully verified" in replay.stdout and "version=1" in replay.stdout
+    assert _tree_state(fx["target"]) == frozen_tree
+
+    # ② 用 evidence 自带的 mapping.json 重放（正式重放锚点）
+    evidence_mapping = (fx["target"] / "pipeline-workspace" / "reuses" / "mysql" / "mapping.json")
+    replay_args = [*fx["args"]]
+    replay_args[replay_args.index("--mapping") + 1] = str(evidence_mapping)
+    from_evidence = _run([*replay_args, "--apply"], fx["target"])
+    assert from_evidence.returncode == 0, from_evidence.stdout + from_evidence.stderr
+    assert "fully verified" in from_evidence.stdout
+    assert _tree_state(fx["target"]) == frozen_tree
+
+    # ③ 把同一份证据改喂 v2 mapping：维度对不上，必须 fail-closed 而不是悄悄升级
+    v2_mapping = tmp_path / "upgraded.json"
+    data = json.loads(fx["mapping"].read_text(encoding="utf-8"))
+    data["version"] = 2
+    data["topic_targets"] = []
+    v2_mapping.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                          encoding="utf-8", newline="\n")
+    upgrade_args = [*fx["args"]]
+    upgrade_args[upgrade_args.index("--mapping") + 1] = str(v2_mapping)
+    upgraded = _run([*upgrade_args, "--apply"], fx["target"])
+    assert upgraded.returncode != 0
+    assert "metadata/mapping/PDF drift" in (upgraded.stdout + upgraded.stderr)
+    assert _tree_state(fx["target"]) == frozen_tree
+
+
+@pytest.mark.parametrize("mutate,needle", [
+    (lambda d: d.__setitem__("version", 3), "mapping version must be one of [1, 2]"),
+    (lambda d: d.pop("topic_targets"), "top-level fields must be exactly"),
+    (lambda d: d["topic_targets"][0].__setitem__("origin_topics",
+                                                 ["topics/origin-topic-9.md"]),
+     "origin topic(s) the source does not own"),
+    (lambda d: d["topic_targets"][1].__setitem__("origin_topics",
+                                                 d["topic_targets"][0]["origin_topics"]),
+     "origin topic mapped more than once"),
+    (lambda d: d["topic_targets"][0].__setitem__("target", d["targets"][0]["target"]),
+     "mapping target is duplicated"),
+    (lambda d: d["topic_targets"][0].__setitem__("origin_concepts", []),
+     "fields must be exactly target/origin_topics"),
+])
+def test_reuse_source_v2_mapping_fail_closed(tmp_path, mutate, needle):
+    fx = _v2_fixture(tmp_path)
+    data = json.loads(fx["mapping"].read_text(encoding="utf-8"))
+    mutate(data)
+    fx["mapping"].write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                             encoding="utf-8", newline="\n")
+    before = _tree_bytes(fx["target"])
+
+    result = _run(fx["args"], fx["target"])
+
+    assert result.returncode != 0
+    assert needle in (result.stdout + result.stderr)
+    assert _tree_bytes(fx["target"]) == before
+
+
+@pytest.mark.parametrize("case,needle", [
+    ("mapped-topic-without-ref", "mapped-target-missing-source-ref"),
+    ("zero-topic-with-ref", "zero-mapping-target-false-attribution"),
+    ("topic-target-is-concept", "must be a published topic page"),
+])
+def test_reuse_source_v2_topic_attribution_boundary(tmp_path, case, needle):
+    fx = _v2_fixture(tmp_path)
+    vault = fx["target"] / "wiki"
+    if case == "mapped-topic-without-ref":
+        page = vault / "topics/target-topic-0.md"
+        meta = yaml.safe_load(page.read_text(encoding="utf-8").split("---\n", 2)[1])
+        meta.pop("source_refs")
+        _write_page(page, meta)
+    elif case == "zero-topic-with-ref":
+        page = vault / "topics/target-topic-2.md"
+        meta = yaml.safe_load(page.read_text(encoding="utf-8").split("---\n", 2)[1])
+        meta["source_refs"] = [{"source": "mysql", "sections": ["fabricated"]}]
+        _write_page(page, meta)
+    else:
+        page = vault / "topics/target-topic-0.md"
+        meta = yaml.safe_load(page.read_text(encoding="utf-8").split("---\n", 2)[1])
+        meta["type"] = "concept"
+        meta["canonical_id"] = "concept.sql.wrong-type"
+        _write_page(page, meta)
+    before = _tree_bytes(fx["target"])
+
+    result = _run(fx["args"], fx["target"])
+
+    assert result.returncode != 0
+    assert needle in (result.stdout + result.stderr)
+    assert _tree_bytes(fx["target"]) == before
+
+
+def test_reuse_source_v2_makes_an_aggregating_topic_page_auditable(tmp_path):
+    """v2 存在的理由：一张合法聚合本来源内容的 topic 页，在 v1 下只能被判成"未声明归因"。"""
+    (tmp_path / "v1").mkdir()
+    (tmp_path / "v2").mkdir()
+    v1 = _fixture(tmp_path / "v1", concepts=5, topics=3, group_sizes=(3, 2, 0))
+    stray = v1["target"] / "wiki" / "topics" / "roadmap.md"
+    _write_page(stray, {"domain": "sql", "managed_by": "pipeline", "status": "published",
+                        "title": "Roadmap", "type": "topic",
+                        "source_refs": [{"source": "mysql", "sections": ["1.1"]}]})
+    blocked = _run(v1["args"], v1["target"])
+    assert blocked.returncode != 0
+    assert "unmapped-target-false-attribution" in (blocked.stdout + blocked.stderr)
+
+    # 同样一张页，在 v2 里作为 topic 目标声明出来即可通过核验。
+    v2 = _fixture(tmp_path / "v2", concepts=5, topics=3, group_sizes=(3, 2, 0),
+                  version=2, topic_group_sizes=(1,))
+    ok = _run(v2["args"], v2["target"])
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert "[topic-mapping] topics/target-topic-0.md <- 1 origin topic(s)" in ok.stdout
 
 
 def test_reuse_source_rejects_wal_origin_without_creating_sidecars_or_touching_mtime(tmp_path):
