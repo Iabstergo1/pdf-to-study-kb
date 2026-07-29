@@ -187,8 +187,6 @@ def delete_pages(vault, paths) -> int:
 
 def append_log(vault, source_id: str, n_pages: int, evidence_rel: str, date_iso: str) -> None:
     """向 wiki/log.md 追加撤库审计行（与 promote 行同格式层级）。"""
-    log = Path(vault) / "log.md"
-    line = (f"\n## [{date_iso}] retract | {source_id} | removed {n_pages} pages "
-            f"(evidence: {evidence_rel})\n")
-    with open(log, "a", encoding="utf-8", newline="\n") as fh:
-        fh.write(line)
+    import wiki_gate
+    wiki_gate.append_log(vault, "retract", source_id,
+                         f"removed {n_pages} pages (evidence: {evidence_rel})", date_iso)

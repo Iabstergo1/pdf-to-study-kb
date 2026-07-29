@@ -435,9 +435,11 @@ published status、归档/证据/source/state/三类 ingest 台账完整性是 h
 新增 `pipeline-workspace/adoptions/<src>/{manifest.json,files/**}` 的不可变证据与 canonical source 页，
 从 published 页重建 index、registry、graph、quiz、propositions，全部成功后才由
 `state_store.adopt_source` 原子登记 `format=legacy-vault`、`adopted/published`（一条
-`adopted/done` stage + 一条 `adoption_evidence` artifact）。派生失败可留下已核验 evidence/source
+`adopted/done` stage + 一条 `adoption_evidence` artifact），并向 `log.md` 追加一行接管记录。派生失败可留下已核验 evidence/source
 作为恢复锚点，但 state 不得 published；重跑复用锚点并重新派生。它不经 workorder/window 协议，
-不自动改写任何既有知识页，且强制三类 ingest 台账均为 0，锁在 `finally` 释放。
+不自动改写任何既有知识页，且强制三类 ingest 台账均为 0，锁在 `finally` 释放。日志只在 state
+**首次**登记时追加：state 已 published 后，evidence/source 的任何缺口都是 fail-closed 违规，
+不存在"带着已登记 state 再次进锁"的路径，所以 adopt-vault 结构上只会记一次。
 
 已有 evidence + published state 后，stored manifest、evidence copies 与 archive 构成历史基线；当前 live
 知识页允许继续演进，仅汇总为 `post-adoption-live-drift` warning，不重算或覆盖历史证据。完全验证的
@@ -471,8 +473,10 @@ source_ref 同样 fail-closed，因此 CLI 只验证人工 merge，绝不制造�
 原始 `mapping.json`、canonical `origin-state.json`、origin source 页与全部 concept/topic 页字节和首次 target merge 页字节；
 随后写 canonical source 页并重建 index/registry/graph/quiz/propositions。全部成功后，
 `state_store.reuse_source` 才原子登记 `format=external-vault-reuse`、`reused/published`、一条
-`reused/done` stage 与一条 `reuse_evidence` artifact；三类 ingest 台账必须为 0。派生失败保留
-evidence/source 恢复锚点但不发布状态。
+`reused/done` stage 与一条 `reuse_evidence` artifact；三类 ingest 台账必须为 0，并向 `log.md`
+追加一行复用记录。派生失败保留 evidence/source 恢复锚点但不发布状态。日志同样只在 state
+**首次**登记时追加——"证据齐全但派生层需重建"的重跑会再次进锁而 `state_created=False`，
+无条件追加就会把同一件事记两遍。
 
 完全验证重跑只有在 canonical evidence/source/state 与 registry/index/graph JSON+HTML/quiz/propositions
 六类派生文件都按当前 published 页重新计算一致后才在加锁前返回，是全 workspace byte/mtime no-op；派生缺失/
@@ -631,7 +635,7 @@ artifact；三类 ingest 台账也必须全为 0。历史 origin/mapping/target 
 | `knowledge-graph.generated.html` | lint / rebuild-graph（graph_html） | 力导向交互 HTML | 点击节点跳 `obsidian://` 对应笔记；publish-isolated（失败不阻断发布） |
 | `quiz-index.generated.md` | lint / rebuild-quiz（`wiki_gate.write_quiz_index`） | 零 LLM 派生 | published 页 `[!question]` 题干 + 回链，按 domain 分组，不含答案；publish-isolated |
 | `propositions.generated.md` | lint / rebuild-propositions（`wiki_gate.write_propositions_index`） | 零 LLM 派生 | published 页具名命题（`**命题（名）**：…`）+ 回链，按 domain 分组，名字即锚点、v1 不编号；publish-isolated |
-| `log.md` | ingest + lint 追加 | append-only | 操作日志 |
+| `log.md` | ingest + lint / retract-source / adopt-vault / reuse-source 追加 | append-only | 操作日志；唯一格式由 `wiki_gate.log_line()` 定义（`## [日期] 动词 \| 来源 \| 摘要`）。两条旁路**只在终态首次登记那一次**追加，故精确重跑仍是全树 byte/mtime no-op；`log.md` 不是任何派生产物的输入（派生层一律按 published frontmatter 过滤），所以这一行不会引起派生漂移 |
 | `Review-Queue/*.md` | lint 失败 / promotion | — | 未过门禁 / 待人工决策项 |
 | `_meta/purpose.md` | **用户手写**（init-vault 落空模板） | — | 学习目标与偏好；ingest 读取，优先级高于内容路由/装置预算等 advisory |
 

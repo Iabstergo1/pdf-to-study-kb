@@ -229,6 +229,42 @@ def test_reuse_source_apply_is_whole_tree_byte_noop_on_exact_repeat(tmp_path):
     assert _tree_state(fx["target"]) == before
 
 
+def test_reuse_source_appends_one_log_line_and_never_duplicates_it(tmp_path):
+    """log.md 追加不得破坏 byte/mtime no-op；"派生层需重建"的重跑会再次进锁，也不得重复记账。"""
+    fx = _fixture(tmp_path)
+    log = fx["target"] / "wiki" / "log.md"
+
+    first = _run([*fx["args"], "--apply"], fx["target"])
+    assert first.returncode == 0, first.stdout + first.stderr
+    lines = [ln for ln in log.read_text(encoding="utf-8").splitlines() if "] reuse-source |" in ln]
+    assert len(lines) == 1, lines
+    assert lines[0].startswith("## [") and "mysql" in lines[0]
+    assert f"{fx['concepts']} concepts / {fx['topics']} topics" in lines[0]
+    assert f"{fx['mapped']} mapped + {fx['zero']} zero-mapping targets" in lines[0]
+    log_bytes, log_mtime = log.read_bytes(), log.stat().st_mtime_ns
+
+    # ① 完全验证的精确重跑：加锁前返回，日志与全树 byte/mtime 都不动。
+    second = _run([*fx["args"], "--apply"], fx["target"])
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert "fully verified" in second.stdout
+    assert log.read_bytes() == log_bytes and log.stat().st_mtime_ns == log_mtime
+
+    # ② 派生产物缺失 → 重新进锁重建；state 已登记，日志不得再记一遍。
+    (fx["target"] / "wiki" / "graph-data.generated.json").unlink()
+    repaired = _run([*fx["args"], "--apply"], fx["target"])
+    assert repaired.returncode == 0, repaired.stdout + repaired.stderr
+    assert "reuse-derived-drift" in repaired.stdout and "state=verified" in repaired.stdout
+    assert [ln for ln in log.read_text(encoding="utf-8").splitlines()
+            if "] reuse-source |" in ln] == lines
+
+    # ③ 修好之后仍然回到全树 byte/mtime no-op。
+    stable = _tree_state(fx["target"])
+    exact = _run([*fx["args"], "--apply"], fx["target"])
+    assert exact.returncode == 0, exact.stdout + exact.stderr
+    assert "fully verified" in exact.stdout
+    assert _tree_state(fx["target"]) == stable
+
+
 def test_reuse_source_missing_graph_is_rebuilt_before_fully_verified_noop(tmp_path):
     fx = _fixture(tmp_path)
     first = _run([*fx["args"], "--apply"], fx["target"])

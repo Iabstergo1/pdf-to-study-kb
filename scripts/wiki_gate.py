@@ -680,6 +680,26 @@ def write_index(vault) -> None:
                                                     encoding="utf-8", newline="\n")
 
 
+def log_line(verb: str, source_id: str, summary: str, date_iso: str) -> str:
+    """`wiki/log.md` 追加行的唯一格式：``\\n## [日期] 动词 | 来源 | 摘要\\n``。
+
+    ingest/lint、retract 与两条零 LLM 旁路（adopt-vault / reuse-source）共用同一层级，
+    这样操作日志读起来是一条时间线，而不是几套各写各的格式。
+    """
+    return f"\n## [{date_iso}] {verb} | {source_id} | {summary}\n"
+
+
+def append_log(vault, verb: str, source_id: str, summary: str, date_iso: str) -> None:
+    """向 `wiki/log.md` 追加一行（append-only；文件不存在时创建）。
+
+    调用方负责"只在事实首次成立时调用一次"：日志是审计便利，不是幂等锚点。
+    adopt-vault / reuse-source 因此只在 state 首次登记那一次追加——否则一次
+    "证据齐全但派生层需重建"的重跑会把同一件事记两遍。
+    """
+    with open(Path(vault) / "log.md", "a", encoding="utf-8", newline="\n") as fh:
+        fh.write(log_line(verb, source_id, summary, date_iso))
+
+
 def build_quiz_index(vault) -> str:
     """quiz-index.generated.md：全库自测题索引（派生阅读层，零 LLM）。只收 published 页
     [!question] 的题干 + 回链原页，按 domain（无 domain 按顶层目录）分组——**不带答案**：

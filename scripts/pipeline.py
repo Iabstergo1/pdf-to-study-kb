@@ -634,6 +634,7 @@ def cmd_adopt_vault(args):
     import state_store
     import vault_adoption
     import wiki_gate
+    from datetime import date
 
     try:
         plan = vault_adoption.build_plan(
@@ -736,6 +737,14 @@ def cmd_adopt_vault(args):
                 manifest_sha256=plan["manifest_sha256"], lock_holder=holder)
         except state_store.InvalidTransition as exc:
             raise SystemExit(str(exc))
+        # 只在终态首次登记那一次记一行；log.md 不进任何派生产物（全部按 published
+        # frontmatter 过滤），所以这行不会让下一次精确重跑离开 byte/mtime no-op 路径。
+        if state_created:
+            wiki_gate.append_log(
+                vault, "adopt-vault", args.source,
+                f"adopted {len(plan['pages'])} existing pages as immutable baseline "
+                f"(evidence: {plan['manifest_path'].name}, sha256: {plan['manifest_sha256'][:12]})",
+                date.today().isoformat())
     finally:
         locks.release(db, scope="vault", holder=holder)
     print(f"[OK] adopt-vault {args.source}: adopted/published; "
@@ -754,6 +763,7 @@ def cmd_reuse_source(args):
     import source_reuse
     import state_store
     import wiki_gate
+    from datetime import date
 
     def build(*, allowed_holder=None):
         return source_reuse.build_plan(
@@ -854,6 +864,18 @@ def cmd_reuse_source(args):
         except (source_reuse.ReuseError, OSError, sqlite3.Error,
                 state_store.InvalidTransition) as exc:
             raise SystemExit(str(exc))
+        # 同 adopt-vault：只在 reused/published 首次登记时记一行。一次"证据齐全但派生层
+        # 需重建"的重跑会再次进锁，若无条件追加就会把同一件事记两遍。
+        if state_created:
+            wiki_gate.append_log(
+                vault, "reuse-source", args.source,
+                f"registered reuse from {plan['origin_root']} "
+                f"({len(plan['origin_concepts'])} concepts / {len(plan['origin_topics'])} topics "
+                f"-> {plan['mapped_target_count']} mapped + "
+                f"{plan['zero_mapping_target_count']} zero-mapping targets; "
+                f"evidence: {plan['manifest_path'].name}, "
+                f"sha256: {plan['manifest_sha256'][:12]})",
+                date.today().isoformat())
     finally:
         locks.release(db, scope="vault", holder=holder)
     print(f"[OK] reuse-source {args.source}: reused/published; "
@@ -2162,9 +2184,8 @@ def cmd_lint(args):
     for stale in sorted((vault / "Review-Queue").glob(f"{args.source}-lint-*.md")):
         stale.unlink()
         print(f"[clean] 清理已过时的 lint 失败报告：{stale.relative_to(vault).as_posix()}")
-    log = vault / "log.md"
-    with open(log, "a", encoding="utf-8", newline="\n") as f:
-        f.write(f"\n## [{date.today().isoformat()}] lint | {args.source} | promoted {n} pages\n")
+    wiki_gate.append_log(vault, "lint", args.source, f"promoted {n} pages",
+                         date.today().isoformat())
     snap_dir = _workspace_root() / "pipeline-workspace/snapshots" / args.source
     if snap_dir.exists():
         shutil.rmtree(snap_dir)
