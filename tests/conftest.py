@@ -15,6 +15,18 @@ repository's ``tmp/`` or the system temp area. pytest **wipes** basetemp wholesa
 ``$PWD``-relative path pointed at somebody else's workspace is a data hazard, not just litter.
 The same hook turns off bytecode writing for the whole test process tree, so subprocess CLI tests
 never leave ``__pycache__`` behind in whatever directory they happen to run against.
+
+Third fail-closed guard (same module): the collected set must live entirely under ``tests/``.
+``pytest.ini`` declares the boundary (``testpaths`` / ``norecursedirs``); this hook is the runtime
+backstop for a run that pulls in leftover ``tmp/`` basetemps alongside the real suite — those carry
+the skill-evolution fixtures' prop file ``tests/test_ok.py``, and a second copy of that basename
+makes pytest abort the whole run with ``import file mismatch``.
+
+**Reach, stated honestly:** this conftest is only loaded when something under ``tests/`` is
+collected, so ``pytest tmp/whatever`` on its own never reaches it. That is fine — the property we
+protect is "the *suite* is exactly tests/", and the suite always includes this directory. The
+declarative ini boundary is what keeps a bare run out of ``tmp/`` in the first place;
+``tests/test_collection_boundary_cli.py`` asserts that end-to-end against a real subprocess.
 """
 import os
 import sys
@@ -43,6 +55,13 @@ def pytest_configure(config):
 
 def pytest_collection_modifyitems(items):
     tests_dir = Path(__file__).resolve().parent
+    # item.location[0] 是相对 rootdir 的路径，从别处调用时 abspath 会算错；用绝对路径。
+    problems = _sandbox.collected_outside_tests(
+        {getattr(item, "path", None) or item.fspath for item in items}, tests_dir)
+    if problems:
+        raise pytest.UsageError(
+            "test collection boundary violations (fail-closed; tests/_sandbox.py):\n  "
+            + "\n  ".join(problems))
     problems = _tiering.registry_violations(
         (p.name for p in tests_dir.glob("test_*.py")), _tiering.FILE_TIERS)
     if problems:

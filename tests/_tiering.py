@@ -36,6 +36,7 @@ FILE_TIERS = {
     "test_resume_packet_cli.py": ("cli",),
     "test_resume_ingest_smoke.py": ("cli",),
     "test_adopt_vault_cli.py": ("cli",),
+    "test_collection_boundary_cli.py": ("cli",),
     "test_reuse_source_cli.py": ("cli",),
     # ---- skill 协议 / 文档契约 ----
     "test_command_docs.py": ("skill",),

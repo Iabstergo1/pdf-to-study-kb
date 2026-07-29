@@ -58,6 +58,43 @@ def test_relative_and_case_variants_resolve_to_the_same_verdict():
     assert _v(str(REPO_ROOT / "tmp" / ".." / "scripts"))      # 词法归一后逃出 tmp/
 
 
+def _c(paths):
+    return _sandbox.collected_outside_tests(paths, REPO_ROOT / "tests")
+
+
+def test_collection_inside_tests_is_allowed():
+    assert _c([]) == []
+    assert _c([REPO_ROOT / "tests" / "test_sandbox_guard.py",
+               REPO_ROOT / "tests" / "sub" / "test_x.py"]) == []
+
+
+def test_leftover_basetemp_props_are_flagged():
+    # 事故原型：tmp/ 里没清理的 basetemp 带着技能自进化用例生成的道具 tests/test_ok.py。
+    problems = _c([REPO_ROOT / "tests" / "test_ok.py",
+                   REPO_ROOT / "tmp" / "pt-full-1" / "case0" / "tests" / "test_ok.py"])
+    assert problems and "outside" in problems[0]
+    assert "pt-full-1" in problems[0]
+
+
+def test_tests_dir_itself_and_siblings_are_flagged():
+    assert _c([REPO_ROOT / "tests"])            # 目录本身不是"在 tests/ 之下"
+    assert _c([REPO_ROOT / "scripts" / "test_x.py"])
+    assert _c([Path("C:/elsewhere/tests/test_x.py")])
+
+
+def test_collection_boundary_is_declared_in_pytest_ini():
+    # 运行期兜底会报错，但那要先花两分半扫完 tmp/；声明式边界才是省时间的那一层。
+    import configparser
+    cfg = configparser.ConfigParser()
+    cfg.read(REPO_ROOT / "pytest.ini", encoding="utf-8")
+    assert cfg["pytest"].get("testpaths", "").split() == ["tests"], \
+        "pytest.ini 缺 testpaths=tests：裸跑 pytest 会从仓库根递归扫描"
+    excluded = set(cfg["pytest"].get("norecursedirs", "").split())
+    # 都是 gitignore 过的本机数据目录，不含任何真测试；tmp 是本次事故的直接来源。
+    for required in ("tmp", "books", "wiki", "pipeline-workspace"):
+        assert required in excluded, f"pytest.ini 的 norecursedirs 缺 {required}"
+
+
 def test_bytecode_writing_is_off_for_the_test_process_tree():
     # conftest.pytest_configure 已经设过；子进程（CLI 测试全部 env={**os.environ,...}）继承它。
     assert os.environ.get("PYTHONDONTWRITEBYTECODE") == "1"

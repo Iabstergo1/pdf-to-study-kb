@@ -13,6 +13,13 @@ pytest 的临时树就整个落进那个工作区。实测后果：一个外部�
    那么轻，而是可能删掉别人的东西。
 
 同理 `tmp/` 本身也不接受：它还放着 `resume-packet.txt` 等非测试产物，被整体清空会误伤。
+
+**第二个症状（2026-07-29 同日）**：即使 basetemp 老老实实落在 `<repo>/tmp/`，跑完不清理同样有害。
+技能自进化测试会生成假的候选技能包，包里带一个道具文件 `tests/test_ok.py`；这些目录没有
+`__init__.py`，pytest 只能按文件名给模块命名，于是**第二个** `test_ok.py` 就报
+`import file mismatch` 并让整轮 collection `Interrupted` ——裸跑 `pytest` 直接不可用，
+而代码毫无问题。声明式边界写在 `pytest.ini`（`testpaths` / `norecursedirs`），
+`collected_outside_tests()` 是运行期兜底：任何被收集到的用例只要不在 `tests/` 之下就 fail-closed。
 """
 from __future__ import annotations
 
@@ -52,4 +59,25 @@ def basetemp_violations(basetemp, repo_root, temp_roots) -> list[str]:
         f"--basetemp escapes the allowed sandbox: {basetemp}"
         f"（只允许 {Path(repo_root) / 'tmp'} 或系统临时区之下的子目录；pytest 会整目录清空 basetemp，"
         "指向别的工作区既会污染也可能删除他人数据。不确定就别传 --basetemp，默认值已落在系统临时区）"
+    ]
+
+
+def collected_outside_tests(collected_paths, tests_dir) -> list[str]:
+    """收集到的用例路径 → 违规消息列表（空 = 全部落在 ``tests/`` 之内）。
+
+    这套件只有 ``tests/`` 一处；任何别处被收进来的 "测试" 都是残留产物（最典型的是
+    ``tmp/`` 里没清理干净的 basetemp，里面躺着技能自进化用例生成的道具 ``tests/test_ok.py``）。
+    声明式边界在 ``pytest.ini``；这里是运行期兜底，**报错而不是静默忽略**——静默忽略等于
+    让"某个真测试没被跑到"和"某个垃圾没被收集"长得一模一样。
+
+    纯函数（不触磁盘）；fail-closed 语义由调用方兑现。
+    """
+    root = _normalised(tests_dir)
+    outside = sorted({str(p) for p in collected_paths if not _is_below(_normalised(p), root)})
+    if not outside:
+        return []
+    return [
+        f"collected {len(outside)} test file(s) outside {tests_dir}: {outside[0]}"
+        "（本套件只有 tests/ 一处；别处的多半是没清理的 basetemp 残留。"
+        "检查 pytest.ini 的 testpaths / norecursedirs，并清掉 tmp/ 下的遗留目录）"
     ]
