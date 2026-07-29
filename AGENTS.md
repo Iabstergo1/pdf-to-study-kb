@@ -160,14 +160,23 @@ tier aborts collection, so nothing silently drops out of the daily tier. Rationa
 `pipeline-workspace/reports/test-audit-2026-07-13.md`): `fast` (positive whitelist = the daily tier,
 pure-function/direct-module tests), `cli`, `slow`, `skill`, `realbook` (reserved layer, no tests yet).
 Do **not** treat full `pytest tests` as the per-edit default — run the fast tier for ordinary edits,
-the full gate before publish/refactor. Always pass a fresh `--basetemp` (a prior run can leave a locked
-`pytest-of-Lenovo` temp dir that blocks default cleanup).
+the full gate before publish/refactor.
+
+**`--basetemp` is optional and sandbox-guarded.** The default (system temp `pytest-of-<user>/pytest-<n>`,
+keeps the last three runs) is already safe — pass `--basetemp` only when a prior run left a locked temp dir
+that blocks default cleanup, and then anchor it at **this repo**, never at `$PWD`. `tests/_sandbox.py` +
+`conftest.pytest_configure` fail-closed if an explicit basetemp escapes `<repo>/tmp/**` or the system temp
+area, because pytest **wipes basetemp wholesale**: a `$PWD`-relative path run from another workspace once
+wrote ~13k files / 53 MB into it. The same hook exports `PYTHONDONTWRITEBYTECODE=1` for the whole test
+process tree, so subprocess CLI tests leave no `__pycache__` in the workspace under test.
 
 ```powershell
-$env:PYTHONUTF8=1; $bt="$PWD\tmp\pt-$(Get-Random)"
-python -m pytest tests -q -m fast --basetemp=$bt        # daily tier, seconds (counts drift; pytest --collect-only is the truth)
-python -m pytest tests/test_doctor_cli.py -q --basetemp=$bt   # targeted subsystem run when touching that CLI
-python -m pytest tests -q --basetemp=$bt                # full gate ~3 min before publish/refactor
+$env:PYTHONUTF8=1
+python -m pytest tests -q -m fast        # daily tier, seconds (counts drift; pytest --collect-only is the truth)
+python -m pytest tests/test_doctor_cli.py -q   # targeted subsystem run when touching that CLI
+python -m pytest tests -q                # full gate ~3 min before publish/refactor
+# only if the default temp dir is locked — absolute, repo-anchored, never $PWD:
+python -m pytest tests -q --basetemp="D:\pdf-to-study-kb\tmp\pt-$(Get-Random)"
 ```
 
 ## 9. Authority & do-not-reintroduce

@@ -65,6 +65,7 @@ FILE_TIERS = {
     "test_record_artifact.py": ("fast",),
     "test_resume_packet.py": ("fast",),
     "test_retraction.py": ("fast",),
+    "test_sandbox_guard.py": ("fast",),
     "test_snapshots.py": ("fast",),
     "test_source_artifacts.py": ("fast",),
     "test_source_audit.py": ("fast",),
