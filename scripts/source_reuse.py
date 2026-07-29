@@ -191,7 +191,8 @@ def _origin_state_snapshot(origin_root: Path, source: str, pdf_path: Path,
     return exported, state_bytes
 
 
-def _origin_pages(origin_root: Path, source: str, *, expected_domain: str) \
+def _origin_pages(origin_root: Path, source: str, *, expected_domain: str,
+                  expect_concepts: int | None = None, expect_topics: int | None = None) \
         -> tuple[dict, list[dict], list[dict]]:
     vault = origin_root / "wiki"
     _assert_direct_contained(vault, origin_root, "origin wiki")
@@ -236,10 +237,16 @@ def _origin_pages(origin_root: Path, source: str, *, expected_domain: str) \
             topics.append({**entry, "title": str(meta.get("title") or Path(rel).stem)})
     concepts.sort(key=lambda item: item["path"])
     topics.sort(key=lambda item: item["path"])
-    if len(concepts) != 37 or len(topics) != 3:
+    if not concepts:
         raise ReuseError(
-            f"origin mysql truth must be exactly 37 concepts + 3 topics; "
-            f"got {len(concepts)} concepts + {len(topics)} topics")
+            f"origin source {source!r} owns no published concept page; nothing to reuse")
+    # 数量本身不是安全属性：mapping 的集合相等校验已保证不遗漏、不多余、各映射一次。
+    # 这两个可选期望值只给"我知道该拿到几张页"的调用方当额外确认，默认不设限。
+    for label, actual, expected in (("concepts", len(concepts), expect_concepts),
+                                    ("topics", len(topics), expect_topics)):
+        if expected is not None and actual != expected:
+            raise ReuseError(
+                f"origin {label} count mismatch: expected {expected}, found {actual}")
     return source_entry, concepts, topics
 
 
@@ -288,14 +295,11 @@ def _load_mapping(path: Path, source: str, origin_concepts: list[dict]) -> tuple
         missing = sorted(expected - seen_origins)
         extra = sorted(seen_origins - expected)
         raise ReuseError(
-            "mapping must cover all 37 origin concepts exactly once "
+            f"mapping must cover all {len(expected)} origin concepts exactly once "
             f"(missing={len(missing)}, extra={len(extra)})")
-    zero = [item for item in targets if not item["origin_concepts"]]
-    mapped = len(targets) - len(zero)
-    if len(targets) != 8 or mapped != 6 or len(zero) != 2:
-        raise ReuseError(
-            "mapping must contain exactly 8 targets (6 mapped + 2 zero-mapping); "
-            f"got {len(targets)} targets ({mapped} mapped + {len(zero)} zero-mapping)")
+    # targets 的张数由 mapping 作者决定，不是安全属性：上面的集合相等 + 每个 origin
+    # concept 至多出现一次，已经把"不遗漏、不多余、各映射一次"钉死；非空/零映射目标的
+    # 归因边界另由 _target_pages 逐页核验。
     return raw, {"version": 1, "source_id": source, "targets": targets}
 
 
@@ -327,7 +331,7 @@ def _target_pages(vault: Path, source: str, mapping: dict) -> tuple[list[dict], 
             mapped_paths.add(rel)
         entries.append(entry)
 
-    # Mapping 是归因边界：除 37→非空目标外，任何已有 mysql source_ref 都是未声明归因。
+    # Mapping 是归因边界：非空映射目标之外，任何已有本来源 source_ref 都是未声明归因。
     attributed_paths: set[str] = set()
     for path in sorted(vault.rglob("*.md")):
         rel = path.relative_to(vault).as_posix()
@@ -455,20 +459,27 @@ def _source_page_bytes(plan: dict) -> bytes:
         f"主映射 {len(item['origin_concepts'])} 个 origin concept。"
         for item in mapped
     ]
+    concept_count = len(plan["origin_concepts"])
+    zero_count = plan["zero_mapping_target_count"]
+    # 张数一律由 plan 现算：这段正文是要冻进不可变证据的，写死个案数字会让命令对别的
+    # 来源产出错误台账。零映射目标可以为 0，此时整句省略而不是印出「另有 0 张」。
+    zero_note = (f"另有 {zero_count} 张目标页被显式登记为零映射，因此没有获得本来源的 "
+                 "source_refs 归因。" if zero_count else "")
     body = [
         "本页登记的是从另一个只读、已发布 vault 选择性复用现有知识，不代表在本 vault "
         "重新摄取或重写 PDF。",
         "",
         f"原 vault `{plan['origin_root']}` 的 `{plan['origin_source']}` 已核验为 "
-        "`lint/published`；PDF SHA-256、原 source 页、37 张 concept、3 张 topic、状态快照和 "
-        "37→目标页映射均冻结在不可变 reuse evidence 中。",
+        f"`lint/published`；PDF SHA-256、原 source 页、{concept_count} 张 concept、"
+        f"{len(plan['origin_topics'])} 张 topic、状态快照和 "
+        f"{concept_count}→目标页映射均冻结在不可变 reuse evidence 中。",
         "",
         "映射到本 vault 的目标页：",
         "",
         *links,
         "",
-        "另有 2 张目标页被显式登记为零映射，因此没有获得本来源的 source_refs 归因。"
-        "本旁路不创建 work order、processing window 或 window read/write ledger。",
+        zero_note
+        + "本旁路不创建 work order、processing window 或 window read/write ledger。",
         "",
     ]
     return f"---\n{fm}---\n".encode("utf-8") + "\n".join(body).encode("utf-8")
@@ -549,7 +560,8 @@ def _target_state_violations(snapshot: dict | None, *, plan: dict) -> list[str]:
 def build_plan(*, workspace: Path, source: str, title: str, domain: str,
                pdf_path: Path, pdf_sha256: str, origin_root: Path,
                origin_source: str, mapping_path: Path, lock_ttl_seconds: int = 1800,
-               allowed_lock_holder: str | None = None) -> dict:
+               allowed_lock_holder: str | None = None,
+               expect_concepts: int | None = None, expect_topics: int | None = None) -> dict:
     """只读构建跨 vault 复用计划；不创建目录、数据库、报告或锁。"""
     if not _SOURCE_ID.fullmatch(source) or not _SOURCE_ID.fullmatch(origin_source):
         raise ReuseError("source ids must use only ASCII letters/digits/./_/-")
@@ -594,7 +606,8 @@ def build_plan(*, workspace: Path, source: str, title: str, domain: str,
     origin_state, origin_state_bytes = _origin_state_snapshot(
         origin_root, origin_source, pdf_path, actual_pdf_sha)
     origin_source_page, origin_concepts, origin_topics = _origin_pages(
-        origin_root, origin_source, expected_domain=origin_state["sources"][0]["domain"])
+        origin_root, origin_source, expected_domain=origin_state["sources"][0]["domain"],
+        expect_concepts=expect_concepts, expect_topics=expect_topics)
     mapping_bytes, mapping = _load_mapping(mapping_path, source, origin_concepts)
     mapping_sha = hashlib.sha256(mapping_bytes).hexdigest()
     target_pages, warnings = _target_pages(vault, source, mapping)

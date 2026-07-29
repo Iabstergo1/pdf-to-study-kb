@@ -41,7 +41,14 @@ def _write_page(path, meta, body="可复用知识页正文。" * 40):
     path.write_text(f"---\n{fm}---\n{body}\n", encoding="utf-8", newline="\n")
 
 
-def _fixture(tmp_path):
+def _fixture(tmp_path, *, concepts=37, topics=3, group_sizes=(7, 6, 6, 6, 6, 6, 0, 0)):
+    """Build one origin+target pair of an arbitrary shape.
+
+    The default is the MySQL migration's shape (37 concepts / 3 topics / 8 targets = 6 mapped +
+    2 zero-mapping).  ``group_sizes`` must sum to ``concepts``; the command itself asserts no
+    particular shape, so every count here is a fixture parameter rather than a CLI contract.
+    """
+    assert sum(group_sizes) == concepts, (group_sizes, concepts)
     origin = tmp_path / "origin"
     origin_vault = origin / "wiki"
     pdf = tmp_path / "mysql.pdf"
@@ -54,7 +61,7 @@ def _fixture(tmp_path):
         "title": "MySQL是怎样运行的", "type": "source",
     }, "origin canonical source page")
     origins = []
-    for i in range(37):
+    for i in range(concepts):
         rel = f"domains/database-systems/concepts/origin-{i:02d}.md"
         origins.append(rel)
         _write_page(origin_vault / rel, {
@@ -63,7 +70,7 @@ def _fixture(tmp_path):
             "managed_by": "pipeline", "source_refs": [{"source": "mysql", "sections": [f"{i}.1"]}],
             "status": "published", "type": "concept",
         })
-    for i in range(3):
+    for i in range(topics):
         _write_page(origin_vault / "topics" / f"origin-topic-{i}.md", {
             "domain": "database-systems", "managed_by": "pipeline",
             "source_refs": [{"source": "mysql", "sections": [f"topic-{i}"]}],
@@ -105,7 +112,6 @@ def _fixture(tmp_path):
     target = tmp_path / "target"
     target_vault = target / "wiki"
     targets = []
-    group_sizes = [7, 6, 6, 6, 6, 6, 0, 0]
     cursor = 0
     for i, size in enumerate(group_sizes):
         rel = f"domains/sql/concepts/target-{i}.md"
@@ -130,8 +136,11 @@ def _fixture(tmp_path):
         "--origin-root", str(origin), "--origin-source", "mysql",
         "--mapping", str(mapping),
     ]
+    mapped_count = sum(1 for size in group_sizes if size)
     return {"origin": origin, "target": target, "pdf": pdf, "mapping": mapping,
-            "origins": origins, "targets": targets, "args": args}
+            "origins": origins, "targets": targets, "args": args,
+            "concepts": concepts, "topics": topics, "mapped": mapped_count,
+            "zero": len(group_sizes) - mapped_count}
 
 
 def test_reuse_source_dry_run_is_byte_zero_write(tmp_path):
@@ -143,8 +152,8 @@ def test_reuse_source_dry_run_is_byte_zero_write(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "[dry-run]" in result.stdout
-    assert "concepts=37 topics=3" in result.stdout
-    assert "mapped-targets=6 zero-mapping-targets=2" in result.stdout
+    assert f"concepts={fx['concepts']} topics={fx['topics']}" in result.stdout
+    assert f"mapped-targets={fx['mapped']} zero-mapping-targets={fx['zero']}" in result.stdout
     assert _tree_bytes(fx["target"]) == target_before
     assert _tree_bytes(fx["origin"]) == origin_before
     assert not (fx["target"] / "pipeline-workspace").exists()
@@ -168,10 +177,10 @@ def test_reuse_source_apply_writes_evidence_source_state_and_derived_without_tou
     evidence = fx["target"] / "pipeline-workspace" / "reuses" / "mysql"
     manifest = json.loads((evidence / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["format"] == "external-vault-reuse"
-    assert len(manifest["origin_concepts"]) == 37
-    assert len(manifest["origin_topics"]) == 3
-    assert manifest["mapped_target_count"] == 6
-    assert manifest["zero_mapping_target_count"] == 2
+    assert len(manifest["origin_concepts"]) == fx["concepts"]
+    assert len(manifest["origin_topics"]) == fx["topics"]
+    assert manifest["mapped_target_count"] == fx["mapped"]
+    assert manifest["zero_mapping_target_count"] == fx["zero"]
     assert (evidence / "mapping.json").read_bytes() == fx["mapping"].read_bytes()
     assert (evidence / "origin-state.json").is_file()
     assert (evidence / "origin-files" / "sources" / "mysql.md").is_file()
@@ -269,9 +278,10 @@ def test_reuse_source_live_target_drift_warns_noop_and_evidence_mapping_can_repl
 
 
 @pytest.mark.parametrize("mutation,needle", [
-    ("missing-origin", "37 origin concepts exactly once"),
+    ("missing-origin", "origin concepts exactly once"),
     ("duplicate-origin", "origin concept mapped more than once"),
-    ("wrong-shape", "exactly 8 targets (6 mapped + 2 zero-mapping)"),
+    # 目标张数不再是门禁；把一个 origin 挪到不存在的目标页仍必须被逐页核验拦下。
+    ("unknown-target", "mapping target does not exist"),
     ("mapped-without-ref", "mapped-target-missing-source-ref"),
     ("zero-with-ref", "zero-mapping-target-false-attribution"),
 ])
@@ -284,7 +294,7 @@ def test_reuse_source_mapping_fail_closed(tmp_path, mutation, needle):
         data["targets"][1]["origin_concepts"].append(
             data["targets"][0]["origin_concepts"][0])
         data["targets"][1]["origin_concepts"].sort()
-    elif mutation == "wrong-shape":
+    elif mutation == "unknown-target":
         moved = data["targets"][0]["origin_concepts"].pop()
         data["targets"].append({
             "target": "domains/sql/concepts/target-extra.md",
@@ -311,6 +321,50 @@ def test_reuse_source_mapping_fail_closed(tmp_path, mutation, needle):
 
     assert result.returncode != 0
     assert needle in (result.stdout + result.stderr)
+    assert _tree_bytes(fx["target"]) == before
+
+
+def test_reuse_source_supports_a_non_mysql_shape_end_to_end(tmp_path):
+    """命令对任意来源都必须走得通：5 concepts / 2 topics / 3 targets（含 1 张零映射）。"""
+    fx = _fixture(tmp_path, concepts=5, topics=2, group_sizes=(3, 2, 0))
+    origin_before = _tree_bytes(fx["origin"])
+
+    dry = _run(fx["args"], fx["target"])
+    assert dry.returncode == 0, dry.stdout + dry.stderr
+    assert "concepts=5 topics=2" in dry.stdout
+    assert "mapped-targets=2 zero-mapping-targets=1" in dry.stdout
+    assert not (fx["target"] / "pipeline-workspace").exists()
+
+    applied = _run([*fx["args"], "--apply"], fx["target"])
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    manifest = json.loads(
+        (fx["target"] / "pipeline-workspace" / "reuses" / "mysql" / "manifest.json")
+        .read_text(encoding="utf-8"))
+    assert (len(manifest["origin_concepts"]), len(manifest["origin_topics"])) == (5, 2)
+    assert (manifest["mapped_target_count"], manifest["zero_mapping_target_count"]) == (2, 1)
+    source_page = (fx["target"] / "wiki" / "sources" / "mysql.md").read_text(encoding="utf-8")
+    assert "5 张 concept、2 张 topic" in source_page and "5→目标页映射" in source_page
+    assert "另有 1 张目标页被显式登记为零映射" in source_page
+
+    stable = _tree_state(fx["target"])
+    repeat = _run([*fx["args"], "--apply"], fx["target"])
+    assert repeat.returncode == 0, repeat.stdout + repeat.stderr
+    assert "fully verified" in repeat.stdout
+    assert _tree_state(fx["target"]) == stable
+    assert _tree_bytes(fx["origin"]) == origin_before
+
+
+def test_reuse_source_optional_shape_expectations_are_opt_in(tmp_path):
+    """默认不限制 origin 张数；显式 --expect-* 才断言，且不匹配时 fail-closed。"""
+    fx = _fixture(tmp_path, concepts=5, topics=2, group_sizes=(3, 2, 0))
+    before = _tree_bytes(fx["target"])
+
+    ok = _run([*fx["args"], "--expect-concepts", "5", "--expect-topics", "2"], fx["target"])
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+    bad = _run([*fx["args"], "--expect-concepts", "37"], fx["target"])
+    assert bad.returncode != 0
+    assert "origin concepts count mismatch: expected 37, found 5" in (bad.stdout + bad.stderr)
     assert _tree_bytes(fx["target"]) == before
 
 

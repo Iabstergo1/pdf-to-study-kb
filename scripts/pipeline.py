@@ -755,7 +755,8 @@ def cmd_reuse_source(args):
             domain=args.domain, pdf_path=Path(args.path), pdf_sha256=args.sha256,
             origin_root=Path(args.origin_root), origin_source=args.origin_source,
             mapping_path=Path(args.mapping), lock_ttl_seconds=LOCK_TTL_SECONDS,
-            allowed_lock_holder=allowed_holder)
+            allowed_lock_holder=allowed_holder,
+            expect_concepts=args.expect_concepts, expect_topics=args.expect_topics)
 
     try:
         plan = build()
@@ -2652,7 +2653,11 @@ def main():
     rsp.add_argument("--origin-source", required=True, dest="origin_source",
                      help="origin published source_id（必须与 --source 相同）")
     rsp.add_argument("--mapping", required=True,
-                     help="显式 37→目标页 mapping JSON；成功后可改用 evidence/mapping.json 重放")
+                     help="显式 origin concept→目标页 mapping JSON；成功后可改用 evidence/mapping.json 重放")
+    rsp.add_argument("--expect-concepts", dest="expect_concepts", type=int, default=None,
+                     help="可选：断言 origin 恰好有 N 张 published concept（默认不限制数量）")
+    rsp.add_argument("--expect-topics", dest="expect_topics", type=int, default=None,
+                     help="可选：断言 origin 恰好有 N 张 published topic（默认不限制数量）")
     rsp.add_argument("--apply", action="store_true",
                      help="执行复用（默认只读核验并打印计划，byte-zero-write）")
     subparsers.add_parser("apply-obsidian-style",

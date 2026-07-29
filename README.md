@@ -118,17 +118,17 @@ python scripts/pipeline.py adopt-vault --source <src> --title "<title>" --domain
 
 ### 可选分支：从只读 published Vault 复用一个来源
 
-若另一个 pipeline vault 已把同一 PDF 完整发布，而目标 vault 已人工完成选择性合并，可用显式 mapping 登记复用事实，不必伪造一次新的 ingest。mapping v1 只含 `version`、`source_id`、`targets[]`；每项为 `target` 与排序后的 `origin_concepts[]`。命令要求 origin 恰有 37 张 MySQL concept + 3 张 topic，37 张 concept 全局各主映射一次，且 mapping 形状固定为 8 张目标页（6 张非空 + 2 张显式零映射）；非空目标须预先有 `source_refs: source: mysql`，零映射目标反而不得有该归因。
+若另一个 pipeline vault 已把同一 PDF 完整发布，而目标 vault 已人工完成选择性合并，可用显式 mapping 登记复用事实，不必伪造一次新的 ingest。mapping v1 只含 `version`、`source_id`、`targets[]`；每项为 `target` 与排序后的 `origin_concepts[]`。命令要求 mapping 覆盖的 origin concept 集合与 origin 实际拥有的 published concept 集合**完全相等**，因而不遗漏、不多余、各主映射一次；目标页张数由 mapping 自己决定，不设固定形状。非空目标须预先有 `source_refs: source: <src>`，显式零映射目标反而不得有该归因。可选的 `--expect-concepts` / `--expect-topics` 用于在已知形状时额外确认。
 
 ```powershell
 $env:PYTHONDONTWRITEBYTECODE=1
 python -B scripts/pipeline.py reuse-source --source mysql --title "MySQL是怎样运行的" --domain sql `
   --path "C:\books\mysql.pdf" --sha256 <64位SHA256> `
   --origin-root "D:\pdf-to-study-kb" --origin-source mysql --mapping "C:\tmp\mysql-mapping.json"
-# 核对 37 concepts / 3 topics / 6 mapped + 2 zero-mapping targets 后，加 --apply
+# 核对打印出的 concepts / topics / mapped-targets / zero-mapping-targets 后，加 --apply
 ```
 
-`reuse-source` 默认 byte-zero-write，origin 全程以 read-only SQLite 和文件读取方式核验；origin state DB 必须使用非 WAL rollback journal，且调用前不得存在 `-wal/-shm` sidecar，否则在打开前 fail-closed。若 origin 同时是 CLI 代码仓库（正式 MySQL 场景即如此），dry-run 与 apply 都必须像上例同时设置 `PYTHONDONTWRITEBYTECODE=1` 并用 `python -B`，避免 import 更新 origin 下的 `scripts/__pycache__`。`--apply` 在目标 vault 锁内冻结 PDF、origin state/source/37+3 页、mapping 与首次 target merge snapshot，新增 canonical source 页，重建全部派生层后才登记 `format=external-vault-reuse`、`reused/published`；三类 ingest 台账始终为 0。精确重跑会先验证 registry/index/graph/quiz/propositions 全部派生文件，再作全树 byte/mtime no-op；缺失或损坏则进入锁内重建。后续 target 页合法演进仅报 `post-reuse-target-live-drift`。origin/PDF/mapping/evidence/source/state 漂移 fail-closed。临时 mapping 可在成功后删除，正式重放改用 `pipeline-workspace/reuses/mysql/mapping.json`。
+`reuse-source` 默认 byte-zero-write，origin 全程以 read-only SQLite 和文件读取方式核验；origin state DB 必须使用非 WAL rollback journal，且调用前不得存在 `-wal/-shm` sidecar，否则在打开前 fail-closed。若 origin 同时是 CLI 代码仓库（正式 MySQL 场景即如此），dry-run 与 apply 都必须像上例同时设置 `PYTHONDONTWRITEBYTECODE=1` 并用 `python -B`，避免 import 更新 origin 下的 `scripts/__pycache__`。`--apply` 在目标 vault 锁内冻结 PDF、origin state/source 页与全部 concept/topic 页、mapping 与首次 target merge snapshot，新增 canonical source 页，重建全部派生层后才登记 `format=external-vault-reuse`、`reused/published`；三类 ingest 台账始终为 0。精确重跑会先验证 registry/index/graph/quiz/propositions 全部派生文件，再作全树 byte/mtime no-op；缺失或损坏则进入锁内重建。后续 target 页合法演进仅报 `post-reuse-target-live-drift`。origin/PDF/mapping/evidence/source/state 漂移 fail-closed。临时 mapping 可在成功后删除，正式重放改用 `pipeline-workspace/reuses/mysql/mapping.json`。
 
 ### ② 一句话入库（ingest）
 
@@ -283,7 +283,7 @@ pdf-to-study-kb/
 | `next` | 列出每个 source 的**下一步人工动作** + stale 锁清理建议 | — |
 | `init-vault` | 建 `wiki/` 脚手架 + 种子文件（幂等，不覆盖） | — |
 | `adopt-vault` | 接管既有 vault 基线：默认零写 dry-run；legacy `wiki_gate` 内容债 warning-only，安全/ZIP/证据/source/state/台账完整性才 hard-block；`--apply` 在锁内落不可变证据、重建派生层，成功后登记 `legacy-vault` 的 `adopted/published`，既有知识页不改写、三类 ingest 台账为零；精确重跑全树 byte no-op，接管后 live 演进只报 drift warning，历史归档/证据/状态漂移仍 fail-closed | `--source --title --domain --baseline-archive --baseline-sha256 [--apply]` |
-| `reuse-source` | 从只读 published vault 复用来源：默认零写；核验 PDF SHA、origin state/source/37 concept+3 topic、37→目标页 mapping 与归因边界；apply 冻结 origin/mapping/首次 target snapshot，派生成功后登记 `external-vault-reuse` 的 `reused/published`，三类 ingest 台账为零；target live 演进 warning-only，origin/mapping/evidence/source/state 漂移 fail-closed | `--source --title --domain --path --sha256 --origin-root --origin-source --mapping [--apply]` |
+| `reuse-source` | 从只读 published vault 复用来源：默认零写；核验 PDF SHA、origin state/source 页与全部 concept/topic 页、mapping 覆盖集与 origin 概念集相等、目标归因边界；apply 冻结 origin/mapping/首次 target snapshot，派生成功后登记 `external-vault-reuse` 的 `reused/published`，三类 ingest 台账为零；target live 演进 warning-only，origin/mapping/evidence/source/state 漂移 fail-closed | `--source --title --domain --path --sha256 --origin-root --origin-source --mapping [--expect-concepts --expect-topics --apply]` |
 | `unlock` | 受控回收 stale vault 锁；活锁拒绝 | `--ttl 1800` |
 | `fail` | 把崩溃残留的 `running` 阶段标记 `failed` | `--source --stage --error` |
 | `rebuild-registry` | 从概念页 frontmatter 重建 `_registry.yaml`（`aliases.md` 已退休，别名只在概念页 frontmatter；残留会被主动清理） | — |

@@ -43,7 +43,7 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 | `pipeline.py` | CLI 分发 + 各阶段编排（每个 `cmd_*` 一个子命令，共 48 个） | `main()`、`cmd_*` 函数族、`_workspace_root()`、`_vault_dir()`、`_staging_dir()` |
 | `state_store.py` | 单一业务 SQLite 状态机（**8 张表**）+ 原子阶段 API + 轮次 token | `STAGES`、`NEXT`、`start_stage/complete_stage/fail_stage`、`should_run_stage`、`adopt_source`、`reuse_source`、`reopen_source`、`reset_source`、`RESETTABLE_TARGETS`、`resolve_review_proposals`、`source_stats`、`*_window`、`round_anchor`、`window_reads_in_round`、`export_source_rows`、`purge_source_ledgers` |
 | `vault_adoption.py` | 既有 vault 的只读接管计划、ZIP/页面集合核验、不可变逐页证据、canonical source 页与历史基线/接管后 live drift 分层 | `AdoptionError`、`build_plan`、`write_evidence`、`write_source_page` |
-| `source_reuse.py` | published origin vault 的只读状态/PDF/37+3 页核验、37→目标 mapping 归因边界、不可变 origin/target evidence 与 live target drift 分层 | `ReuseError`、`build_plan`、`write_evidence`、`write_source_page` |
+| `source_reuse.py` | published origin vault 的只读状态/PDF/概念与主题页核验、mapping 覆盖集相等性与目标归因边界、不可变 origin/target evidence 与 live target drift 分层 | `ReuseError`、`build_plan`、`write_evidence`、`write_source_page` |
 | `locks.py` | 单 vault 写锁（scope 固定 `"vault"`） | `acquire/release/heartbeat/is_stale/break_stale` |
 | `source_profile.py` | L1 逐页 profile + `needs_vision` 判定（公式/图/表/扫描信号） | `profile_source`、`profile_page`、`needs_vision_reasons`、`vision_tier`、`is_scanned_source`、`render_pages_png`、`PROFILER_VERSION="5"` |
 | `source_convert.py` | L1 dispatcher：选后端 → 调后端 → 落 artifact | `convert`、`select_backend`、`classify_source`、`converted_input_hash` |
@@ -298,7 +298,7 @@ pdf-to-study-kb/
 | 列出各源下一步动作 | `next` | `cmd_next` → `state_store.next_actions` | state db | 终端打印 | 无 | `test_pipeline_status.py` | 准确 |
 | 建 vault 脚手架 | `init-vault` | `cmd_init_vault` | `templates/overview.md` | `wiki/` 目录 + overview/log/purpose + `.obsidian/{graph,app}.json` | 写盘（幂等不覆盖） | `test_vault_init_cli.py` | 准确 |
 | 接管既有 vault 基线 | `adopt-vault --source --title --domain --baseline-archive --baseline-sha256 [--apply]` | `cmd_adopt_vault` → `vault_adoption.build_plan/write_evidence/write_source_page` + 派生重建 + `state_store.adopt_source` | 已有 `wiki/` + 接管前 ZIP 及预期 SHA-256 | 默认只打印逐页计划；apply 在锁内落不可变证据/canonical source 页，派生层全成功后登记 `legacy-vault` 的 `adopted/published` | 首次 legacy 内容债 warning-only，安全/ZIP/证据/source/state/台账完整性 hard-block；精确重跑 byte no-op，登记后 live drift 只 warning、历史证据不变；`work_orders/ingest_progress/window_reads=0` | `test_adopt_vault_cli.py` | 准确 |
-| 复用 published vault 来源 | `reuse-source --source --title --domain --path --sha256 --origin-root --origin-source --mapping [--apply]` | `cmd_reuse_source` → `source_reuse.build_plan/write_evidence/write_source_page` + 派生重建 + `state_store.reuse_source` | 只读 origin root + PDF/SHA + mapping v1 + 已完成 merge/source_refs 的目标页 | 默认 byte-zero-write；apply 在目标锁内冻结 origin state/source/37 concept+3 topic、mapping 与首次 target snapshot，派生成功后登记 `external-vault-reuse` 的 `reused/published` | 37 origin concept 恰好一次主映射，2 张零映射页不得获 mysql 归因；精确重跑 no-op，target live drift warning-only，origin/mapping/evidence/source/state drift fail-closed；三台账为 0 | `test_reuse_source_cli.py` | 准确 |
+| 复用 published vault 来源 | `reuse-source --source --title --domain --path --sha256 --origin-root --origin-source --mapping [--apply]` | `cmd_reuse_source` → `source_reuse.build_plan/write_evidence/write_source_page` + 派生重建 + `state_store.reuse_source` | 只读 origin root + PDF/SHA + mapping v1 + 已完成 merge/source_refs 的目标页 | 默认 byte-zero-write；apply 在目标锁内冻结 origin state/source 页与全部 concept/topic 页、mapping 与首次 target snapshot，派生成功后登记 `external-vault-reuse` 的 `reused/published` | mapping 覆盖集 == origin 概念集（故各恰好一次），零映射目标不得获该来源归因；精确重跑 no-op，target live drift warning-only，origin/mapping/evidence/source/state drift fail-closed；三台账为 0 | `test_reuse_source_cli.py` | 准确 |
 | 回收 stale 锁 | `unlock [--ttl 1800]` | `cmd_unlock` → `locks.break_stale` | state db | 释放锁 | 删锁行（活锁拒绝） | `test_locks.py` | 准确 |
 | 崩溃阶段标 failed | `fail --source --stage --error` | `cmd_fail` → `state_store.fail_stage` | state db | 标记 failed | 改状态 | `test_state_store.py` | 准确 |
 | 重建 registry | `rebuild-registry` | `cmd_rebuild_registry` → `concept_store.build_registry/write_registry` + `remove_stale_aliases` | 概念页 frontmatter | `_registry.yaml`（aliases.md 已退休，若残留则删除） | 写派生文件 | `test_concept_store.py` | 准确 |
@@ -450,19 +450,21 @@ published status、归档/证据/source/state/三类 ingest 台账完整性是 h
 要求非 WAL（拒绝 WAL 模式）且不存在 `-wal/-shm` sidecar，再以 URI `mode=ro` + 显式 `BEGIN` 的 shared-lock 一致快照
 只读打开 origin state；要求 origin source 为 `pdf/lint/published`、最后一次 lint 成功，且
 `raw_source` artifact 与显式 PDF path/SHA-256 一致；canonical source 页必须 published。随后扫描
-source_refs，固定要求 MySQL origin 恰为 37 张 published concept + 3 张 published topic，并逐页计算
+source_refs，收集该来源拥有的全部 published concept / topic（至少一张 concept），并逐页计算
 SHA-256。origin 与 target workspace 必须是互不包含的直接路径；origin 有锁即拒绝，命令从不在 origin
 创建锁、目录、journal 或任何业务行。正式 origin 同时承载 CLI 代码，因此所有 dry-run/apply 调用还必须
 在解释器启动前设置 `PYTHONDONTWRITEBYTECODE=1` 并使用 `python -B`，避免 import 写入 origin 的 pycache。
 
 mapping v1 顶层字段严格为 `version/source_id/targets`；target 项严格为 `target/origin_concepts`。
-targets 与每组 origin 路径都要排序、无重复；37 张 concept 的集合必须全局恰好覆盖一次，整体形状严格为
-8 张 target（6 张非空 + 2 张零映射）。非空 target 必须是现有 published concept 且已含
+targets 与每组 origin 路径都要排序、无重复；**mapping 覆盖的 origin concept 集合必须与 origin
+实际拥有的集合相等**——这一条即蕴含不遗漏、不多余、各映射一次，因此 target 张数与非空/零映射比例
+不再另设门禁（曾把一次 MySQL 迁移的 37/3/8=6+2 写死进通用命令，任何别的来源必然失败）。
+`--expect-concepts` / `--expect-topics` 是可选的形状确认，默认关闭。非空 target 必须是现有 published concept 且已含
 `source_refs: source: mysql`，两张显式零映射 target 必须不含
 mysql；mapping 外任何 mysql source_ref 同样 fail-closed，因此 CLI 只验证人工 merge，绝不制造归因。
 
 `--apply` 在目标 vault 锁内重新规划，再原子写 `pipeline-workspace/reuses/<src>/`：canonical manifest、
-原始 `mapping.json`、canonical `origin-state.json`、origin source/37+3 页字节和首次 target merge 页字节；
+原始 `mapping.json`、canonical `origin-state.json`、origin source 页与全部 concept/topic 页字节和首次 target merge 页字节；
 随后写 canonical source 页并重建 index/registry/graph/quiz/propositions。全部成功后，
 `state_store.reuse_source` 才原子登记 `format=external-vault-reuse`、`reused/published`、一条
 `reused/done` stage 与一条 `reuse_evidence` artifact；三类 ingest 台账必须为 0。派生失败保留

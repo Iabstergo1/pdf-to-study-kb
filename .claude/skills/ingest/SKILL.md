@@ -35,9 +35,11 @@ the zero-LLM `reuse-source` branch in §6; target merge pages/source_refs must a
   independently recorded 64-hex SHA-256. Confirm all five inputs; do not silently calculate a new expected hash
   and treat it as prior baseline evidence.
 - For cross-vault reuse, require `<src>/<title>/<domain>`, the current PDF path + independently expected SHA-256,
-  a disjoint read-only `<origin-root>` + matching `<origin-source>`, and an explicit mapping v1 JSON. The mapping
-  must cover the 37 origin concepts exactly once; non-empty targets already carry this source_ref, while the two
-  explicit zero-mapping targets must not. This branch verifies the merge; it never performs it.
+  a disjoint read-only `<origin-root>` + matching `<origin-source>`, and an explicit mapping v1 JSON. The mapping's
+  covered origin-concept set must equal the set the origin actually owns, so nothing is missed, duplicated or
+  double-mapped; target count and the non-empty/zero-mapping split are the mapping's own shape, not a gate.
+  Non-empty targets already carry this source_ref, while explicit zero-mapping targets must not.
+  This branch verifies the merge; it never performs it.
 - Read: `wiki/_meta/purpose.md` **first — it is the authority on writing style, structure, depth and
   terminology** (the user's learning goals / teaching preference). The deterministic layer only guards
   order/safety/provenance; **form is purpose-driven, not template-driven.** Then read
@@ -81,7 +83,7 @@ the zero-LLM `reuse-source` branch in §6; target merge pages/source_refs must a
 
 ```text
 legacy vault (zero LLM)  adopt-vault --source <src> --title <title> --domain <domain> --baseline-archive <archive> --baseline-sha256 <sha256> [--apply]
-published source reuse (zero LLM)  reuse-source --source <src> --title <title> --domain <domain> --path <pdf> --sha256 <sha256> --origin-root <root> --origin-source <src> --mapping <mapping.json> [--apply]
+published source reuse (zero LLM)  reuse-source --source <src> --title <title> --domain <domain> --path <pdf> --sha256 <sha256> --origin-root <root> --origin-source <src> --mapping <mapping.json> [--expect-concepts N --expect-topics N] [--apply]
 preprocess + auto-arbitration  init-vault → add-source → profile → source-convert → source-audit →[ arbitration-status → if pending: agent arbitrates queue → arbitration-apply ]→ windows → workorder
 start / per-window (LLM)  ingest-start → read chapters.json (build whole-book understanding) → write per-chapter content-routing table into digest (advisory; references/content-routing.md)
                           →[ in chapter order: window-start → show-window → write pages per routing orientation (read hard-page source images as evidence; re-express natively — never embed them; deviations logged) → window-done --writes ]×N
@@ -104,8 +106,9 @@ incremental reopen        reopen → ingest-start →[ per-window backfill ]→ 
 > `python -B scripts/pipeline.py reuse-source ...`; the origin may also be this CLI code repository, so ordinary
 > imports are not allowed to update its `scripts/__pycache__`. Run without `--apply` first. The origin state DB
 > must use a non-WAL rollback journal and have no `-wal/-shm` sidecar. The plan must report the expected PDF hash,
-> read-only origin `lint/published` state, canonical source page, exactly 37 published concepts + 3 topics, and
-> a strict eight-target mapping (six non-empty + two explicit zero-mapping) covering all 37 concepts exactly once.
+> read-only origin `lint/published` state, canonical source page, the published concept/topic counts it found, and
+> a mapping whose covered origin-concept set equals the origin's own set (hence exactly once each). Target count is
+> the mapping's shape, not a gate; `--expect-concepts` / `--expect-topics` are optional confirmations.
 > Non-empty target pages must already carry
 > this source_ref; zero-mapping targets must not. Apply takes only the target vault lock, freezes origin state/pages,
 > raw mapping and the first target merge bytes, rebuilds every derived layer, then records
@@ -180,8 +183,8 @@ on a stale RESUME instead of emitting a half-true packet); otherwise auto-advanc
   `adopted/published`, preserves existing knowledge-page bytes, and reports all three ingest-ledger counts as zero.
   A fully verified exact rerun is a whole-tree byte no-op; later live-page drift is warning-only and leaves the
   historical manifest/evidence unchanged, while archive/evidence/source/adoption-state drift remains a hard stop.
-- Reuse alternative: dry-run is byte-zero-write and proves origin read-only published truth, PDF SHA, 37+3 page
-  hashes, the 37→target exactly-once mapping and the two zero-mapping non-attributions. Apply preserves every
+- Reuse alternative: dry-run is byte-zero-write and proves origin read-only published truth, PDF SHA, every
+  concept/topic page hash, the set-equal exactly-once mapping and the zero-mapping non-attributions. Apply preserves every
   existing target-page byte, rebuilds derived artifacts before `reused/published`, and keeps all three ingest
   ledgers at zero. Exact replay (including from evidence mapping) is whole-tree byte no-op; target live drift is
   warning-only, while origin/mapping/evidence/source/reuse-state drift is a hard stop.
