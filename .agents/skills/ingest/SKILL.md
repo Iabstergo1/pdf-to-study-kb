@@ -1,16 +1,19 @@
 ---
 name: ingest
-description: End-to-end add a new external source (PDF/DOCX/PPTX/Markdown) to the study knowledge base — deterministic preprocessing → read the whole source and write status:proposed pages + concept resolution → finish with lint and publish. Use when the user says "add this book/PDF to the KB / ingest <source> / index this document / weave this file into the wiki". Only for ingesting a new external source; read-only requests like "summarize this / explain this / translate this / answer a trivia question" must never trigger it.
+description: End-to-end add a new external source (PDF/DOCX/PPTX/Markdown) to the study knowledge base, or deterministically adopt an already-populated Obsidian vault baseline. Use for "add/ingest/index/weave this source" or "adopt/onboard this existing vault". Normal ingest preprocesses and writes proposed pages; legacy adoption is a separate zero-LLM branch. Read-only requests like "summarize/explain/translate this" must never trigger it.
 ---
 
-# ingest — weave a whole source into the wiki (the only LLM write step; top-level orchestration)
+# ingest — weave or adopt a source (normal ingest is the only LLM write step)
 
 You are the maintainer of the knowledge base. Weave the user's source into the wiki **concept/topic-first**;
 lessons are an **optional, downgraded** secondary layer (only for continuous teaching/example/exercise stretches
 that don't sink into concepts) — **named by theme, never `第X章`, never a chapter recap, never "本章/本书/作者"
 meta-narrative.** The reader should be immersed in the knowledge and never sense the original document. Work under
 the work-order transaction protocol the whole way. This file is the **top-level orchestration**; load per-phase
-detail from sibling `references/*` on demand. Project truth: `AGENTS.md`. Engineering format: `docs/skill-runtime/skill-standard.md`.
+detail from sibling `references/*` on demand. Project truth: `AGENTS.md` / `CLAUDE.md`. Engineering format: `docs/skill-runtime/skill-standard.md`.
+
+If the request is to adopt an already-populated vault, take the dedicated zero-LLM `adopt-vault` branch in §6
+**before** any work-order, window or LLM writing step; that branch does not use the normal ingest transaction protocol.
 
 > **Thin skill + thick CLI:** the execution layer is the deterministic zero-LLM CLI (`scripts/pipeline.py`);
 > this skill carries no business code, only orchestrates it. `<src>` = this source's source_id; run commands
@@ -18,7 +21,7 @@ detail from sibling `references/*` on demand. Project truth: `AGENTS.md`. Engine
 
 ## 1. Triggers / Non-triggers
 
-- **Triggers:** "add this book/PDF to the KB", "ingest \<source\>", "index this document", "weave this file into the wiki".
+- **Triggers:** "add this book/PDF to the KB", "ingest \<source\>", "index this document", "weave this file into the wiki", "adopt/onboard this existing Obsidian vault".
 - **Non-triggers (never fire):** "summarize this", "explain this", "translate this", "answer a trivia question", "what is this PDF about" (a question, not an ingest request).
 
 ## 2. Inputs
@@ -26,6 +29,9 @@ detail from sibling `references/*` on demand. Project truth: `AGENTS.md`. Engine
 - The user gives: file path `<path>`, domain `<domain>`; format `<fmt>` is inferred from the extension
   (pdf/md/docx/pptx); `<src>` is derived from the filename (lowercase, hyphenated). **Confirm `<src>` and
   `<domain>` once with the user.**
+- For existing-vault adoption, instead require `<src>`, `<title>`, `<domain>`, a baseline archive path and its
+  independently recorded 64-hex SHA-256. Confirm all five inputs; do not silently calculate a new expected hash
+  and treat it as prior baseline evidence.
 - Read: `wiki/_meta/purpose.md` **first — it is the authority on writing style, structure, depth and
   terminology** (the user's learning goals / teaching preference). The deterministic layer only guards
   order/safety/provenance; **form is purpose-driven, not template-driven.** Then read
@@ -34,8 +40,11 @@ detail from sibling `references/*` on demand. Project truth: `AGENTS.md`. Engine
 
 ## 3. Outputs
 
-- Vault writes are always `status: proposed` + `managed_by: pipeline`: lessons / concepts / topics /
+- Normal-ingest vault writes are always `status: proposed` + `managed_by: pipeline`: lessons / concepts / topics /
   comparisons / synthesis / `sources/<src>.md` / `overview.md`.
+- Adoption exception: `adopt-vault --apply` adds only a deterministic canonical `sources/<src>.md` with
+  `format: legacy-vault`, `status: published`, plus immutable evidence/state; it never automatically rewrites
+  existing knowledge pages.
 - Derived files (`_registry.yaml` / `index.generated.md`) are **not written by this skill** — the finishing
   CLI rebuilds them. **`aliases.md` is retired** (B2): English aliases live only in the concept page's
   `aliases:` frontmatter (Obsidian reads them natively for search/autocomplete).
@@ -54,10 +63,13 @@ detail from sibling `references/*` on demand. Project truth: `AGENTS.md`. Engine
   evidence model), `arbitration/{queue,decisions,audit}.json`, `windows.jsonl`,
   `workorder.yaml`, hard-page PNGs, `digest.md` (cross-window rolling digest with a `## RESUME` block).
 - `ingest_progress` (per-window accounting, machine state). Rollback snapshots in `pipeline-workspace/snapshots/`.
+- Adoption branch only: `pipeline-workspace/adoptions/<src>/manifest.json` + verbatim page bytes under `files/`,
+  one canonical source page and one `adoption_evidence` artifact; no staging/workorder/window ledgers.
 
 ## 6. CLI commands (orchestration order)
 
 ```text
+legacy vault (zero LLM)  adopt-vault --source <src> --title <title> --domain <domain> --baseline-archive <archive> --baseline-sha256 <sha256> [--apply]
 preprocess + auto-arbitration  init-vault → add-source → profile → source-convert → source-audit →[ arbitration-status → if pending: agent arbitrates queue → arbitration-apply ]→ windows → workorder
 start / per-window (LLM)  ingest-start → read chapters.json (build whole-book understanding) → write per-chapter content-routing table into digest (advisory; references/content-routing.md)
                           →[ in chapter order: window-start → show-window → write pages per routing orientation (read hard-page source images as evidence; re-express natively — never embed them; deviations logged) → window-done --writes ]×N
@@ -65,6 +77,16 @@ synthesis (LLM)           phase E: update overview + build topic/comparison/synt
 finish (zero LLM)         ingest-done → lint
 incremental reopen        reopen → ingest-start →[ per-window backfill ]→ ingest-done → lint
 ```
+
+> **legacy-vault adoption:** run the command first without `--apply`; this is a strict byte-zero-write dry-run
+> that proves the pre-adoption ZIP and live adoptable-page set/bytes match. Legacy `wiki_gate` content debt is
+> warning-only here—the hard stop is limited to safety/readability/published status and archive/evidence/source/
+> state/ledger integrity. After explicit review, rerun with `--apply`. It takes the vault lock, writes immutable
+> evidence + the canonical source page, rebuilds derived artifacts, and only then records `legacy-vault` as
+> `adopted/published`, with all three ingest ledgers at zero. A fully verified exact repeat is a whole-tree byte
+> no-op. Later live-page evolution only reports `post-adoption-live-drift`; it never rewrites the historical
+> manifest/evidence or fails adoption. Archive, evidence, source-page, adoption metadata or state drift still
+> fails closed. Use `vault-lint` / `graph-lint` afterward to pay down the warning-only legacy content debt.
 
 > **Backend selection / dual-audit / reading windows:** `source-convert` defaults to `--backend auto` —
 > Markdown / born-digital PDF take the lightweight PyMuPDF path; scanned / low-text PDF, DOCX / PPTX take
@@ -125,5 +147,10 @@ on a stale RESUME instead of emitting a half-true packet); otherwise auto-advanc
   `window-done --writes`.
 - Synthesis (phase E mandatory): overview updated (not a bare link list) + at least one topic/comparison/synthesis, all in `--writes`; otherwise `lint` reports `L7-synthesis-missing` and rolls back.
 - Finish: `lint` passes (promoted into the index), or failures land in `Review-Queue/` and the round is rolled back.
+- Adoption alternative: dry-run reports `byte-zero-write`; integrity violations must be zero, while legacy
+  `wiki_gate` content debt may remain visible as warnings. Apply rebuilds derived artifacts before recording
+  `adopted/published`, preserves existing knowledge-page bytes, and reports all three ingest-ledger counts as zero.
+  A fully verified exact rerun is a whole-tree byte no-op; later live-page drift is warning-only and leaves the
+  historical manifest/evidence unchanged, while archive/evidence/source/adoption-state drift remains a hard stop.
 - Reporting: quote the promoted count from `lint` separately; use `ingest-stats --json`
   `page_inventory.total/by_type` for the complete delivered inventory — never use `pages_estimate` as the delivery total.

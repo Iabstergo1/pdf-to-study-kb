@@ -620,6 +620,125 @@ def _seed_overview(vault) -> bool:
     return True
 
 
+def cmd_adopt_vault(args):
+    """接管既有 vault 基线。默认严格只读；--apply 才新增证据、source 台账与终态。"""
+    import concept_store
+    import locks
+    import os
+    import state_store
+    import vault_adoption
+    import wiki_gate
+
+    try:
+        plan = vault_adoption.build_plan(
+            workspace=_workspace_root(), source=args.source, title=args.title,
+            domain=args.domain, baseline_archive=Path(args.baseline_archive),
+            baseline_sha256=args.baseline_sha256,
+            lock_ttl_seconds=LOCK_TTL_SECONDS)
+    except vault_adoption.AdoptionError as exc:
+        raise SystemExit(str(exc))
+
+    print(f"[plan] adopt-vault source={args.source} pages={len(plan['pages'])} "
+          f"target=adopted/published format=legacy-vault")
+    print(f"[plan] baseline={plan['archive']} sha256={plan['archive_sha256']}")
+    print(f"[plan] evidence={plan['manifest_path']} sha256={plan['manifest_sha256']}")
+    print(f"[plan] source-page={plan['source_path']}")
+    print("[plan] rebuild=index,registry,graph,quiz,propositions; knowledge pages unchanged")
+    for page in plan["pages"]:
+        print(f"[page] {page['path']} bytes={page['size']} sha256={page['sha256']}")
+    for warning in plan["warnings"]:
+        print(f"[warning] {warning['rule']} {warning['path']}: {warning['detail']}")
+    for violation in plan["violations"]:
+        print(f"[violation] {violation['rule']} {violation['path']}: {violation['detail']}")
+    if plan["violations"]:
+        print(f"[adopt-vault] violations={len(plan['violations'])}; apply refused")
+        raise SystemExit(2)
+    if not args.apply:
+        print(f"[dry-run] violations=0 warnings={len(plan['warnings'])}; byte-zero-write; "
+              "rerun with --apply to register "
+              "adopted/published")
+        return
+
+    # 完整 verified 是严格只读 no-op；不插/删 lock row，保证重复 apply 全树字节不变。
+    if plan["evidence_verified"] and plan["source_verified"] and plan["state_verified"]:
+        print(f"[OK] adopt-vault {args.source}: adopted/published fully verified; "
+              "derived artifacts unchanged; work_orders=0 ingest_progress=0 window_reads=0")
+        return
+
+    db = _vault_state_db()
+    holder = f"adopt-vault:{args.source}:{os.getpid()}"
+    try:
+        vault_adoption.validate_output_paths(plan)
+    except vault_adoption.AdoptionError as exc:
+        raise SystemExit(str(exc))
+    state_store.init_db(db)
+    if not locks.acquire(db, scope="vault", holder=holder, pid=os.getpid()):
+        current = locks.get(db, scope="vault")
+        owner = current["holder"] if current else "unknown"
+        raise SystemExit(f"active vault lock held by {owner}")
+    try:
+        try:
+            # 消除 plan→lock 的 TOCTOU：锁内重新枚举完整页面集合并复核 ZIP/manifest/state。
+            plan = vault_adoption.build_plan(
+                workspace=_workspace_root(), source=args.source, title=args.title,
+                domain=args.domain, baseline_archive=Path(args.baseline_archive),
+                baseline_sha256=args.baseline_sha256,
+                lock_ttl_seconds=LOCK_TTL_SECONDS, allowed_lock_holder=holder)
+        except vault_adoption.AdoptionError as exc:
+            raise SystemExit(str(exc))
+        for violation in plan["violations"]:
+            print(f"[violation:post-lock] {violation['rule']} {violation['path']}: "
+                  f"{violation['detail']}")
+        if plan["violations"]:
+            raise SystemExit("post-lock adoption validation failed; no evidence/state written")
+        try:
+            evidence_created = vault_adoption.write_evidence(plan)
+            source_created = vault_adoption.write_source_page(plan)
+        except (vault_adoption.AdoptionError, OSError) as exc:
+            raise SystemExit(str(exc))
+
+        # evidence/source 可作为失败后的恢复锚点；派生层全部成功前绝不登记 published 终态。
+        vault = plan["vault"]
+        wiki_gate.write_index(vault)
+        metas = concept_store.scan_concept_pages(vault)
+        registry, errors, warnings = concept_store.build_registry(metas)
+        for warning in warnings:
+            print(f"[warn] {warning}")
+        if errors:
+            for error in errors:
+                print(f"[error] {error}", file=sys.stderr)
+            raise SystemExit("registry not written (validation changed during adopt-vault)")
+        concept_store.write_registry(vault, registry)
+        concept_store.remove_stale_aliases(vault)
+        try:
+            _data, graph_result = _rebuild_graph_artifacts(vault)
+        except GraphBuildError as exc:
+            for error in exc.args[0]:
+                print(f"[ERR] graph fail-hard: {error}")
+            raise SystemExit(2)
+        for warning in graph_result["warnings"]:
+            print(f"[warn] {warning}")
+        wiki_gate.write_quiz_index(vault)
+        props = wiki_gate.collect_propositions(vault)
+        wiki_gate.write_propositions_index(vault)
+        for duplicate in wiki_gate.duplicate_proposition_names(props):
+            print(f"[warn] 命题重名（名字即锚点，域内应唯一）：{duplicate}")
+        try:
+            state_created = state_store.adopt_source(
+                db, args.source, domain=args.domain,
+                manifest_path=str(plan["manifest_path"].resolve()),
+                manifest_sha256=plan["manifest_sha256"], lock_holder=holder)
+        except state_store.InvalidTransition as exc:
+            raise SystemExit(str(exc))
+    finally:
+        locks.release(db, scope="vault", holder=holder)
+    print(f"[OK] adopt-vault {args.source}: adopted/published; "
+          f"evidence={'created' if evidence_created else 'verified'}, "
+          f"source-page={'created' if source_created else 'verified'}, "
+          f"state={'created' if state_created else 'verified'}; "
+          "work_orders=0 ingest_progress=0 window_reads=0")
+
+
 def _overview_retract_action(cls: dict, vault) -> str:
     """撤库后 overview 的处置：'reseed'（独占本源被删 / 撤前已缺失 → 删后从模板重建 seed）或
     'keep'（shared / human / 无关且在场 → 保留不动、字节不变）。仅读，供 dry-run 与 apply 一致展示。"""
@@ -2393,6 +2512,17 @@ def main():
     pep.add_argument("--strict", action="store_true", help="任一 high/fail → 非零退出码")
     pep.add_argument("--json", default=None, help="报告输出路径（默认 staging/<src>/preflight_eval.json）")
     subparsers.add_parser("init-vault", help="建 wiki/ 脚手架 + overview/log/purpose 种子（幂等）")
+    adp = subparsers.add_parser(
+        "adopt-vault", help="接管既有 vault 基线（默认只读 dry-run；--apply 才写不可变证据与终态）")
+    adp.add_argument("--source", required=True, help="legacy vault 的 source_id")
+    adp.add_argument("--title", required=True, help="来源台账显示标题")
+    adp.add_argument("--domain", required=True, help="来源所属领域")
+    adp.add_argument("--baseline-archive", required=True, dest="baseline_archive",
+                     help="接管前基线归档路径")
+    adp.add_argument("--baseline-sha256", required=True, dest="baseline_sha256",
+                     help="基线归档的预期 SHA-256")
+    adp.add_argument("--apply", action="store_true",
+                     help="执行接管（默认仅扫描、核验并打印计划，零写入）")
     subparsers.add_parser("apply-obsidian-style",
                           help="落地学习库观感 CSS snippet + merge appearance.json（幂等，纯配置层零内容改动）")
     subparsers.add_parser("rebuild-registry", help="从概念页 frontmatter 重建 _registry.yaml（aliases.md 已废弃，别名只在概念页 frontmatter）")
@@ -2531,6 +2661,7 @@ def main():
         'preflight-eval': cmd_preflight_eval,
         'fail': cmd_fail,
         'init-vault': cmd_init_vault,
+        'adopt-vault': cmd_adopt_vault,
         'apply-obsidian-style': cmd_apply_obsidian_style,
         'rebuild-registry': cmd_rebuild_registry,
         'rebuild-graph': cmd_rebuild_graph,

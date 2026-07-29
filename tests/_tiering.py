@@ -35,6 +35,7 @@ FILE_TIERS = {
     "test_preflight_eval_cli.py": ("cli",),
     "test_resume_packet_cli.py": ("cli",),
     "test_resume_ingest_smoke.py": ("cli",),
+    "test_adopt_vault_cli.py": ("cli",),
     # ---- skill 协议 / 文档契约 ----
     "test_command_docs.py": ("skill",),
     "test_ingest_fidelity_contract.py": ("skill",),

@@ -104,12 +104,29 @@ python scripts/pipeline.py init-vault
 - **确认成功**：`wiki/overview.md` 存在。
 - **常见失败**：无（幂等，已存在不覆盖）。
 
+### 第 0A 步（仅已有 Vault）：接管不可变基线
+
+这是**替代第 0 步初始化与普通 ingest 历史**的分支：只用于目标仓库的 `wiki/` 已有完整知识页、希望把它纳入流水线治理的场景；不要为了接管再对它运行 `init-vault`。准备一份基线归档及其**事先记录的 SHA-256**，先运行默认 dry-run：
+
+```powershell
+python scripts/pipeline.py adopt-vault --source legacy-kb --title "既有知识库基线" --domain general `
+  --baseline-archive "C:\backups\wiki-baseline.zip" --baseline-sha256 <64位SHA256>
+```
+
+- **默认行为**：严格只读、byte-zero-write；打印逐页大小/哈希、warning/violation 和拟写位置。首次接管只 hard-block 安全/可读性/published status、ZIP↔live 页面集合与字节、锁、证据/source/state/台账完整性；现行 `wiki_gate` 的 legacy 内容债全部 warning-only，留待正式门禁治理。
+- **确认后执行**：原命令末尾加 `--apply`。它在 vault 锁内新增 `pipeline-workspace/adoptions/legacy-kb/manifest.json` 与 `files/` 下的逐页原始字节证据、新增 canonical `wiki/sources/legacy-kb.md`，派生层全部成功后才登记 `format=legacy-vault`、`adopted/published`。
+- **明确不做**：不自动改写既有知识页，不创建 `work_orders`，不写 `ingest_progress` 或 `window_reads`（这三类账本均为 0）。
+- **自动收尾**：确认接管终态后，从 published 页重建 index、registry、graph、quiz、propositions 派生层。
+- **重复与漂移**：完全验证的精确重跑是全树 byte no-op。登记后 live 知识页允许继续演进，只报 `post-adoption-live-drift` warning，历史 manifest/evidence 保持不变；归档、证据、canonical source、接管元数据或状态漂移仍 fail-closed。接管不代表内容过门禁，随后用 `vault-lint` / `graph-lint` 清偿 warning。
+
+该分支完成后，不要再为同一基线执行下面的“放入来源 → ingest”步骤；以后若要新增外部文档，再按常规流程注册新的 source。
+
 ### 第 1 步（可选但推荐）：填学习目标
 
 - **目的**：让产出贴合你的需求。
 - **做法**：编辑 **`wiki/_meta/purpose.md`**，写下学习目标、当前重点、偏好讲解风格
   （应试 vs 研究、偏直觉 vs 偏推导、哪些章节是重点）。
-- **说明**：这是整个 vault 里**唯一需要你手写的文件**；`ingest` 会读取它。填不填都能跑，填了产出更准。
+- **说明**：这是 `init-vault` 新库流程里**唯一需要你手写的文件**；`ingest` 会读取它。填不填都能跑，填了产出更准。
 
 ### 第 2 步：放入来源文件
 
@@ -197,7 +214,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 ### 5.3 底层 CLI 操作（高级排障 / 手动重跑）
 
 > 所有 skill 背后都是 `python scripts/pipeline.py <command>`。下面按生命周期分组，标注**必填/可选参数**。
-> 共 **46 个**子命令（完整实现映射见开发文档 §3；含 `vault-lint` 全库渲染安全健康门禁、`lint --source kb-save --session <run_id>` 会话发布路径与 `retract-source` 证据先行撤库）。
+> 共 **47 个**子命令（完整实现映射见开发文档 §3；含 `adopt-vault` 既有库基线接管、`vault-lint` 全库渲染安全健康门禁、`lint --source kb-save --session <run_id>` 会话发布路径与 `retract-source` 证据先行撤库）。
 
 **状态与维护：**
 
@@ -206,6 +223,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | `status` | 看每源阶段/状态 + 锁（`[STALE]` 标崩溃锁） | — | — | `python scripts/pipeline.py status` |
 | `next` | 看每源下一步动作 | — | — | `python scripts/pipeline.py next` |
 | `init-vault` | 建 `wiki/` 脚手架（幂等） | — | — | `python scripts/pipeline.py init-vault` |
+| `adopt-vault` | 接管既有 vault；默认 byte-zero-write dry-run，legacy 内容门禁债 warning-only，安全/ZIP/证据/source/state/台账完整性 hard-block；`--apply` 在锁内落证据并重建派生层，成功后才登记 `adopted/published`；精确重跑 byte no-op，接管后 live 演进只报 drift warning，历史证据/状态漂移 fail-closed | `--source --title --domain --baseline-archive --baseline-sha256` | `--apply` | `... adopt-vault --source legacy-kb --title "既有库" --domain general --baseline-archive "C:\backups\wiki.zip" --baseline-sha256 <SHA256>` |
 | `unlock` | 回收 stale vault 锁（活锁拒绝） | — | `--ttl 1800` | `python scripts/pipeline.py unlock` |
 | `fail` | 把崩溃残留的 running 阶段标 failed | `--source --stage --error` | — | `... fail --source X --stage converted --error "原因"` |
 | `rebuild-registry` | 从概念页重建 `_registry.yaml`（aliases.md 已退休，残留自动清理） | — | — | `... rebuild-registry` |
@@ -403,7 +421,7 @@ python scripts/pipeline.py source-convert --source micro-econ
 | `wiki/topics/*.md` | 主题综合页（概念之上的导航分类层） | 否 | overview → topic → concept |
 | `wiki/comparisons/*.md` | 横向对比页 | 否 | 主题内对比差异维度 |
 | `wiki/synthesis/*.md` | 深度综合页 | 否 | — |
-| `wiki/sources/<src>.md` | 每来源一页摘要（"来过哪些书"台账） | 否 | — |
+| `wiki/sources/<src>.md` | 每来源一页摘要（"来过哪些书"台账）；`adopt-vault` 的 apply 分支确定性新增 canonical source 页 | 否 | — |
 | `wiki/assets/<src>/p*.png` | 难页（公式/矢量图/表/标题）整页截图 | 否（确定性渲染） | 仅供 LLM 阅读，**published 正文禁嵌源图**（D-1） |
 | `wiki/concepts/_registry.yaml` | 概念派生索引 | **否**（手改会被覆盖） | 收尾 CLI 重建 |
 | `wiki/index.generated.md` | 内容目录（只收 published） | **否**（同上） | — |
@@ -415,6 +433,7 @@ python scripts/pipeline.py source-convert --source micro-econ
 | `wiki/_meta/purpose.md` | **你手写**的学习目标 | **是**（唯一你维护的输入文件） | ingest 读取 |
 | `wiki/log.md` | 操作日志（append-only） | 否 | 回溯 |
 | `pipeline-workspace/staging/<src>/` | 预处理中间产物（source.md/blocks/windows/workorder/assets...） | 否 | ingest 读取；可清理后重跑预处理 |
+| `pipeline-workspace/adoptions/<src>/` | 既有 vault 接管的不可变 `manifest.json` + `files/` 逐页原始字节证据 | **否**（改动会触发漂移拒绝） | `adopt-vault` 重跑时逐字核验 |
 | `pipeline-workspace/state/study-kb.sqlite` | 状态机数据库 | **否**（机器状态真值） | status/next 读取 |
 
 > **重要提醒**：`published` ≠ 已核对。它只代表通过了**结构门禁**（断链/孤儿/重复 canonical_id/源图禁嵌正文/
@@ -486,9 +505,14 @@ python -m pip install -r requirements.txt
 python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yaml.__version__)"
 python scripts/install_mineru.py            # 可选：PDF 严格验收 / 扫描件 / DOCX / PPTX
 
-# ── 2. 建空库 + 填学习目标 ──
+# ── 2. 新建空库 + 填学习目标（已有 vault 则跳过） ──
 python scripts/pipeline.py init-vault
 #   然后编辑 wiki\_meta\purpose.md（唯一需你手写的文件）
+
+# ── 2A. 已有 vault 的替代分支（不运行上面的 init-vault）：先 dry-run，核对后原命令加 --apply ──
+python scripts/pipeline.py adopt-vault --source legacy-kb --title "既有知识库基线" --domain general `
+  --baseline-archive "C:\backups\wiki-baseline.zip" --baseline-sha256 <64位SHA256>
+#   成功即 adopted/published；不要为同一基线继续执行第 3/4 步
 
 # ── 3. 放入来源（含空格路径用双引号） ──
 New-Item -ItemType Directory -Force -Path "books\game-theory\input" | Out-Null

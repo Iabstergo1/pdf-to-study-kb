@@ -2,6 +2,8 @@ import sqlite3
 from pathlib import Path
 import importlib.util
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -59,6 +61,77 @@ def test_register_source_starts_at_registered_done(tmp_path):
     state_store.register_source(db, "s1", domain="game-theory", fmt="pdf")
     r = state_store.get_source(db, "s1")
     assert (r["current_stage"], r["current_status"]) == ("registered", "done")
+
+
+def test_adopt_source_is_atomic_terminal_and_idempotent_without_ingest_ledgers(tmp_path):
+    db = tmp_path / "state.sqlite"
+    state_store.init_db(db)
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text('{"version": 1}\n', encoding="utf-8")
+
+    created = state_store.adopt_source(
+        db, "legacy", domain="career", manifest_path=str(manifest), manifest_sha256="a" * 64)
+    assert created is True
+    row = state_store.get_source(db, "legacy")
+    assert (row["current_stage"], row["current_status"], row["format"]) == \
+           ("adopted", "published", "legacy-vault")
+
+    assert state_store.adopt_source(
+        db, "legacy", domain="career", manifest_path=str(manifest), manifest_sha256="a" * 64
+    ) is False
+    con = state_store.connect(db)
+    try:
+        assert con.execute(
+            "SELECT COUNT(*) FROM source_stage_runs WHERE source_id='legacy'").fetchone()[0] == 1
+        assert con.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE source_id='legacy'").fetchone()[0] == 1
+        for table in ("work_orders", "ingest_progress", "window_reads"):
+            assert con.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE source_id='legacy'").fetchone()[0] == 0
+    finally:
+        con.close()
+
+
+def test_adopt_source_rejects_conflicting_existing_source(tmp_path):
+    db = tmp_path / "state.sqlite"
+    state_store.init_db(db)
+    state_store.register_source(db, "legacy", domain="other", fmt="md")
+    with pytest.raises(state_store.InvalidTransition):
+        state_store.adopt_source(
+            db, "legacy", domain="career", manifest_path="manifest.json",
+            manifest_sha256="a" * 64)
+    row = state_store.get_source(db, "legacy")
+    assert (row["current_stage"], row["current_status"], row["format"]) == \
+           ("registered", "done", "md")
+
+
+def test_adopt_source_allows_explicit_same_holder_lock_only(tmp_path):
+    def lock(db, holder):
+        con = state_store.connect(db)
+        try:
+            con.execute(
+                "INSERT INTO source_locks(scope,holder,pid,started_at,heartbeat_at) "
+                "VALUES ('vault',?,?,?,?)",
+                (holder, 1, "2026-07-28T00:00:00+00:00", "2026-07-28T00:00:00+00:00"))
+            con.commit()
+        finally:
+            con.close()
+
+    db = tmp_path / "same.sqlite"
+    state_store.init_db(db)
+    lock(db, "adopter")
+    assert state_store.adopt_source(
+        db, "legacy", domain="career", manifest_path="manifest.json",
+        manifest_sha256="a" * 64, lock_holder="adopter") is True
+
+    db2 = tmp_path / "other.sqlite"
+    state_store.init_db(db2)
+    lock(db2, "other")
+    with pytest.raises(state_store.InvalidTransition, match="active vault lock"):
+        state_store.adopt_source(
+            db2, "legacy", domain="career", manifest_path="manifest.json",
+            manifest_sha256="a" * 64, lock_holder="adopter")
+    assert state_store.get_source(db2, "legacy") is None
 
 
 def test_next_action_from_registered_is_profile(tmp_path):

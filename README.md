@@ -96,13 +96,25 @@ python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yam
 
 ## 💬 如何使用（端到端工作流）
 
-打开项目后**全程用自然语言对话**，模型按意图自动调用对应 skill（也可手动触发：Claude Code 用 `/<skill>` 斜杠命令；Codex 用 `/skills` 浏览选择或 `$skill-name` 提及）。你**无需记命令、也无需自己撰写笔记内容**——内容由模型在对话中生成。典型一本书的流程只有三步：
+打开项目后**全程用自然语言对话**，模型按意图自动调用对应 skill（也可手动触发：Claude Code 用 `/<skill>` 斜杠命令；Codex 用 `/skills` 浏览选择或 `$skill-name` 提及）。你**无需记命令、也无需自己撰写笔记内容**——常规新来源的内容由模型在对话中生成。新建空库后摄取一本书的典型流程只有三步；如果已有一座成形的 Obsidian vault，可改走下面的零 LLM 基线接管分支。
 
 ### ① 填学习目标 —— 唯一需要你手写的输入（可选但推荐）
 
 第一次对话前，先初始化 vault 脚手架（若 agent 尚未自动建库，可直接说一句“初始化知识库”或手动跑 `python scripts/pipeline.py init-vault`），然后编辑 **`wiki/_meta/purpose.md`**：写下你的**学习目标、当前重点、偏好的讲解风格**（如应试导向 vs 研究导向、偏直觉 vs 偏推导、哪些章节是重点）。
 
-这是 `init-vault` 落下的空模板，也是**整个 vault 里唯一为你准备、需要你手写的文件**；`ingest` 在 [输入阶段读取它](.claude/skills/ingest/SKILL.md)，作为**贯穿写页与综合层的全局写作偏好**（中断续跑时每个新会话会重新读取）。其余所有内容页都由模型生成，你都不用碰——填不填都能跑，但填了产出更贴合你的需求。
+这是 `init-vault` 落下的空模板，也是**新库流程里唯一为你准备、需要你手写的文件**；`ingest` 在 [输入阶段读取它](.claude/skills/ingest/SKILL.md)，作为**贯穿写页与综合层的全局写作偏好**（中断续跑时每个新会话会重新读取）。其余新库内容页都由模型生成，你都不用碰——填不填都能跑，但填了产出更贴合你的需求。
+
+### 可选分支：已有 Vault 的不可变基线接管（替代①–②）
+
+若 `wiki/` 已经包含完整的 legacy 知识页，不必先为接管清偿现行 `wiki_gate` 内容债，也不要运行 `init-vault` 或补造普通 ingest 历史。先准备一份接管前 ZIP 归档及其**事先记录的 SHA-256**，运行下面的默认 dry-run；核对计划、逐页哈希与 warning 后，原命令加 `--apply` 才会写入：
+
+```powershell
+python scripts/pipeline.py adopt-vault --source <src> --title "<title>" --domain <domain> `
+  --baseline-archive "<baseline.zip>" --baseline-sha256 <64位SHA256>
+# 核对 violations=0 后，再运行同一命令并在末尾加 --apply
+```
+
+`adopt-vault` 默认 **byte-zero-write**。首次接管只对安全/可读性/published status、ZIP↔live 知识页集合与字节、锁及证据/source/state/三类 ingest 台账完整性做 hard-block；现行 `wiki_gate` 发现的 legacy 内容债全部列为 warning-only，接管本身不是质量证书。`--apply` 在 vault 锁内新增不可变 manifest/逐页原始字节证据与 canonical `wiki/sources/<src>.md`，重建 index、registry、graph、quiz、propositions，全部成功后才登记 `format=legacy-vault`、`adopted/published`；它**不会自动改写既有知识页**，也不会伪造 `work_orders`、`ingest_progress` 或 `window_reads`。完全验证的精确重跑是全树 byte no-op；接管后 live 知识页的正常演进只报 `post-adoption-live-drift` warning，历史 manifest/evidence 不变，不会因此 fail-closed。归档、证据、source 页、接管元数据或状态漂移仍 fail-closed；内容债请随后用正式 `vault-lint` / `graph-lint` 治理。
 
 ### ② 一句话入库（ingest）
 
@@ -194,8 +206,9 @@ pdf-to-study-kb/
 ├── README.md                 # 本文件
 ├── requirements.txt          # 基础依赖 PyMuPDF + PyYAML + pytest（生产格式另需 MinerU，见末尾可选段）
 ├── scripts/
-│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（46 子命令，全部业务逻辑在此）
+│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（47 子命令，全部业务逻辑在此）
 │   ├── state_store.py / locks.py                # 业务 SQLite 状态机 / 单-ingest 并发锁
+│   ├── vault_adoption.py                         # 既有 vault 只读规划 / 不可变证据 / 漂移拒绝
 │   ├── source_profile.py / source_convert.py / source_artifacts.py / chaptering.py   # L1 解析 + L2 结构契约
 │   ├── source_backends/      # 后端：pymupdf（fast path）/ markdown / 可选 mineru（结构化）
 │   ├── windowing.py / workorder.py / preflight_eval.py   # L3 切窗 / 事务契约 / L4 验收门
@@ -241,20 +254,21 @@ pdf-to-study-kb/
 
 所有 skill 背后调用的都是 `python scripts/pipeline.py <command>`（零 LLM、可独立运行，**全部业务逻辑与安全守卫都在这里**）。日常对话无需手动输入；该接口面向**精细控制、问题排查、手动重跑某一阶段、无人值守脚本化**等高级场景。
 
-命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 46 个子命令（以 `python scripts/pipeline.py --help` 为准）：
+命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 47 个子命令（以 `python scripts/pipeline.py --help` 为准）：
 
 <details>
 <summary><b>展开：完整 CLI 命令参考</b></summary>
 
 ### 状态与维护
 
-> **为什么有这组**：ingest 是可中断的长任务，且同一 vault 受并发锁保护。这组命令让你不依赖 LLM 就能"看清现状 + 崩溃自救"——`status`/`next` 回答"每个来源走到哪一步、锁在谁手里、下一步该做什么"；`fail` 把崩溃残留的 `running` 阶段标记 `failed` 以便重跑；`unlock` 受控回收超时的 stale 锁（活锁拒绝，防误删）；`rebuild-registry` 从概念页 frontmatter 重建派生索引；`rebuild-graph` 从 published 图谱重建 graph-data + 离线 HTML 力导向图（派生阅读层，fail-hard）、`graph-lint` 校验图谱产物；`rebuild-quiz` 从 published 页的 `[!question]` 重建自测题库索引（复习入口，派生阅读层）；`rebuild-propositions` 从 published 页的具名命题（`**命题（名）**：…`）重建命题总表（全库结论清单，名字即锚点）；`init-vault` 幂等搭起空脚手架。
+> **为什么有这组**：ingest 是可中断的长任务，且同一 vault 受并发锁保护。这组命令让你不依赖 LLM 就能"看清现状 + 崩溃自救"——`status`/`next` 回答"每个来源走到哪一步、锁在谁手里、下一步该做什么"；`fail` 把崩溃残留的 `running` 阶段标记 `failed` 以便重跑；`unlock` 受控回收超时的 stale 锁（活锁拒绝，防误删）；`adopt-vault` 以不可变基线接管既有库；`rebuild-registry` 从概念页 frontmatter 重建派生索引；`rebuild-graph` 从 published 图谱重建 graph-data + 离线 HTML 力导向图（派生阅读层，fail-hard）、`graph-lint` 校验图谱产物；`rebuild-quiz` 从 published 页的 `[!question]` 重建自测题库索引（复习入口，派生阅读层）；`rebuild-propositions` 从 published 页的具名命题（`**命题（名）**：…`）重建命题总表（全库结论清单，名字即锚点）；`init-vault` 幂等搭起空脚手架。
 
 | 命令 | 作用 | 关键参数 |
 |------|------|------|
 | `status` | 列出每个 source 的阶段/状态 + vault 锁持有者（`[STALE]` 标记崩溃残留锁） | — |
 | `next` | 列出每个 source 的**下一步人工动作** + stale 锁清理建议 | — |
 | `init-vault` | 建 `wiki/` 脚手架 + 种子文件（幂等，不覆盖） | — |
+| `adopt-vault` | 接管既有 vault 基线：默认零写 dry-run；legacy `wiki_gate` 内容债 warning-only，安全/ZIP/证据/source/state/台账完整性才 hard-block；`--apply` 在锁内落不可变证据、重建派生层，成功后登记 `legacy-vault` 的 `adopted/published`，既有知识页不改写、三类 ingest 台账为零；精确重跑全树 byte no-op，接管后 live 演进只报 drift warning，历史归档/证据/状态漂移仍 fail-closed | `--source --title --domain --baseline-archive --baseline-sha256 [--apply]` |
 | `unlock` | 受控回收 stale vault 锁；活锁拒绝 | `--ttl 1800` |
 | `fail` | 把崩溃残留的 `running` 阶段标记 `failed` | `--source --stage --error` |
 | `rebuild-registry` | 从概念页 frontmatter 重建 `_registry.yaml`（`aliases.md` 已退休，别名只在概念页 frontmatter；残留会被主动清理） | — |

@@ -9,7 +9,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
   source_id      TEXT PRIMARY KEY,
   domain         TEXT NOT NULL,
-  format         TEXT NOT NULL,            -- pdf|docx|pptx|md
+  format         TEXT NOT NULL,            -- pdf|docx|pptx|md|legacy-vault
   added_at       TEXT NOT NULL,
   current_stage  TEXT NOT NULL,            -- registered..lint
   current_status TEXT NOT NULL             -- pending|running|done|failed|proposed|published
@@ -151,6 +151,97 @@ def get_source(db_path, source_id: str):
     con = connect(db_path)
     try:
         return con.execute("SELECT * FROM sources WHERE source_id=?", (source_id,)).fetchone()
+    finally:
+        con.close()
+
+
+def adopt_source(db_path, source_id: str, *, domain: str,
+                 manifest_path: str, manifest_sha256: str,
+                 lock_holder: str | None = None) -> bool:
+    """原子登记一个已存在知识库的不可变基线，返回是否首次登记。
+
+    legacy-vault 接管不是外部文档 ingest：它直接落在 ``adopted/published``，只登记
+    一条完成的 adoption stage 与一条证据 manifest artifact，且严禁伪造 work order、
+    processing window 或读窗台账。完全相同的重复调用幂等返回 False；任何部分状态、
+    参数漂移或 ingest 台账残留都 fail-closed。
+    """
+    init_db(db_path)
+    con = connect(db_path)
+    now = _now()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        lock = con.execute("SELECT holder FROM source_locks WHERE scope='vault'").fetchone()
+        if lock is not None and lock["holder"] != lock_holder:
+            raise InvalidTransition(f"active vault lock held by {lock['holder']}")
+
+        ledger_counts = {
+            table: con.execute(
+                f"SELECT COUNT(*) AS n FROM {table} WHERE source_id=?", (source_id,)
+            ).fetchone()["n"]
+            for table in ("work_orders", "ingest_progress", "window_reads")
+        }
+        if any(ledger_counts.values()):
+            raise InvalidTransition(
+                f"adopted source {source_id!r} must have zero ingest ledgers: {ledger_counts}")
+
+        source = con.execute("SELECT * FROM sources WHERE source_id=?", (source_id,)).fetchone()
+        stages = con.execute(
+            "SELECT stage,status,input_hash,output_hash FROM source_stage_runs "
+            "WHERE source_id=? ORDER BY id",
+            (source_id,),
+        ).fetchall()
+        artifacts = con.execute(
+            "SELECT kind,path,sha256 FROM artifacts WHERE source_id=? ORDER BY id", (source_id,)
+        ).fetchall()
+        expected_source = (domain, "legacy-vault", "adopted", "published")
+        expected_stage = ("adopted", "done", manifest_sha256, manifest_sha256)
+        expected_artifact = ("adoption_evidence", manifest_path, manifest_sha256)
+
+        if source is not None:
+            actual_source = (source["domain"], source["format"],
+                             source["current_stage"], source["current_status"])
+            actual_stages = [(r["stage"], r["status"], r["input_hash"], r["output_hash"])
+                             for r in stages]
+            actual_artifacts = [(r["kind"], r["path"], r["sha256"]) for r in artifacts]
+            if (actual_source == expected_source and actual_stages == [expected_stage]
+                    and actual_artifacts == [expected_artifact]):
+                con.commit()
+                return False
+            raise InvalidTransition(
+                f"conflicting existing source {source_id!r}; expected adopted/published "
+                "legacy-vault with the same immutable manifest")
+
+        if stages or artifacts:
+            raise InvalidTransition(
+                f"orphan adoption state exists for unknown source {source_id!r}")
+
+        con.execute(
+            "INSERT INTO sources(source_id,domain,format,added_at,current_stage,current_status) "
+            "VALUES (?,?,?,?,?,?)",
+            (source_id, domain, "legacy-vault", now, "adopted", "published"),
+        )
+        con.execute(
+            "INSERT INTO source_stage_runs(source_id,stage,status,started_at,finished_at,"
+            "input_hash,output_hash,error) VALUES (?,?,?,?,?,?,?,NULL)",
+            (source_id, "adopted", "done", now, now, manifest_sha256, manifest_sha256),
+        )
+        con.execute(
+            "INSERT INTO artifacts(source_id,kind,path,sha256,created_at) VALUES (?,?,?,?,?)",
+            (source_id, "adoption_evidence", manifest_path, manifest_sha256, now),
+        )
+        # 事务内再断言一次，防未来维护误把 adoption 接到 ingest 台账写入路径。
+        for table in ("work_orders", "ingest_progress", "window_reads"):
+            n = con.execute(
+                f"SELECT COUNT(*) AS n FROM {table} WHERE source_id=?", (source_id,)
+            ).fetchone()["n"]
+            if n:
+                raise InvalidTransition(
+                    f"internal adoption invariant failed: {table} contains {n} row(s)")
+        con.commit()
+        return True
+    except Exception:
+        con.rollback()
+        raise
     finally:
         con.close()
 
