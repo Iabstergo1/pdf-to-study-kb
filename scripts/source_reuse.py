@@ -1,7 +1,8 @@
-"""已发布来源的跨 vault 确定性复用：只读核验 + 不可变映射证据。
+"""已发布来源的跨 vault 确定性复用与受控证据重封。
 
 本旁路不重新摄取 PDF，也不改写目标知识页。默认计划零写；apply 只新增不可变证据、
 canonical source 页和专用 reused/published 终态，派生层由 pipeline 在登记终态前重建。
+既存 v1→v2 的 topic-only 变化只能走显式 reseal；普通 reuse 仍严格拒绝冻结后的 mapping 漂移。
 """
 from __future__ import annotations
 
@@ -671,7 +672,8 @@ def build_plan(*, workspace: Path, source: str, title: str, domain: str,
                pdf_path: Path, pdf_sha256: str, origin_root: Path,
                origin_source: str, mapping_path: Path, lock_ttl_seconds: int = 1800,
                allowed_lock_holder: str | None = None,
-               expect_concepts: int | None = None, expect_topics: int | None = None) -> dict:
+               expect_concepts: int | None = None, expect_topics: int | None = None,
+               _candidate_only: bool = False) -> dict:
     """只读构建跨 vault 复用计划；不创建目录、数据库、报告或锁。"""
     if not _SOURCE_ID.fullmatch(source) or not _SOURCE_ID.fullmatch(origin_source):
         raise ReuseError("source ids must use only ASCII letters/digits/./_/-")
@@ -754,7 +756,7 @@ def build_plan(*, workspace: Path, source: str, title: str, domain: str,
     # mapping.json 里并由 mapping_sha256 冻结，所以这里不必也不应该跟着涨。
     if mapping["topic_targets"]:
         current_manifest["topic_target_pages"] = topic_target_pages
-    if stored is None:
+    if stored is None or _candidate_only:
         manifest_data = current_manifest
         manifest_bytes = _json_bytes(manifest_data)
     else:
@@ -808,6 +810,12 @@ def build_plan(*, workspace: Path, source: str, title: str, domain: str,
         "manifest_sha256": manifest_sha, "source_path": source_path, "db": db,
     }
     plan["source_bytes"] = _source_page_bytes(plan)
+
+    # reseal-source 只借这条内部路径生成“按当前外部事实计算的新候选”，旧证据、旧 source
+    # 页与旧状态的完整校验由 build_reseal_plan 单独执行。该开关没有 CLI 表面，普通
+    # reuse-source 永远走下面原有的不可变证据/状态校验，不能意外升级证据。
+    if _candidate_only:
+        return plan
 
     evidence_errors = _validate_evidence(evidence_dir, manifest_bytes, manifest_data)
     if evidence_errors:
@@ -958,3 +966,385 @@ def write_source_page(plan: dict) -> bool:
         return True
     finally:
         temp.unlink(missing_ok=True)
+
+
+# ── 已冻结 reuse evidence 的受控重封（mapping v1 → v2）────────────────────
+
+_RESEAL_IMMUTABLE_MANIFEST_FIELDS = {
+    "source_id", "domain", "title", "format", "version", "pdf_path", "pdf_sha256",
+    "origin_root", "origin_source", "origin_source_page", "origin_concepts",
+    "origin_topics", "origin_state_sha256",
+}
+
+
+def _reseal_operation_id(source: str, old_manifest_sha256: str,
+                         new_mapping_sha256: str) -> str:
+    identity = _json_bytes({
+        "new_mapping_sha256": new_mapping_sha256,
+        "old_manifest_sha256": old_manifest_sha256,
+        "source_id": source,
+    })
+    return hashlib.sha256(identity).hexdigest()[:24]
+
+
+def _reseal_transition(plan: dict) -> dict:
+    return {
+        "active_evidence": f"pipeline-workspace/reuses/{plan['source']}",
+        "new_manifest_sha256": plan["manifest_sha256"],
+        "new_mapping_sha256": plan["mapping_sha256"],
+        "new_source_sha256": hashlib.sha256(plan["source_bytes"]).hexdigest(),
+        "old_manifest_sha256": plan["old_manifest_sha256"],
+        "old_mapping_sha256": plan["old_manifest_data"]["mapping_sha256"],
+        "old_source_sha256": hashlib.sha256(plan["old_source_bytes"]).hexdigest(),
+        "operation_id": plan["operation_id"],
+        "source_id": plan["source"],
+        "source_page": f"wiki/sources/{plan['source']}.md",
+        "version": 1,
+    }
+
+
+def _classify_reseal_evidence(path: Path, plan: dict) -> str:
+    """Return old/new/missing, rejecting any third or corrupt evidence generation."""
+    if not path.exists():
+        return "missing"
+    stored = _load_stored_manifest(path)
+    if stored is None:  # pragma: no cover - exists() above, kept as a defensive guard
+        return "missing"
+    data, raw = stored
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest == plan["old_manifest_sha256"]:
+        errors = _validate_evidence(path, plan["old_manifest_bytes"],
+                                    plan["old_manifest_data"])
+        kind = "old"
+    elif digest == plan["manifest_sha256"]:
+        errors = _validate_evidence(path, plan["manifest_bytes"], plan["manifest_data"])
+        kind = "new"
+    else:
+        raise ReuseError(
+            f"reseal evidence generation is neither old nor new at {path}: {digest}")
+    if errors:
+        raise ReuseError(errors[0])
+    return kind
+
+
+def _classify_reseal_source(path: Path, plan: dict) -> str:
+    if not path.is_file() or path.is_symlink() or _resolved_inside(path, plan["vault"]) is None:
+        raise ReuseError("reseal source page is missing, redirected, or not a regular file")
+    raw = path.read_bytes()
+    if raw == plan["old_source_bytes"]:
+        return "old"
+    if raw == plan["source_bytes"]:
+        return "new"
+    raise ReuseError("reuse source page was hand-edited; refusing reseal overwrite")
+
+
+def _reseal_state_phase(snapshot: dict | None, plan: dict) -> str:
+    if snapshot is None or snapshot.get("schema_missing") or snapshot.get("source") is None:
+        raise ReuseError("reseal-state-conflict: exact existing reused/published state is required")
+    if any(snapshot["ledgers"].values()):
+        raise ReuseError("reseal-state-conflict: reused source must keep all ingest ledgers empty")
+    source = snapshot["source"]
+    source_tuple = (source["domain"], source["format"], source["current_stage"],
+                    source["current_status"])
+    stages = [(r["stage"], r["status"], r["input_hash"], r["output_hash"])
+              for r in snapshot["stages"]]
+    artifacts = [(r["kind"], r["path"], r["sha256"]) for r in snapshot["artifacts"]]
+    evidence_path = str(plan["manifest_path"].resolve())
+    old_rows = (["reused", "done", plan["old_manifest_sha256"],
+                 plan["old_manifest_sha256"]],
+                ["reuse_evidence", evidence_path, plan["old_manifest_sha256"]])
+    new_rows = (["reused", "done", plan["manifest_sha256"], plan["manifest_sha256"]],
+                ["reuse_evidence", evidence_path, plan["manifest_sha256"]])
+    actual_stage = list(stages[0]) if len(stages) == 1 else None
+    actual_artifact = list(artifacts[0]) if len(artifacts) == 1 else None
+    base = (plan["domain"], "external-vault-reuse", "reused")
+    if source_tuple == (*base, "published") and (actual_stage, actual_artifact) == old_rows:
+        return "old"
+    if source_tuple == (*base, "running") and (actual_stage, actual_artifact) == old_rows:
+        return "running"
+    if source_tuple == (*base, "published") and (actual_stage, actual_artifact) == new_rows:
+        return "complete"
+    raise ReuseError("reseal-state-conflict: state rows are not an exact old/running/new reseal state")
+
+
+def _validate_reseal_archive(plan: dict, operation_dir: Path | None = None) -> dict:
+    operation_dir = Path(operation_dir or plan["operation_dir"])
+    if not operation_dir.exists():
+        return {"exists": False, "old_evidence": False, "new_evidence": False}
+    if not operation_dir.is_dir() or operation_dir.is_symlink():
+        raise ReuseError("reseal archive path is not a direct regular directory")
+    _assert_direct_contained(operation_dir, operation_dir.parent, "reseal operation archive")
+    expected_names = {"transition.json", "old-source.md", "new-source.md",
+                      "old-evidence", "new-evidence"}
+    actual_names = {p.name for p in operation_dir.iterdir()}
+    if not {"transition.json", "old-source.md", "new-source.md"} <= actual_names \
+            or actual_names - expected_names:
+        raise ReuseError("reseal archive collision: unexpected or missing operation files")
+    transition = operation_dir / "transition.json"
+    if (not transition.is_file() or transition.is_symlink()
+            or transition.read_bytes() != _json_bytes(_reseal_transition(plan))):
+        raise ReuseError("reseal archive collision: transition manifest differs")
+    for name, expected in (("old-source.md", plan["old_source_bytes"]),
+                           ("new-source.md", plan["source_bytes"])):
+        path = operation_dir / name
+        if not path.is_file() or path.is_symlink() or path.read_bytes() != expected:
+            raise ReuseError(f"reseal archive collision: {name} differs")
+    old_path = operation_dir / "old-evidence"
+    new_path = operation_dir / "new-evidence"
+    old_exists = old_path.exists()
+    new_exists = new_path.exists()
+    if old_exists and _classify_reseal_evidence(old_path, plan) != "old":
+        raise ReuseError("reseal archive old-evidence generation drift")
+    if new_exists and _classify_reseal_evidence(new_path, plan) != "new":
+        raise ReuseError("reseal archive new-evidence generation drift")
+    return {"exists": True, "old_evidence": old_exists, "new_evidence": new_exists}
+
+
+def _validate_reseal_phase_matrix(*, state: str, evidence: str, source_page: str,
+                                  archive: dict) -> None:
+    """Crash protocol: published states only coexist with a fully matching generation.
+
+    Before mutation, old/published remains intact while the new generation is staged. The DB is then
+    demoted to reused/running before the active evidence or source page changes. Recovery rolls forward
+    through old → missing → new evidence and old → new source bytes. Only after derived artifacts have
+    rebuilt does state return to published with the new manifest hash.
+    """
+    if state == "old":
+        if evidence != "old" or source_page != "old":
+            raise ReuseError("reseal recovery conflict: old published state must match old files")
+        if archive["exists"] and (archive["old_evidence"] or not archive["new_evidence"]):
+            raise ReuseError("reseal archive collision before state transition")
+        return
+    if state == "running":
+        if not archive["exists"]:
+            raise ReuseError("reseal recovery conflict: running state lacks its durable operation archive")
+        valid_evidence_archive = (
+            evidence == "old" and not archive["old_evidence"] and archive["new_evidence"]
+            or evidence == "missing" and archive["old_evidence"] and archive["new_evidence"]
+            or evidence == "new" and archive["old_evidence"] and not archive["new_evidence"]
+        )
+        if not valid_evidence_archive or (source_page == "new" and evidence != "new"):
+            raise ReuseError("reseal recovery conflict: running files do not match a known boundary")
+        return
+    if (state != "complete" or evidence != "new" or source_page != "new"
+            or not archive["exists"] or not archive["old_evidence"]
+            or archive["new_evidence"]):
+        raise ReuseError("reseal recovery conflict: published new state is not fully materialized")
+
+
+def build_reseal_plan(*, workspace: Path, source: str, mapping_path: Path,
+                      from_manifest_sha256: str, lock_ttl_seconds: int = 1800,
+                      allowed_lock_holder: str | None = None) -> dict:
+    """Build a read-only, topic-only v1→v2 evidence replacement plan.
+
+    Immutable metadata is derived from the old manifest; callers cannot override title/domain/PDF/origin.
+    The deterministic operation id makes an exact retry converge on one archive instead of creating a
+    second history entry.
+    """
+    if not _SOURCE_ID.fullmatch(source):
+        raise ReuseError("source id must use only ASCII letters/digits/./_/-")
+    old_sha = from_manifest_sha256.strip().lower()
+    if not _SHA256.fullmatch(old_sha):
+        raise ReuseError("--from-manifest-sha256 must be exactly 64 hexadecimal characters")
+    workspace = _direct_root(Path(workspace), "target workspace")
+    mapping_path = _direct_file(Path(mapping_path), "new mapping JSON")
+    mapping_sha = sha256_file(mapping_path)
+    operation_id = _reseal_operation_id(source, old_sha, mapping_sha)
+    active_evidence = workspace / "pipeline-workspace" / "reuses" / source
+    operation_dir = (workspace / "pipeline-workspace" / "reuse-reseals" /
+                     source / operation_id)
+    _assert_direct_contained(active_evidence, workspace, "active reuse evidence")
+    _assert_direct_contained(operation_dir, workspace, "reseal operation archive")
+    operation_parent = operation_dir.parent
+    if operation_parent.exists():
+        _assert_direct_contained(operation_parent, workspace, "reseal operation archive parent")
+        others = [p for p in operation_parent.iterdir() if p != operation_dir]
+        if others:
+            raise ReuseError(
+                f"another reseal operation already exists for {source}: {others[0].name}")
+
+    archived_old = operation_dir / "old-evidence"
+    candidates = []
+    for path in (active_evidence, archived_old):
+        if path.exists():
+            stored = _load_stored_manifest(path)
+            if stored and hashlib.sha256(stored[1]).hexdigest() == old_sha:
+                candidates.append((path, *stored))
+    if len(candidates) != 1:
+        raise ReuseError(
+            "reseal requires exactly one intact old evidence generation matching "
+            "--from-manifest-sha256")
+    old_evidence_dir, old_manifest, old_manifest_bytes = candidates[0]
+    errors = _validate_evidence(old_evidence_dir, old_manifest_bytes, old_manifest)
+    if errors:
+        raise ReuseError(errors[0])
+    if old_manifest["source_id"] != source:
+        raise ReuseError("reseal immutable source_id does not match --source")
+    if "topic_target_pages" in old_manifest:
+        raise ReuseError("reseal topic-only migration requires a mapping v1 evidence generation")
+    old_mapping_path = old_evidence_dir / "mapping.json"
+    _old_mapping_bytes, old_mapping = _load_mapping(
+        old_mapping_path, source, old_manifest["origin_concepts"], old_manifest["origin_topics"])
+    if old_mapping["version"] != 1:
+        raise ReuseError("reseal topic-only migration requires mapping version 1 as its baseline")
+
+    candidate = build_plan(
+        workspace=workspace, source=source, title=old_manifest["title"],
+        domain=old_manifest["domain"], pdf_path=Path(old_manifest["pdf_path"]),
+        pdf_sha256=old_manifest["pdf_sha256"], origin_root=Path(old_manifest["origin_root"]),
+        origin_source=old_manifest["origin_source"], mapping_path=mapping_path,
+        lock_ttl_seconds=lock_ttl_seconds, allowed_lock_holder=allowed_lock_holder,
+        _candidate_only=True)
+    if candidate["mapping"]["version"] != 2 or not candidate["mapping"]["topic_targets"]:
+        raise ReuseError("reseal requires mapping v2 with a non-empty topic_targets dimension")
+    if candidate["mapping"]["targets"] != old_mapping["targets"]:
+        raise ReuseError("reseal is topic-only: concept targets/origin_concepts must be byte-equivalent")
+    for field in sorted(_RESEAL_IMMUTABLE_MANIFEST_FIELDS):
+        if candidate["manifest_data"].get(field) != old_manifest.get(field):
+            if field.startswith("origin_"):
+                raise ReuseError(f"reseal origin snapshot drift: immutable field {field}")
+            raise ReuseError(f"reseal immutable field drift: {field}")
+    for field in ("mapped_target_count", "zero_mapping_target_count", "target_pages"):
+        if candidate["manifest_data"].get(field) != old_manifest.get(field):
+            raise ReuseError(f"reseal is topic-only: concept derivative drift: {field}")
+    if candidate["mapping_sha256"] == old_manifest["mapping_sha256"]:
+        raise ReuseError("reseal new mapping must differ from the frozen v1 mapping")
+
+    old_plan = dict(candidate)
+    old_plan.update({
+        "mapping": old_mapping,
+        "mapping_bytes": old_mapping_path.read_bytes(),
+        "mapping_path": old_mapping_path,
+        "mapping_sha256": old_manifest["mapping_sha256"],
+        "manifest_data": old_manifest,
+        "manifest_bytes": old_manifest_bytes,
+        "manifest_sha256": old_sha,
+        "mapped_target_count": old_manifest["mapped_target_count"],
+        "zero_mapping_target_count": old_manifest["zero_mapping_target_count"],
+        "topic_target_pages": [],
+        "mapped_topic_target_count": 0,
+        "zero_mapping_topic_target_count": 0,
+    })
+    old_source_bytes = _source_page_bytes(old_plan)
+    candidate.update({
+        "old_evidence_dir": old_evidence_dir,
+        "old_manifest_data": old_manifest,
+        "old_manifest_bytes": old_manifest_bytes,
+        "old_manifest_sha256": old_sha,
+        "old_mapping": old_mapping,
+        "old_source_bytes": old_source_bytes,
+        "operation_id": operation_id,
+        "operation_dir": operation_dir,
+    })
+
+    snapshot = _target_state_snapshot(candidate["db"], source)
+    evidence_fs.reject_lock(snapshot, lock_ttl_seconds, allowed_lock_holder,
+                            command="reseal-source", error=ReuseError)
+    state_phase = _reseal_state_phase(snapshot, candidate)
+    evidence_phase = _classify_reseal_evidence(active_evidence, candidate)
+    source_phase = _classify_reseal_source(candidate["source_path"], candidate)
+    archive = _validate_reseal_archive(candidate)
+    _validate_reseal_phase_matrix(state=state_phase, evidence=evidence_phase,
+                                  source_page=source_phase, archive=archive)
+    candidate.update({"state_phase": state_phase, "evidence_phase": evidence_phase,
+                      "source_phase": source_phase, "archive": archive})
+    return candidate
+
+
+def prepare_reseal_archive(plan: dict) -> bool:
+    """Durably stage transition metadata, both source bytes, and the complete new evidence tree."""
+    existing = _validate_reseal_archive(plan)
+    if existing["exists"]:
+        return False
+    parent = plan["operation_dir"].parent
+    parent.mkdir(parents=True, exist_ok=True)
+    _assert_direct_contained(parent, plan["workspace"], "reseal archive parent")
+    temp = parent / f".{plan['operation_id']}.{uuid.uuid4().hex}.tmp"
+    temp.mkdir()
+    try:
+        (temp / "transition.json").write_bytes(_json_bytes(_reseal_transition(plan)))
+        (temp / "old-source.md").write_bytes(plan["old_source_bytes"])
+        (temp / "new-source.md").write_bytes(plan["source_bytes"])
+        staged = temp / "new-evidence"
+        staged_plan = dict(plan, evidence_dir=staged, manifest_path=staged / "manifest.json")
+        write_evidence(staged_plan)
+        temp_plan = dict(plan, operation_dir=temp)
+        _validate_reseal_archive(temp_plan)
+        try:
+            temp.rename(plan["operation_dir"])
+        except OSError:
+            if plan["operation_dir"].exists():
+                _validate_reseal_archive(plan)
+                return False
+            raise
+        _validate_reseal_archive(plan)
+        return True
+    finally:
+        if temp.exists():
+            shutil.rmtree(temp)
+
+
+def archive_reseal_old_evidence(plan: dict) -> bool:
+    active = plan["evidence_dir"]
+    archived = plan["operation_dir"] / "old-evidence"
+    kind = _classify_reseal_evidence(active, plan)
+    if kind == "new":
+        return False
+    if kind == "missing":
+        if _classify_reseal_evidence(archived, plan) != "old":
+            raise ReuseError("reseal recovery lost the old evidence generation")
+        return False
+    if archived.exists():
+        raise ReuseError("reseal archive collision: old-evidence already exists")
+    active.rename(archived)
+    if _classify_reseal_evidence(archived, plan) != "old":
+        raise ReuseError("reseal failed to verify archived old evidence")
+    return True
+
+
+def activate_reseal_evidence(plan: dict) -> bool:
+    active = plan["evidence_dir"]
+    kind = _classify_reseal_evidence(active, plan)
+    if kind == "new":
+        return False
+    if kind == "old":
+        raise ReuseError("old evidence must be archived before activating reseal evidence")
+    staged = plan["operation_dir"] / "new-evidence"
+    if _classify_reseal_evidence(staged, plan) != "new":
+        raise ReuseError("reseal staged new evidence is missing or corrupt")
+    staged.rename(active)
+    if _classify_reseal_evidence(active, plan) != "new":
+        raise ReuseError("reseal failed to verify activated evidence")
+    return True
+
+
+def replace_reseal_source_page(plan: dict) -> bool:
+    target = plan["source_path"]
+    kind = _classify_reseal_source(target, plan)
+    if kind == "new":
+        return False
+    temp = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        temp.write_bytes(plan["source_bytes"])
+        if temp.read_bytes() != plan["source_bytes"]:
+            raise ReuseError("failed to verify staged reseal source page")
+        temp.replace(target)
+        if _classify_reseal_source(target, plan) != "new":
+            raise ReuseError("failed to verify replaced reseal source page")
+        return True
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def verify_reseal_final_files(plan: dict) -> None:
+    verify_live_inputs(plan)
+    for entry in (plan["manifest_data"]["target_pages"]
+                  + plan["manifest_data"].get("topic_target_pages", [])):
+        _verify_live_entry(plan["vault"], entry, "target")
+    if _classify_reseal_evidence(plan["evidence_dir"], plan) != "new":
+        raise ReuseError("reseal final evidence is not the new generation")
+    if _classify_reseal_source(plan["source_path"], plan) != "new":
+        raise ReuseError("reseal final source page is not the new generation")
+    archive = _validate_reseal_archive(plan)
+    if not archive["old_evidence"] or archive["new_evidence"]:
+        raise ReuseError("reseal final archive is incomplete")

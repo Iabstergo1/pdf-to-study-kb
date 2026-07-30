@@ -324,6 +324,130 @@ def reuse_source(db_path, source_id: str, *, domain: str,
         con.close()
 
 
+def _reuse_reseal_rows(con: sqlite3.Connection, source_id: str) -> tuple:
+    source = con.execute("SELECT * FROM sources WHERE source_id=?", (source_id,)).fetchone()
+    stages = con.execute(
+        "SELECT stage,status,input_hash,output_hash FROM source_stage_runs "
+        "WHERE source_id=? ORDER BY id", (source_id,)).fetchall()
+    artifacts = con.execute(
+        "SELECT kind,path,sha256 FROM artifacts WHERE source_id=? ORDER BY id",
+        (source_id,)).fetchall()
+    ledgers = {
+        table: con.execute(
+            f"SELECT COUNT(*) AS n FROM {table} WHERE source_id=?", (source_id,)
+        ).fetchone()["n"]
+        for table in ("work_orders", "ingest_progress", "window_reads")
+    }
+    return source, stages, artifacts, ledgers
+
+
+def begin_reuse_reseal(db_path, source_id: str, *, domain: str, manifest_path: str,
+                       old_manifest_sha256: str, new_manifest_sha256: str,
+                       lock_holder: str | None = None) -> str:
+    """Atomically demote an exact old reused/published state to reused/running.
+
+    The stage/artifact hashes remain on the old generation while files are replaced. Exact retries return
+    ``running``; an already completed replacement returns ``complete``. No caller can expose a published
+    source whose state hash names a different evidence/source generation.
+    """
+    init_db(db_path)
+    con = connect(db_path)
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        lock = con.execute("SELECT holder FROM source_locks WHERE scope='vault'").fetchone()
+        if lock is not None and lock["holder"] != lock_holder:
+            raise InvalidTransition(f"active vault lock held by {lock['holder']}")
+        source, stages, artifacts, ledgers = _reuse_reseal_rows(con, source_id)
+        if source is None or any(ledgers.values()):
+            raise InvalidTransition(
+                f"reseal requires one existing reused source with zero ingest ledgers: {ledgers}")
+        actual_source = (source["domain"], source["format"], source["current_stage"],
+                         source["current_status"])
+        actual_stages = [(r["stage"], r["status"], r["input_hash"], r["output_hash"])
+                         for r in stages]
+        actual_artifacts = [(r["kind"], r["path"], r["sha256"]) for r in artifacts]
+        old_stage = [("reused", "done", old_manifest_sha256, old_manifest_sha256)]
+        new_stage = [("reused", "done", new_manifest_sha256, new_manifest_sha256)]
+        old_artifact = [("reuse_evidence", manifest_path, old_manifest_sha256)]
+        new_artifact = [("reuse_evidence", manifest_path, new_manifest_sha256)]
+        base = (domain, "external-vault-reuse", "reused")
+        if (actual_source == (*base, "published") and actual_stages == new_stage
+                and actual_artifacts == new_artifact):
+            con.commit()
+            return "complete"
+        if (actual_source == (*base, "running") and actual_stages == old_stage
+                and actual_artifacts == old_artifact):
+            con.commit()
+            return "running"
+        if not (actual_source == (*base, "published") and actual_stages == old_stage
+                and actual_artifacts == old_artifact):
+            raise InvalidTransition("reseal source/state rows do not match the exact frozen v1 generation")
+        con.execute(
+            "UPDATE sources SET current_status='running' WHERE source_id=?", (source_id,))
+        con.commit()
+        return "started"
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+def complete_reuse_reseal(db_path, source_id: str, *, domain: str, manifest_path: str,
+                          old_manifest_sha256: str, new_manifest_sha256: str,
+                          lock_holder: str | None = None) -> bool:
+    """Atomically replace reused stage/artifact hashes and republish; exact retry is a no-op."""
+    init_db(db_path)
+    con = connect(db_path)
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        lock = con.execute("SELECT holder FROM source_locks WHERE scope='vault'").fetchone()
+        if lock is not None and lock["holder"] != lock_holder:
+            raise InvalidTransition(f"active vault lock held by {lock['holder']}")
+        source, stages, artifacts, ledgers = _reuse_reseal_rows(con, source_id)
+        if source is None or any(ledgers.values()):
+            raise InvalidTransition(
+                f"reseal requires one existing reused source with zero ingest ledgers: {ledgers}")
+        actual_source = (source["domain"], source["format"], source["current_stage"],
+                         source["current_status"])
+        actual_stages = [(r["stage"], r["status"], r["input_hash"], r["output_hash"])
+                         for r in stages]
+        actual_artifacts = [(r["kind"], r["path"], r["sha256"]) for r in artifacts]
+        old_stage = [("reused", "done", old_manifest_sha256, old_manifest_sha256)]
+        new_stage = [("reused", "done", new_manifest_sha256, new_manifest_sha256)]
+        old_artifact = [("reuse_evidence", manifest_path, old_manifest_sha256)]
+        new_artifact = [("reuse_evidence", manifest_path, new_manifest_sha256)]
+        base = (domain, "external-vault-reuse", "reused")
+        if (actual_source == (*base, "published") and actual_stages == new_stage
+                and actual_artifacts == new_artifact):
+            con.commit()
+            return False
+        if not (actual_source == (*base, "running") and actual_stages == old_stage
+                and actual_artifacts == old_artifact):
+            raise InvalidTransition("reseal completion requires exact reused/running old-hash state")
+        stage_update = con.execute(
+            "UPDATE source_stage_runs SET input_hash=?,output_hash=? "
+            "WHERE source_id=? AND stage='reused' AND status='done' "
+            "AND input_hash=? AND output_hash=?",
+            (new_manifest_sha256, new_manifest_sha256, source_id,
+             old_manifest_sha256, old_manifest_sha256))
+        artifact_update = con.execute(
+            "UPDATE artifacts SET sha256=? WHERE source_id=? AND kind='reuse_evidence' "
+            "AND path=? AND sha256=?",
+            (new_manifest_sha256, source_id, manifest_path, old_manifest_sha256))
+        if stage_update.rowcount != 1 or artifact_update.rowcount != 1:
+            raise InvalidTransition("reseal state rows changed during completion")
+        con.execute(
+            "UPDATE sources SET current_status='published' WHERE source_id=?", (source_id,))
+        con.commit()
+        return True
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
 # reset-source 允许的回退目标：只有预处理段（ingest 段有 reopen/resume，禁止 reset 进入）。
 RESETTABLE_TARGETS = ["registered", "profiled", "converted", "windowed", "workorder_ready"]
 

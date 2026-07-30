@@ -82,12 +82,15 @@ the zero-LLM `reuse-source` branch in §6; target merge pages/source_refs must a
   one canonical source page and one `adoption_evidence` artifact; no staging/workorder/window ledgers.
 - Reuse branch only: `pipeline-workspace/reuses/<src>/{manifest.json,mapping.json,origin-state.json,origin-files/**,target-files/**}`,
   one canonical source page and one `reuse_evidence` artifact; no staging/workorder/window ledgers.
+- Reuse reseal only: `pipeline-workspace/reuse-reseals/<src>/<operation-id>/` keeps the canonical
+  transition, old/new source bytes and the full old evidence generation; exact retries reuse this archive.
 
 ## 6. CLI commands (orchestration order)
 
 ```text
 legacy vault (zero LLM)  adopt-vault --source <src> --title <title> --domain <domain> --baseline-archive <archive> --baseline-sha256 <sha256> [--apply]
 published source reuse (zero LLM)  reuse-source --source <src> --title <title> --domain <domain> --path <pdf> --sha256 <sha256> --origin-root <root> --origin-source <src> --mapping <mapping.json> [--expect-concepts N --expect-topics N] [--apply]
+reuse evidence v1→v2 reseal (zero LLM)  reseal-source --source <src> --mapping <mapping-v2.json> --from-manifest-sha256 <old-manifest-sha256> [--apply]
 preprocess + auto-arbitration  init-vault → add-source → profile → source-convert → source-audit →[ arbitration-status → if pending: agent arbitrates queue → arbitration-apply ]→ windows → workorder
 start / per-window (LLM)  ingest-start → read chapters.json (build whole-book understanding) → write per-chapter content-routing table into digest (advisory; references/content-routing.md)
                           →[ in chapter order: window-start → show-window → write pages per routing orientation (read hard-page source images as evidence; re-express natively — never embed them; deviations logged) → window-done --writes ]×N
@@ -124,6 +127,22 @@ incremental reopen        reopen → ingest-start →[ per-window backfill ]→ 
 > warning-only; origin/PDF/mapping/
 > evidence/source/state drift fails closed. The temporary mapping path is not identity: after success, replay with
 > the immutable evidence `mapping.json` and remove the temporary input.
+
+> **reuse evidence reseal:** existing v1 evidence normally needs no migration. Use the independent
+> `reseal-source` only when a legitimate topic attribution cannot be represented by frozen v1 evidence; ordinary
+> `reuse-source` must never enter this branch. Set `PYTHONDONTWRITEBYTECODE=1` and use `python -B`; the same
+> read-only origin and non-WAL checks still apply. Run without `--apply` first. The old evidence must pass its full
+> manifest/file/live-origin/PDF validation. Source/domain/title/format/evidence version/PDF/origin are derived from
+> that manifest and have no override flags; concept targets, counts and `target_pages` must also remain identical.
+> Only a non-empty v2 `topic_targets` dimension and its derived evidence may change. Apply holds the target vault
+> lock, durably stages one deterministic operation, demotes state to `reused/running`, archives the whole v1
+> evidence generation, activates v2 evidence, replaces the source page only if its bytes still equal the old
+> canonical page, rebuilds derived artifacts, then atomically changes reused-stage/artifact hashes and republishes.
+> A crash at any boundary rolls forward by rerunning the exact command; published state exists only with a matching
+> old or new generation, and an exact completed repeat is a whole-tree byte/mtime no-op. Do not use reseal to cover
+> damaged evidence or to retire a source. Known limitation: `retract-source` does not support `adopted/published`
+> or `reused/published` terminal states; do not call it for either branch. If an OS-level kill leaves a stale vault
+> lock, follow the normal `unlock` protocol before rerunning the same reseal operation.
 
 > **Backend selection / dual-audit / reading windows:** `source-convert` defaults to `--backend auto` —
 > Markdown / born-digital PDF take the lightweight PyMuPDF path; scanned / low-text PDF, DOCX / PPTX take

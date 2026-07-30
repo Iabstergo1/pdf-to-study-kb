@@ -891,6 +891,155 @@ def cmd_reuse_source(args):
           "work_orders=0 ingest_progress=0 window_reads=0")
 
 
+def cmd_reseal_source(args):
+    """受控替换既存 reuse v1 证据为 topic-only v2；默认只读，apply 可恢复前滚。"""
+    import concept_store
+    import locks
+    import os
+    import sqlite3
+    import source_reuse
+    import state_store
+    import wiki_gate
+    from datetime import date
+
+    def build(*, allowed_holder=None):
+        return source_reuse.build_reseal_plan(
+            workspace=_workspace_root(), source=args.source, mapping_path=Path(args.mapping),
+            from_manifest_sha256=args.from_manifest_sha256,
+            lock_ttl_seconds=LOCK_TTL_SECONDS, allowed_lock_holder=allowed_holder)
+
+    def failpoint(name):
+        # Subprocess fault injection is deliberately test-only and has no CLI surface. Every durable
+        # boundary is followed by one hook so the round-trip suite proves that rerun rolls forward.
+        if (os.environ.get("PYTEST_CURRENT_TEST")
+                and os.environ.get("STUDY_KB_TEST_RESEAL_FAIL_AFTER") == name):
+            raise SystemExit(f"injected reseal failure after {name}")
+
+    def log_recorded(plan):
+        log = plan["vault"] / "log.md"
+        if not log.is_file():
+            return False
+        marker = f"] reseal-source | {args.source} |"
+        short = plan["manifest_sha256"][:12]
+        return any(marker in line and short in line
+                   for line in log.read_text(encoding="utf-8").splitlines())
+
+    try:
+        plan = build()
+    except (source_reuse.ReuseError, OSError, sqlite3.Error) as exc:
+        raise SystemExit(str(exc))
+    print(f"[plan] reseal-source source={args.source} operation={plan['operation_id']} "
+          f"phase={plan['state_phase']}/{plan['evidence_phase']}/{plan['source_phase']}")
+    print(f"[plan] manifest {plan['old_manifest_sha256']} -> {plan['manifest_sha256']}")
+    print(f"[plan] mapping v1 {plan['old_manifest_data']['mapping_sha256']} -> "
+          f"v2 {plan['mapping_sha256']}")
+    print(f"[plan] topic-targets={len(plan['mapping']['topic_targets'])}; "
+          "concept targets/counts/target-files unchanged")
+    print(f"[plan] archive={plan['operation_dir']}; active={plan['evidence_dir']}")
+    print("[plan] recovery=stage archive -> state reused/running -> archive old evidence -> "
+          "activate new evidence -> replace exact old source -> rebuild derived -> republish new hash")
+    if not args.apply:
+        print("[dry-run] byte-zero-write; existing evidence/source/state fully verified; "
+              "rerun with --apply")
+        return
+
+    derived_findings = wiki_gate.derived_violations(plan["vault"]) \
+        if plan["state_phase"] == "complete" else []
+    if plan["state_phase"] == "complete" and not derived_findings and log_recorded(plan):
+        print(f"[OK] reseal-source {args.source}: v2 generation fully verified; "
+              "archive intact; whole-tree byte/mtime no-op")
+        return
+
+    db = _vault_state_db()
+    holder = f"reseal-source:{args.source}:{os.getpid()}"
+    state_store.init_db(db)
+    if not locks.acquire(db, scope="vault", holder=holder, pid=os.getpid()):
+        current = locks.get(db, scope="vault")
+        owner = current["holder"] if current else "unknown"
+        raise SystemExit(f"active vault lock held by {owner}")
+    try:
+        try:
+            plan = build(allowed_holder=holder)
+            locked_derived_findings = wiki_gate.derived_violations(plan["vault"]) \
+                if plan["state_phase"] == "complete" else []
+            prepared = source_reuse.prepare_reseal_archive(plan)
+            failpoint("prepare")
+            begin_phase = state_store.begin_reuse_reseal(
+                db, args.source, domain=plan["domain"],
+                manifest_path=str(plan["manifest_path"].resolve()),
+                old_manifest_sha256=plan["old_manifest_sha256"],
+                new_manifest_sha256=plan["manifest_sha256"], lock_holder=holder)
+            failpoint("begin-state")
+            archived = source_reuse.archive_reseal_old_evidence(plan)
+            failpoint("archive-old")
+            activated = source_reuse.activate_reseal_evidence(plan)
+            failpoint("activate-new")
+            source_replaced = source_reuse.replace_reseal_source_page(plan)
+            failpoint("replace-source")
+        except (source_reuse.ReuseError, OSError, sqlite3.Error,
+                state_store.InvalidTransition) as exc:
+            raise SystemExit(str(exc))
+
+        # When recovery starts from an already complete state only a missing log entry or derived repair
+        # remains. Every old/running phase rebuilds unconditionally because the canonical source changed.
+        if plan["state_phase"] != "complete" or locked_derived_findings:
+            vault = plan["vault"]
+            wiki_gate.write_index(vault)
+            metas = concept_store.scan_concept_pages(vault)
+            registry, errors, warnings = concept_store.build_registry(metas)
+            for warning in warnings:
+                print(f"[warn] {warning}")
+            if errors:
+                for error in errors:
+                    print(f"[error] {error}", file=sys.stderr)
+                raise SystemExit("registry not written (validation changed during reseal-source)")
+            concept_store.write_registry(vault, registry)
+            concept_store.remove_stale_aliases(vault)
+            try:
+                _data, graph_result = _rebuild_graph_artifacts(vault)
+            except GraphBuildError as exc:
+                for error in exc.args[0]:
+                    print(f"[ERR] graph fail-hard: {error}")
+                raise SystemExit(2)
+            for warning in graph_result["warnings"]:
+                print(f"[warn] {warning}")
+            wiki_gate.write_quiz_index(vault)
+            props = wiki_gate.collect_propositions(vault)
+            wiki_gate.write_propositions_index(vault)
+            for duplicate in wiki_gate.duplicate_proposition_names(props):
+                print(f"[warn] 命题重名（名字即锚点，域内应唯一）：{duplicate}")
+        failpoint("derived")
+
+        try:
+            source_reuse.verify_reseal_final_files(plan)
+            state_changed = state_store.complete_reuse_reseal(
+                db, args.source, domain=plan["domain"],
+                manifest_path=str(plan["manifest_path"].resolve()),
+                old_manifest_sha256=plan["old_manifest_sha256"],
+                new_manifest_sha256=plan["manifest_sha256"], lock_holder=holder)
+        except (source_reuse.ReuseError, OSError, sqlite3.Error,
+                state_store.InvalidTransition) as exc:
+            raise SystemExit(str(exc))
+        failpoint("finish-state")
+        if not log_recorded(plan):
+            wiki_gate.append_log(
+                plan["vault"], "reseal-source", args.source,
+                f"replaced reuse evidence mapping v1 with v2 "
+                f"({len(plan['mapping']['topic_targets'])} topic targets; "
+                f"old sha256: {plan['old_manifest_sha256'][:12]}; "
+                f"new sha256: {plan['manifest_sha256'][:12]}; "
+                f"operation: {plan['operation_id']})",
+                date.today().isoformat())
+    finally:
+        locks.release(db, scope="vault", holder=holder)
+    print(f"[OK] reseal-source {args.source}: v2 reused/published; "
+          f"archive={'created' if prepared else 'verified'}, "
+          f"state-begin={begin_phase}, old-evidence={'archived' if archived else 'verified'}, "
+          f"new-evidence={'activated' if activated else 'verified'}, "
+          f"source-page={'replaced' if source_replaced else 'verified'}, "
+          f"state={'updated' if state_changed else 'verified'}")
+
+
 def _overview_retract_action(cls: dict, vault) -> str:
     """撤库后 overview 的处置：'reseed'（独占本源被删 / 撤前已缺失 → 删后从模板重建 seed）或
     'keep'（shared / human / 无关且在场 → 保留不动、字节不变）。仅读，供 dry-run 与 apply 一致展示。"""
@@ -2694,6 +2843,15 @@ def main():
                      help="可选：断言 origin 恰好有 N 张 published topic（默认不限制数量）")
     rsp.add_argument("--apply", action="store_true",
                      help="执行复用（默认只读核验并打印计划，byte-zero-write）")
+    rrsp = subparsers.add_parser(
+        "reseal-source", help="把完整的 reuse mapping v1 证据受控替换为 topic-only v2（默认 dry-run）")
+    rrsp.add_argument("--source", required=True, help="既存 external-vault-reuse source_id")
+    rrsp.add_argument("--mapping", required=True,
+                      help="新的 mapping v2 JSON；concept targets 必须与 v1 完全相同")
+    rrsp.add_argument("--from-manifest-sha256", required=True, dest="from_manifest_sha256",
+                      help="预期被替换的 v1 manifest SHA-256（并发/误目标保护）")
+    rrsp.add_argument("--apply", action="store_true",
+                      help="执行重封；默认完整核验并打印计划，byte-zero-write")
     subparsers.add_parser("apply-obsidian-style",
                           help="落地学习库观感 CSS snippet + merge appearance.json（幂等，纯配置层零内容改动）")
     subparsers.add_parser("rebuild-registry", help="从概念页 frontmatter 重建 _registry.yaml（aliases.md 已废弃，别名只在概念页 frontmatter）")
@@ -2834,6 +2992,7 @@ def main():
         'init-vault': cmd_init_vault,
         'adopt-vault': cmd_adopt_vault,
         'reuse-source': cmd_reuse_source,
+        'reseal-source': cmd_reseal_source,
         'apply-obsidian-style': cmd_apply_obsidian_style,
         'rebuild-registry': cmd_rebuild_registry,
         'rebuild-graph': cmd_rebuild_graph,

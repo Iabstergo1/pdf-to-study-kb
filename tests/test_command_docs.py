@@ -87,6 +87,17 @@ def test_mapping_v2_topic_dimension_and_v1_compatibility_are_documented():
             f"{rel} 未写明既有 v1 mapping/evidence 无需迁移"
 
 
+def test_reseal_source_contract_and_known_retraction_limit_are_documented():
+    for rel in _REUSE_DOCS:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        for must in ("reseal-source", "--from-manifest-sha256", "topic_targets",
+                     "reused/running", "retract-source", "reused/published"):
+            assert must in text, f"{rel} 未记录 reseal/已知退役限制契约：{must}"
+        assert ("完整" in text or "full" in text), f"{rel} 未声明旧 evidence 必须完整"
+        assert ("前滚" in text or "roll" in text), f"{rel} 未声明 reseal 崩溃恢复语义"
+    assert (ROOT / _REUSE_DOCS[-2]).read_bytes() == (ROOT / _REUSE_DOCS[-1]).read_bytes()
+
+
 def test_docs_no_stale_source_image_or_scaffold_claims():
     # 文档守卫：git 追踪的全部 markdown（含 docs/skill-runtime、templates）不得再出现
     # "嵌原图/内嵌的源图/强制内嵌"这类肯定式嵌图措辞（D-1；明确的"禁止嵌入"说明不含这些词）；

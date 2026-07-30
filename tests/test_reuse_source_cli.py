@@ -15,8 +15,9 @@ ROOT = Path(__file__).resolve().parents[1]
 PIPELINE = ROOT / "scripts" / "pipeline.py"
 
 
-def _run(args, workspace):
+def _run(args, workspace, *, extra_env=None):
     env = {**os.environ, "PYTHONUTF8": "1", "STUDY_KB_ROOT": str(workspace)}
+    env.update(extra_env or {})
     return subprocess.run([sys.executable, str(PIPELINE), *args], cwd=ROOT,
                           capture_output=True, text=True, encoding="utf-8", env=env)
 
@@ -467,6 +468,233 @@ def _v2_fixture(tmp_path):
     """
     return _fixture(tmp_path, concepts=5, topics=3, group_sizes=(3, 2, 0),
                     version=2, topic_group_sizes=(1, 1, 0))
+
+
+def _reseal_fixture(tmp_path):
+    """Freeze v1 first, then add the topic attribution that only mapping v2 can account for."""
+    fx = _fixture(tmp_path, concepts=5, topics=3, group_sizes=(3, 2, 0))
+    applied = _run([*fx["args"], "--apply"], fx["target"])
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    evidence = fx["target"] / "pipeline-workspace" / "reuses" / "mysql"
+    old_manifest_sha = _sha(evidence / "manifest.json")
+    old_evidence = _tree_bytes(evidence)
+    old_source = (fx["target"] / "wiki" / "sources" / "mysql.md").read_bytes()
+
+    topic_targets = []
+    for i, origins in enumerate(([fx["origin_topics"][0]], [fx["origin_topics"][1]], [])):
+        rel = f"topics/reseal-target-{i}.md"
+        topic_targets.append({"target": rel, "origin_topics": origins})
+        meta = {"domain": "sql", "managed_by": "pipeline", "status": "published",
+                "title": f"Reseal Target {i}", "type": "topic"}
+        if origins:
+            meta["source_refs"] = [{"source": "mysql", "sections": [f"topic-{i}"]}]
+        _write_page(fx["target"] / "wiki" / rel, meta)
+
+    v2_mapping = tmp_path / "reseal-v2.json"
+    v1 = json.loads(fx["mapping"].read_text(encoding="utf-8"))
+    v1["version"] = 2
+    v1["topic_targets"] = topic_targets
+    v2_mapping.write_text(json.dumps(v1, ensure_ascii=False, indent=2) + "\n",
+                          encoding="utf-8", newline="\n")
+    reseal_args = [
+        "reseal-source", "--source", "mysql", "--mapping", str(v2_mapping),
+        "--from-manifest-sha256", old_manifest_sha,
+    ]
+    replay_args = [*fx["args"]]
+    replay_args[replay_args.index("--mapping") + 1] = str(v2_mapping)
+    fx.update({"evidence": evidence, "old_manifest_sha": old_manifest_sha,
+               "old_evidence": old_evidence, "old_source": old_source,
+               "v2_mapping": v2_mapping, "reseal_args": reseal_args,
+               "v2_replay_args": replay_args, "reseal_topic_targets": topic_targets})
+    return fx
+
+
+def test_reseal_source_v1_to_v2_round_trip_and_future_replay_is_noop(tmp_path):
+    fx = _reseal_fixture(tmp_path)
+    before_dry = _tree_state(fx["target"])
+
+    dry = _run(fx["reseal_args"], fx["target"])
+    assert dry.returncode == 0, dry.stdout + dry.stderr
+    assert "[dry-run] byte-zero-write" in dry.stdout
+    assert _tree_state(fx["target"]) == before_dry
+
+    applied = _run([*fx["reseal_args"], "--apply"], fx["target"])
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert "v2 reused/published" in applied.stdout
+    manifest = json.loads((fx["evidence"] / "manifest.json").read_text(encoding="utf-8"))
+    assert [row["path"] for row in manifest["topic_target_pages"]] == \
+           [row["target"] for row in fx["reseal_topic_targets"]]
+    assert manifest["target_pages"] == json.loads(
+        fx["old_evidence"]["manifest.json"].decode("utf-8"))["target_pages"]
+    assert b"mapping v2" in (fx["target"] / "wiki" / "sources" / "mysql.md").read_bytes()
+
+    operations = list((fx["target"] / "pipeline-workspace" / "reuse-reseals" /
+                       "mysql").iterdir())
+    assert len(operations) == 1
+    operation = operations[0]
+    assert _tree_bytes(operation / "old-evidence") == fx["old_evidence"]
+    transition = json.loads((operation / "transition.json").read_text(encoding="utf-8"))
+    assert transition["old_manifest_sha256"] == fx["old_manifest_sha"]
+    assert transition["new_manifest_sha256"] == _sha(fx["evidence"] / "manifest.json")
+
+    db = fx["target"] / "pipeline-workspace" / "state" / "study-kb.sqlite"
+    con = sqlite3.connect(db)
+    try:
+        new_sha = _sha(fx["evidence"] / "manifest.json")
+        assert con.execute(
+            "SELECT input_hash,output_hash FROM source_stage_runs "
+            "WHERE source_id='mysql' AND stage='reused'").fetchone() == (new_sha, new_sha)
+        assert con.execute(
+            "SELECT sha256 FROM artifacts WHERE source_id='mysql' AND kind='reuse_evidence'"
+        ).fetchone()[0] == new_sha
+    finally:
+        con.close()
+
+    stable = _tree_state(fx["target"])
+    replay = _run(fx["v2_replay_args"], fx["target"])
+    assert replay.returncode == 0, replay.stdout + replay.stderr
+    assert "version=2" in replay.stdout and "[dry-run]" in replay.stdout
+    assert _tree_state(fx["target"]) == stable
+    exact = _run([*fx["v2_replay_args"], "--apply"], fx["target"])
+    assert exact.returncode == 0, exact.stdout + exact.stderr
+    assert "fully verified" in exact.stdout
+    assert _tree_state(fx["target"]) == stable
+    exact_reseal = _run([*fx["reseal_args"], "--apply"], fx["target"])
+    assert exact_reseal.returncode == 0, exact_reseal.stdout + exact_reseal.stderr
+    assert "whole-tree byte/mtime no-op" in exact_reseal.stdout
+    assert _tree_state(fx["target"]) == stable
+    assert _tree_bytes(operation / "old-evidence") == fx["old_evidence"]
+
+
+@pytest.mark.parametrize("case,needle", [
+    ("origin-page", "origin snapshot drift"),
+    ("pdf-content", "PDF sha256 mismatch"),
+    ("pdf-path", "PDF not found"),
+    ("old-evidence", "reuse-evidence-corrupt"),
+    ("source-page", "hand-edited"),
+    ("concept-mapping", "topic-only: concept targets"),
+])
+def test_reseal_source_rejects_drift_or_non_topic_changes(tmp_path, case, needle):
+    fx = _reseal_fixture(tmp_path)
+    if case == "origin-page":
+        page = fx["origin"] / "wiki" / fx["origins"][0]
+        page.write_bytes(page.read_bytes() + b"origin drift")
+    elif case == "pdf-content":
+        fx["pdf"].write_bytes(fx["pdf"].read_bytes() + b"pdf drift")
+    elif case == "pdf-path":
+        fx["pdf"].rename(tmp_path / "moved.pdf")
+    elif case == "old-evidence":
+        copied = fx["evidence"] / "target-files" / fx["targets"][0]["target"]
+        copied.write_bytes(copied.read_bytes() + b"tampered")
+    elif case == "source-page":
+        page = fx["target"] / "wiki" / "sources" / "mysql.md"
+        page.write_text(page.read_text(encoding="utf-8") + "\nhand edit\n", encoding="utf-8")
+    else:
+        data = json.loads(fx["v2_mapping"].read_text(encoding="utf-8"))
+        left = data["targets"][0]["origin_concepts"].pop()
+        right = data["targets"][1]["origin_concepts"].pop()
+        data["targets"][0]["origin_concepts"].append(right)
+        data["targets"][1]["origin_concepts"].append(left)
+        for row in data["targets"]:
+            row["origin_concepts"].sort()
+        fx["v2_mapping"].write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                                    encoding="utf-8", newline="\n")
+        fx["reseal_args"][fx["reseal_args"].index("--from-manifest-sha256") + 1] = \
+            fx["old_manifest_sha"]
+    before = _tree_state(fx["target"])
+
+    result = _run(fx["reseal_args"], fx["target"])
+
+    assert result.returncode != 0
+    assert needle in (result.stdout + result.stderr)
+    assert _tree_state(fx["target"]) == before
+
+
+def test_reseal_source_metadata_has_no_override_surface_and_source_id_is_pinned(tmp_path):
+    fx = _reseal_fixture(tmp_path)
+    before = _tree_state(fx["target"])
+    for extra in (("--domain", "other"), ("--title", "Other")):
+        result = _run([*fx["reseal_args"], *extra], fx["target"])
+        assert result.returncode != 0
+        assert "unrecognized arguments" in (result.stdout + result.stderr)
+    wrong_source = [*fx["reseal_args"]]
+    wrong_source[wrong_source.index("--source") + 1] = "other"
+    result = _run(wrong_source, fx["target"])
+    assert result.returncode != 0
+    assert "exactly one intact old evidence" in (result.stdout + result.stderr)
+    assert _tree_state(fx["target"]) == before
+
+
+def test_reseal_source_dry_run_rejects_active_lock_without_writes(tmp_path):
+    fx = _reseal_fixture(tmp_path)
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import locks
+    db = fx["target"] / "pipeline-workspace" / "state" / "study-kb.sqlite"
+    assert locks.acquire(db, scope="vault", holder="other", pid=123)
+    try:
+        before = _tree_state(fx["target"])
+        result = _run(fx["reseal_args"], fx["target"])
+        assert result.returncode != 0
+        assert "active vault lock" in (result.stdout + result.stderr)
+        assert _tree_state(fx["target"]) == before
+    finally:
+        locks.release(db, scope="vault", holder="other")
+
+
+@pytest.mark.parametrize("boundary", [
+    "prepare", "begin-state", "archive-old", "activate-new", "replace-source",
+    "derived", "finish-state",
+])
+def test_reseal_source_failure_at_each_persistent_boundary_rolls_forward(tmp_path, boundary):
+    fx = _reseal_fixture(tmp_path)
+    failed = _run([*fx["reseal_args"], "--apply"], fx["target"],
+                  extra_env={"STUDY_KB_TEST_RESEAL_FAIL_AFTER": boundary})
+    assert failed.returncode != 0
+    assert f"injected reseal failure after {boundary}" in (failed.stdout + failed.stderr)
+    db = fx["target"] / "pipeline-workspace" / "state" / "study-kb.sqlite"
+    con = sqlite3.connect(db)
+    try:
+        stage, status = con.execute(
+            "SELECT current_stage,current_status FROM sources WHERE source_id='mysql'"
+        ).fetchone()
+        assert stage == "reused"
+        assert status == ("published" if boundary in ("prepare", "finish-state") else "running")
+        assert con.execute("SELECT COUNT(*) FROM source_locks").fetchone()[0] == 0
+    finally:
+        con.close()
+    if status == "published":
+        active_sha = _sha(fx["evidence"] / "manifest.json")
+        source_bytes = (fx["target"] / "wiki" / "sources" / "mysql.md").read_bytes()
+        if boundary == "prepare":
+            assert active_sha == fx["old_manifest_sha"] and source_bytes == fx["old_source"]
+        else:
+            assert active_sha != fx["old_manifest_sha"] and source_bytes != fx["old_source"]
+
+    recovered = _run([*fx["reseal_args"], "--apply"], fx["target"])
+    assert recovered.returncode == 0, recovered.stdout + recovered.stderr
+    stable = _tree_state(fx["target"])
+    replay = _run([*fx["reseal_args"], "--apply"], fx["target"])
+    assert replay.returncode == 0, replay.stdout + replay.stderr
+    assert "whole-tree byte/mtime no-op" in replay.stdout
+    assert _tree_state(fx["target"]) == stable
+
+
+def test_reseal_source_archive_collision_is_fail_closed(tmp_path):
+    fx = _reseal_fixture(tmp_path)
+    failed = _run([*fx["reseal_args"], "--apply"], fx["target"],
+                  extra_env={"STUDY_KB_TEST_RESEAL_FAIL_AFTER": "prepare"})
+    assert failed.returncode != 0
+    operation = next((fx["target"] / "pipeline-workspace" / "reuse-reseals" /
+                      "mysql").iterdir())
+    transition = operation / "transition.json"
+    transition.write_bytes(transition.read_bytes() + b"collision")
+    before = _tree_state(fx["target"])
+
+    retry = _run([*fx["reseal_args"], "--apply"], fx["target"])
+
+    assert retry.returncode != 0
+    assert "archive collision" in (retry.stdout + retry.stderr)
+    assert _tree_state(fx["target"]) == before
 
 
 def test_reuse_source_v2_topic_dimension_end_to_end(tmp_path):

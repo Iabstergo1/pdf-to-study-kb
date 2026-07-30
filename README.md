@@ -130,6 +130,15 @@ python -B scripts/pipeline.py reuse-source --source mysql --title "MySQL是怎�
 
 `reuse-source` 默认 byte-zero-write，origin 全程以 read-only SQLite 和文件读取方式核验；origin state DB 必须使用非 WAL rollback journal，且调用前不得存在 `-wal/-shm` sidecar，否则在打开前 fail-closed。若 origin 同时是 CLI 代码仓库（正式 MySQL 场景即如此），dry-run 与 apply 都必须像上例同时设置 `PYTHONDONTWRITEBYTECODE=1` 并用 `python -B`，避免 import 更新 origin 下的 `scripts/__pycache__`。`--apply` 在目标 vault 锁内冻结 PDF、origin state/source 页与全部 concept/topic 页、mapping 与首次 target merge snapshot，新增 canonical source 页，重建全部派生层后才登记 `format=external-vault-reuse`、`reused/published`；三类 ingest 台账始终为 0。精确重跑会先验证 registry/index/graph/quiz/propositions 全部派生文件，再作全树 byte/mtime no-op；缺失或损坏则进入锁内重建。后续 target 页合法演进仅报 `post-reuse-target-live-drift`。origin/PDF/mapping/evidence/source/state 漂移 fail-closed。临时 mapping 可在成功后删除，正式重放改用 `pipeline-workspace/reuses/mysql/mapping.json`。
 
+既有 v1 一般无需迁移；**只有后来出现了 v1 无法声明的合法 topic 归因**时，才使用独立的 `reseal-source`，普通 `reuse-source` 永远不会自动进入替换分支。命令只接受 source、新 v2 mapping 与旧 manifest SHA；domain/title/PDF/origin 全由完整的旧证据导出，concept mapping、计数及 `target_pages` 必须逐字段不变。先 dry-run，确认后加 `--apply`：
+
+```powershell
+python -B scripts/pipeline.py reseal-source --source mysql `
+  --mapping "C:\tmp\mysql-mapping-v2.json" --from-manifest-sha256 <旧manifest的64位SHA256>
+```
+
+apply 在 vault 锁内先把确定性 transition 与新证据完整暂存，再把 state 降为 `reused/running`，随后归档整棵 v1 evidence、激活 v2 evidence、仅在 source 页仍等于旧 canonical 字节时替换、重建派生层，最后一次 SQLite 事务更新 `reused` stage / `reuse_evidence` artifact 的 SHA 并恢复 published。任一步崩溃都不会留下“published 指向另一代文件”；用同一命令重跑会沿唯一 operation id 前滚收敛（若 OS 级硬退出留下 stale vault lock，先按既有 `unlock` 协议回收）。旧证据保存在 `pipeline-workspace/reuse-reseals/<src>/<operation-id>/old-evidence/`，transition 记录新旧 SHA，精确重跑是全树 byte/mtime no-op。旧 evidence、origin/PDF、source 页或状态已有损坏时，reseal 拒绝，不能拿它覆盖事故现场。
+
 ### ② 一句话入库（ingest）
 
 把 **PDF / DOCX / PPTX / Markdown** 放进 `books/<name>/input/`，然后对 agent 说一句话即可。下例用占位符 `<...>` 表示你自己的文件与领域：
@@ -268,14 +277,14 @@ pdf-to-study-kb/
 
 所有 skill 背后调用的都是 `python scripts/pipeline.py <command>`（零 LLM、可独立运行，**全部业务逻辑与安全守卫都在这里**）。日常对话无需手动输入；该接口面向**精细控制、问题排查、手动重跑某一阶段、无人值守脚本化**等高级场景。
 
-命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 48 个子命令（以 `python scripts/pipeline.py --help` 为准）：
+命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 49 个子命令（以 `python scripts/pipeline.py --help` 为准）：
 
 <details>
 <summary><b>展开：完整 CLI 命令参考</b></summary>
 
 ### 状态与维护
 
-> **为什么有这组**：ingest 是可中断的长任务，且同一 vault 受并发锁保护。这组命令让你不依赖 LLM 就能"看清现状 + 崩溃自救"——`status`/`next` 回答"每个来源走到哪一步、锁在谁手里、下一步该做什么"；`fail` 把崩溃残留的 `running` 阶段标记 `failed` 以便重跑；`unlock` 受控回收超时的 stale 锁（活锁拒绝，防误删）；`adopt-vault` 以不可变基线接管既有库；`reuse-source` 从只读 published vault 登记选择性复用；`rebuild-registry` 从概念页 frontmatter 重建派生索引；`rebuild-graph` 从 published 图谱重建 graph-data + 离线 HTML 力导向图（派生阅读层，fail-hard）、`graph-lint` 校验图谱产物；`rebuild-quiz` 从 published 页的 `[!question]` 重建自测题库索引（复习入口，派生阅读层）；`rebuild-propositions` 从 published 页的具名命题（`**命题（名）**：…`）重建命题总表（全库结论清单，名字即锚点）；`init-vault` 幂等搭起空脚手架。
+> **为什么有这组**：ingest 是可中断的长任务，且同一 vault 受并发锁保护。这组命令让你不依赖 LLM 就能"看清现状 + 崩溃自救"——`status`/`next` 回答"每个来源走到哪一步、锁在谁手里、下一步该做什么"；`fail` 把崩溃残留的 `running` 阶段标记 `failed` 以便重跑；`unlock` 受控回收超时的 stale 锁（活锁拒绝，防误删）；`adopt-vault` 以不可变基线接管既有库；`reuse-source` 从只读 published vault 登记选择性复用；`reseal-source` 在旧证据完整前提下受控替换 v1→v2 topic 证据；`rebuild-registry` 从概念页 frontmatter 重建派生索引；`rebuild-graph` 从 published 图谱重建 graph-data + 离线 HTML 力导向图（派生阅读层，fail-hard）、`graph-lint` 校验图谱产物；`rebuild-quiz` 从 published 页的 `[!question]` 重建自测题库索引（复习入口，派生阅读层）；`rebuild-propositions` 从 published 页的具名命题（`**命题（名）**：…`）重建命题总表（全库结论清单，名字即锚点）；`init-vault` 幂等搭起空脚手架。
 
 | 命令 | 作用 | 关键参数 |
 |------|------|------|
@@ -284,6 +293,7 @@ pdf-to-study-kb/
 | `init-vault` | 建 `wiki/` 脚手架 + 种子文件（幂等，不覆盖） | — |
 | `adopt-vault` | 接管既有 vault 基线：默认零写 dry-run；legacy `wiki_gate` 内容债 warning-only，安全/ZIP/证据/source/state/台账完整性才 hard-block；`--apply` 在锁内落不可变证据、重建派生层，成功后登记 `legacy-vault` 的 `adopted/published`，既有知识页不改写、三类 ingest 台账为零；精确重跑全树 byte no-op，接管后 live 演进只报 drift warning，历史归档/证据/状态漂移仍 fail-closed | `--source --title --domain --baseline-archive --baseline-sha256 [--apply]` |
 | `reuse-source` | 从只读 published vault 复用来源：默认零写；核验 PDF SHA、origin state/source 页与全部 concept/topic 页、mapping（v1/v2）覆盖集与 origin 概念集相等、concept 与 topic 两个维度的目标归因边界；apply 冻结 origin/mapping/首次 target snapshot，派生成功后登记 `external-vault-reuse` 的 `reused/published`，三类 ingest 台账为零；target live 演进 warning-only，origin/mapping/evidence/source/state 漂移 fail-closed | `--source --title --domain --path --sha256 --origin-root --origin-source --mapping [--expect-concepts --expect-topics --apply]` |
+| `reseal-source` | 仅在完整旧 reuse v1 证据上补 topic 维度：默认零写；不可改 metadata/PDF/origin/concept mapping/计数/target baseline；apply 先暂存新代、降为 running、归档 v1、替换 evidence/source、重建派生，最后原子更新 state SHA 并 republish；确定性 operation 支持崩溃前滚与精确 no-op | `--source --mapping --from-manifest-sha256 [--apply]` |
 | `unlock` | 受控回收 stale vault 锁；活锁拒绝 | `--ttl 1800` |
 | `fail` | 把崩溃残留的 `running` 阶段标记 `failed` | `--source --stage --error` |
 | `rebuild-registry` | 从概念页 frontmatter 重建 `_registry.yaml`（`aliases.md` 已退休，别名只在概念页 frontmatter；残留会被主动清理） | — |
@@ -336,6 +346,8 @@ pdf-to-study-kb/
 | `reopen` | 重开已收尾来源做增量补充（重建 workorder + 状态机回 `workorder_ready`） | `--source` |
 | `reset-source` | **维护**：确定性重置到某预处理阶段刚完成（forward-only 状态机的回退出口；**默认 dry-run**，只删下游 stage-run 缓存行 + 插 reset 审计行，不动 ingest_progress/artifacts/work_orders/review_proposals/staging） | `--source --to {registered,profiled,converted,windowed,workorder_ready} [--apply]` |
 | `retract-source` | **证据先行撤库**（**默认 dry-run**）：先导出证据包（页字节 + SHA256 manifest + 全部账本行）并核验，才删该源独占页、清账本、重置状态、重建派生层；共享页与 `managed_by: human` 页只报告不删。**`overview.md` 是 vault 永久入口**：独占本源则旧版进证据包并在删后从 `templates/overview.md` 原样重建 seed（派生层重建之前）、shared/human 则字节不变保留；apply 后 overview 必定存在 | `--source [--to {workorder_ready,registered}] [--apply]` |
+
+> **已知限制**：`retract-source` 目前只支持普通 ingest 线性状态，不支持 `adopted/published` 或 `reused/published` 终态；不要对这两类来源执行撤库。`reseal-source` 只做证据替换，不是退役路径。
 | `sync-assets` | 把本源 staging 难页 PNG 同步进 `wiki/assets/<src>/`（预处理 / reopen 会自动调用） | `--source` |
 | `staging-clean` | **磁盘治理**：staging 三分类报告（审计保留 / 可再生可删 mineru_raw·audit·diag·dump_* / unknown 一律保留）；**默认 dry-run**，`--apply` 双护栏（source 已 published + assets 同步核对通过） | `--source [--apply]` |
 | `promotion-candidates` | 检测跨域提升候选（人工确认） | `--propose` |

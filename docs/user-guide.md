@@ -154,6 +154,22 @@ python -B scripts/pipeline.py reuse-source --source mysql --title "MySQL是怎�
 - **重复与漂移**：精确重跑先逐项验证 registry/index/graph/quiz/propositions 派生文件，再作全树 byte/mtime no-op；缺失/损坏会在目标锁内重建。后续 SQL 来源修改 target 页只报 `post-reuse-target-live-drift`，历史 target snapshot 不变。origin/PDF/mapping/evidence/source/state 漂移 fail-closed。成功后可删除临时 mapping，重放时把 `--mapping` 指向 evidence 自带的 `mapping.json`。
 - **台账边界**：本 vault 的 `work_orders`、`ingest_progress`、`window_reads` 对该来源始终为 0；origin 全程只读。
 
+### 第 0C 步（仅证据返工）：把完整的 reuse mapping v1 重封为 v2
+
+既有 v1 **无需迁移**；只有目标库后来出现了 v1 无法声明的合法 topic 归因，才使用独立的 `reseal-source`。它不退役来源、不重新 ingest，也不会从普通 `reuse-source` 意外触发。先取现役 `pipeline-workspace/reuses/<src>/manifest.json` 的 SHA-256，再只读预演：
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE=1
+python -B scripts/pipeline.py reseal-source --source mysql `
+  --mapping "C:\tmp\mysql-mapping-v2.json" --from-manifest-sha256 <旧manifest的64位SHA256>
+# 核对 operation、新旧 manifest/mapping SHA 与 topic target 数后再加 --apply
+```
+
+- **只允许 topic-only 差异**：source_id/domain/title/format/证据 version、PDF path/SHA、origin root/source/state/pages 必须与 v1 完全相同；concept `targets`、映射计数和 `target_pages` 也必须相同。metadata 不提供覆盖参数，全部从旧 manifest 导出。
+- **旧证据必须先自证完整**：manifest/mapping/origin-state/origin-files/target-files、live origin 页面与 PDF 任一漂移都拒绝；source 页只有仍等于旧 canonical 字节才可替换，不能用 reseal “修复”损坏证据或覆盖手改。
+- **apply 与恢复**：在 vault 锁内先暂存 transition + 完整新证据；把 source state 从 published 降为 `reused/running` 后才归档旧 evidence、激活新 evidence、替换 source 页并重建派生层，最后原子更新 stage/artifact SHA 并恢复 published。中途失败用同一命令重跑，按确定性 operation id 前滚；published 状态不会指向另一代文件。若进程被 OS 直接杀死而留下 stale vault lock，先按常规 `unlock` 协议回收再重跑。
+- **审计与重放**：旧 v1 全目录在 `pipeline-workspace/reuse-reseals/<src>/<operation-id>/old-evidence/`；transition 串起新旧 SHA，`log.md` 记发生日期。成功后普通 `reuse-source` 用 v2 mapping 重放应为 byte/mtime no-op；精确 reseal 重跑也不再新建归档。
+
 ### 第 1 步（可选但推荐）：填学习目标
 
 - **目的**：让产出贴合你的需求。
@@ -247,7 +263,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 ### 5.3 底层 CLI 操作（高级排障 / 手动重跑）
 
 > 所有 skill 背后都是 `python scripts/pipeline.py <command>`。下面按生命周期分组，标注**必填/可选参数**。
-> 共 **48 个**子命令（完整实现映射见开发文档 §3；含 `adopt-vault` 既有库基线接管、`reuse-source` 跨 vault 来源复用、`vault-lint` 全库渲染安全健康门禁、`lint --source kb-save --session <run_id>` 会话发布路径与 `retract-source` 证据先行撤库）。
+> 共 **49 个**子命令（完整实现映射见开发文档 §3；含 `adopt-vault` 既有库基线接管、`reuse-source` 跨 vault 来源复用、`reseal-source` v1→v2 证据重封、`vault-lint` 全库渲染安全健康门禁、`lint --source kb-save --session <run_id>` 会话发布路径与 `retract-source` 证据先行撤库）。
 
 **状态与维护：**
 
@@ -258,6 +274,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | `init-vault` | 建 `wiki/` 脚手架（幂等） | — | — | `python scripts/pipeline.py init-vault` |
 | `adopt-vault` | 接管既有 vault；默认 byte-zero-write dry-run，legacy 内容门禁债 warning-only，安全/ZIP/证据/source/state/台账完整性 hard-block；`--apply` 在锁内落证据并重建派生层，成功后才登记 `adopted/published`；精确重跑 byte no-op，接管后 live 演进只报 drift warning，历史证据/状态漂移 fail-closed | `--source --title --domain --baseline-archive --baseline-sha256` | `--apply` | `... adopt-vault --source legacy-kb --title "既有库" --domain general --baseline-archive "C:\backups\wiki.zip" --baseline-sha256 <SHA256>` |
 | `reuse-source` | 从只读 published vault 登记选择性来源复用；核验 PDF/origin state/source 页与全部 concept/topic 页、mapping（v1/v2）覆盖集与 origin 概念集相等、concept 与 topic 两维的零映射目标不得有该归因；apply 冻结 evidence，派生成功后才登记 `reused/published`；精确重跑 byte no-op，target live 演进 warning-only，origin/mapping/evidence/source/state 漂移 fail-closed | `--source --title --domain --path --sha256 --origin-root --origin-source --mapping` | `--expect-concepts --expect-topics --apply` | `... reuse-source --source mysql --title "MySQL" --domain sql --path "C:\books\mysql.pdf" --sha256 <SHA256> --origin-root "D:\pdf-to-study-kb" --origin-source mysql --mapping "C:\tmp\mysql.json"` |
+| `reseal-source` | 仅在完整 reuse v1 证据上补 mapping v2 topic 维度；metadata/PDF/origin/concept mapping/计数/target baseline 不可变；apply 归档 v1 并以 running 中间态替换 evidence/source/派生/state，崩溃可前滚、精确重跑 no-op | `--source --mapping --from-manifest-sha256` | `--apply` | `... reseal-source --source mysql --mapping "C:\tmp\mysql-v2.json" --from-manifest-sha256 <旧SHA256>` |
 | `unlock` | 回收 stale vault 锁（活锁拒绝） | — | `--ttl 1800` | `python scripts/pipeline.py unlock` |
 | `fail` | 把崩溃残留的 running 阶段标 failed | `--source --stage --error` | — | `... fail --source X --stage converted --error "原因"` |
 | `rebuild-registry` | 从概念页重建 `_registry.yaml`（aliases.md 已退休，残留自动清理） | — | — | `... rebuild-registry` |
@@ -310,6 +327,8 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | `reset-source` | **状态机"倒带键"**：某一步卡死重跑不了时，安全回退到更早的阶段。**默认只打印计划不改库**，确认后加 `--apply` | `--source --to {registered,profiled,converted,windowed,workorder_ready}` | `--apply` |
 | `retract-source` | **证据先行撤库**：把一本已入库的书连页带账本安全卸下。**默认只打印计划不改库**——加 `--apply` 才会先导出证据包（页字节 + SHA256 manifest + 全部账本行）并核验，再删该源独占页、清账本、重置状态、重建派生层；共享页与人工页只报告不删。**`overview.md` 首页永久保留**：若独占本源则旧版进证据包、删后从模板原样重建空白 seed，shared/human 则原样不动；撤库后你打开 vault 仍有入口（dry-run 会显示 overview 将 keep 还是 reseed） | `--source` | `--to {workorder_ready,registered}` `--apply` |
 | `staging-clean` | **清理一本书处理时留下的临时文件**（可能几百 MB）。**默认只列清单不删**；`--apply` 前会自动检查"这本书是否已发布""图片是否已同步进 vault"，两条不满足直接拒绝执行 | `--source` | `--apply` |
+
+> **已知限制**：`retract-source` 尚不支持 `adopted/published` 与 `reused/published` 两类旁路终态；不要对这两类来源执行撤库。`reseal-source` 只替换证据，不提供退役能力。
 
 ### 5.4 主流程之外、你仍会接触的场景
 
