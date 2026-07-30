@@ -568,7 +568,7 @@ OS 级调度提供的是收敛式重试，而非“一次完成”的保证：�
 
 测试按 pytest marker 分层（marker 注册在 [`pytest.ini`](pytest.ini)，文件→tier 的唯一注册表在 [`tests/_tiering.py`](tests/_tiering.py)，[`tests/conftest.py`](tests/conftest.py) 在收集期执行 fail-closed 归层守卫——新测试文件不登记 tier 就无法收集，杜绝静默漏测）：`fast`（正向白名单 = 日常层）/ `cli` / `slow` / `skill` / `realbook`（预留）。默认不要把全量 `pytest tests` 当作每次编辑后的必跑命令；普通开发先跑日常层，发布、重构、真实书籍验证前再跑全量门禁。
 
-Windows 上建议每次给 pytest 一个新的 `--basetemp`，避免历史运行残留的 `pytest-of-Lenovo` 临时目录被文件句柄锁住后影响新一轮测试。
+Windows 上建议每次给 pytest 一个新的 `--basetemp`，避免历史运行残留的 `pytest-of-<user>` 临时目录被文件句柄锁住后影响新一轮测试。
 
 ```powershell
 $env:PYTHONUTF8=1

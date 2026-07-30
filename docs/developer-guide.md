@@ -727,7 +727,7 @@ lint 违规 `frontmatter-incomplete`）。
 
 - 写盘统一 `newline="\n"`（`concept_store.write_registry` 等）——否则 Windows 默认 `\r\n` 会让 hash
   守卫误报 stale registry。
-- 测试每次给新 `--basetemp`，避免 `pytest-of-Lenovo` 临时目录被句柄锁住。
+- 测试每次给新 `--basetemp`，避免 `pytest-of-<user>` 临时目录被句柄锁住。
 - 用 `pwsh`（PowerShell 7）+ study-kb 解释器直接跑，勿经 Git Bash 驱动 PowerShell。
 - `--writes-file <path.json>`（`window-done`）：Windows 上经 `conda run` 调用时命令行双引号会被吞，
   `--writes '["a.md"]'` 变成非法 JSON `[a.md]`；改把数组写进文件走 `--writes-file` 可整体绕开这个坑。

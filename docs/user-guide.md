@@ -429,7 +429,7 @@ $env:PYTHONUTF8=1
 
 # 放入带空格路径的文件
 New-Item -ItemType Directory -Force -Path "books\micro econ\input" | Out-Null
-Copy-Item "C:\Users\Lenovo\Downloads\微观 经济学 第3版.pdf" "books\micro econ\input\micro.pdf"
+Copy-Item "C:\books\微观 经济学 第3版.pdf" "books\micro econ\input\micro.pdf"
 
 # 手动跑预处理（如不用对话，演示含空格路径的 --path 写法）
 python scripts/pipeline.py add-source --source micro-econ --domain economics --fmt pdf `
