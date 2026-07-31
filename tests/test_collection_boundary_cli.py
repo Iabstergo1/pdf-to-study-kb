@@ -85,3 +85,80 @@ def test_leftover_basetemp_props_are_excluded(extra_args, mechanism):
             f"（调用方式：pytest {' '.join(extra_args) or '（无路径参数）'}）")
     finally:
         shutil.rmtree(scene, ignore_errors=True)
+
+
+# ── STUDY_KB_ROOT 隔离的端到端验收（2026-07-31）─────────────────────────────────
+# 纯判定矩阵在 test_sandbox_guard.py（fast 层）；这里跑真子进程，验证 conftest 在 **collection
+# 之前**就兑现了拒绝与隔离——这是只有真跑一次才看得出来的性质。
+
+def _fingerprint(root: Path):
+    """(相对路径, sha256, mtime_ns) 聚合指纹；用于断言真实树一个字节都没动。"""
+    import hashlib
+    if not root.exists():
+        return None
+    h = hashlib.sha256()
+    for f in sorted(root.rglob("*")):
+        if f.is_file():
+            st = f.stat()
+            h.update(f.relative_to(root).as_posix().encode("utf-8"))
+            h.update(hashlib.sha256(f.read_bytes()).digest())
+            h.update(str(st.st_mtime_ns).encode("ascii"))
+    return h.hexdigest()
+
+
+@pytest.mark.parametrize("unsafe_rel", ["", "wiki", "pipeline-workspace"])
+def test_pytest_refuses_an_unsafe_study_kb_root_before_collection(unsafe_rel):
+    """场景 1：把 STUDY_KB_ROOT 指向真实库再跑 pytest，必须在收集前 fail-closed。
+
+    仅 `--collect-only`，且断言目标树 byte/mtime 不变——这条测试自己绝不能写真实库。
+    """
+    unsafe = REPO_ROOT / unsafe_rel if unsafe_rel else REPO_ROOT
+    if not unsafe.exists():
+        pytest.skip(f"{unsafe} 不存在（本机未初始化），跳过")
+    before = _fingerprint(unsafe)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "--no-header",
+         "-p", "no:cacheprovider", "tests/test_sandbox_guard.py"],
+        cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8",
+        env={**os.environ, "STUDY_KB_ROOT": str(unsafe), "PYTHONUTF8": "1",
+             "PYTHONDONTWRITEBYTECODE": "1"})
+
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0, combined[-3000:]
+    assert "unsafe STUDY_KB_ROOT for tests" in combined, combined[-3000:]
+    assert _fingerprint(unsafe) == before, f"{unsafe} 在被拒绝的这轮里被写过"
+
+
+def test_a_clean_session_allocates_an_isolated_study_kb_root():
+    """场景 2（端到端）：在**完全没有** STUDY_KB_ROOT 的环境里跑真 pytest，隔离断言自证。
+
+    子 session 里跑的那两条用例本身就断言"根落在临时区、不等于仓库根、子进程继承同一个根"，
+    所以这里只需要它们在干净环境下通过。
+    """
+    env = {k: v for k, v in os.environ.items() if k != "STUDY_KB_ROOT"}
+    guard = "tests/test_sandbox_guard.py"
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider",
+         f"{guard}::test_session_study_kb_root_is_isolated_and_inherited_by_subprocesses",
+         f"{guard}::test_workspace_root_default_no_longer_falls_back_to_the_repo"],
+        cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8",
+        env={**env, "PYTHONUTF8": "1", "PYTHONDONTWRITEBYTECODE": "1"})
+    assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-2000:]
+    assert "2 passed" in result.stdout, result.stdout[-2000:]
+
+
+def test_per_test_override_keeps_cli_writes_inside_its_own_tmp_path(monkeypatch, tmp_path):
+    """场景 3（CLI 部分）：单测覆盖后，真实 CLI 只写自己的 tmp_path，session 根不被碰。"""
+    session_root = Path(os.environ["STUDY_KB_ROOT"])
+    session_before = sorted(p.name for p in session_root.iterdir())
+
+    monkeypatch.setenv("STUDY_KB_ROOT", str(tmp_path))
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "pipeline.py"), "init-vault"],
+        cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", env={**os.environ})
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "wiki" / "overview.md").is_file(), "CLI 应写进本测试自己的 tmp_path"
+    assert sorted(p.name for p in session_root.iterdir()) == session_before, \
+        "session 全局根不得被本测试写入"

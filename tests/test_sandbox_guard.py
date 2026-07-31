@@ -110,3 +110,79 @@ def test_docs_do_not_teach_pwd_relative_basetemp():
         text = (REPO_ROOT / rel).read_text(encoding="utf-8")
         assert "$PWD\\tmp" not in text and "$PWD/tmp" not in text, \
             f"{rel} 仍在教 $PWD 相对的 basetemp（换目录跑就会污染别人的工作区）"
+
+
+# ── STUDY_KB_ROOT 全局隔离 ────────────────────────────────────────────────────
+# `pipeline._workspace_root()` 未设该变量时回落到**仓库根**，设了就无条件采信。部分 CLI 测试会
+# 自行把它指向 tmp_path，但那是分散约定、不是全局保证。这里把它变成 pytest 的全局合同。
+
+# 判定只看"是否落在临时区之下"，被测路径无需真实存在。用盘符/根锚定的虚构路径构造，
+# 不写死任何人的目录名——也不能用 `REPO_ROOT.parent`：仓库若被克隆进临时区（CI 常见），
+# 那个父目录反而会落进白名单，本组断言就会假绿。
+_OUTSIDE_TEMP = Path(REPO_ROOT.anchor) / "not-a-temp-area" / "external-vault"
+
+
+def _r(value):
+    return _sandbox.study_kb_root_violations(value, REPO_ROOT, TEMP_ROOTS)
+
+
+def test_unset_or_blank_study_kb_root_is_allowed():
+    # 未设置 = conftest 会分配 session 临时根，判定阶段不算违规。
+    assert _r(None) == [] and _r("") == [] and _r("   ") == []
+
+
+def test_temp_and_repo_tmp_study_kb_roots_are_allowed():
+    assert _r(Path(tempfile.gettempdir()) / "study-kb-testroot-abc") == []
+    assert _r(REPO_ROOT / "tmp" / "testroot-1") == []
+
+
+def test_real_vault_and_repo_root_study_kb_roots_are_flagged():
+    for unsafe in (REPO_ROOT, REPO_ROOT / "wiki", REPO_ROOT / "pipeline-workspace",
+                   _OUTSIDE_TEMP):
+        problems = _r(unsafe)
+        assert problems, f"{unsafe} 应被判为不安全的测试 STUDY_KB_ROOT"
+        assert "unsafe STUDY_KB_ROOT for tests" in problems[0]
+
+
+def test_temp_root_itself_is_flagged_like_basetemp():
+    # 与 basetemp 同口径：只接受"之下"，不接受共享根本身。
+    assert _r(tempfile.gettempdir())
+    assert _r(REPO_ROOT / "tmp")
+
+
+def test_session_study_kb_root_is_isolated_and_inherited_by_subprocesses():
+    """场景 2：正常 session 自动拿到独占临时根，且普通子进程继承同一个根。"""
+    root = os.environ.get("STUDY_KB_ROOT")
+    assert root, "conftest.pytest_configure 应在 collection 前分配 session 临时根"
+    norm = os.path.normcase(os.path.abspath(root))
+    assert norm != os.path.normcase(str(REPO_ROOT)), "session 根不得是仓库根"
+    assert _r(root) == [], f"session 根本身必须落在允许的临时区：{root}"
+
+    out = subprocess.run(
+        [sys.executable, "-c", "import os; print(os.environ.get('STUDY_KB_ROOT', ''))"],
+        capture_output=True, text=True, encoding="utf-8", env={**os.environ})
+    assert os.path.normcase(os.path.abspath(out.stdout.strip())) == norm, out.stdout + out.stderr
+
+
+def test_workspace_root_default_no_longer_falls_back_to_the_repo():
+    """场景 4：不显式传 STUDY_KB_ROOT 的子进程，`_workspace_root()` 必须落在 session 根。"""
+    code = ("import sys; sys.path.insert(0, r'%s'); import pipeline; print(pipeline._workspace_root())"
+            % (REPO_ROOT / "scripts"))
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         encoding="utf-8", env={**os.environ})
+    resolved = os.path.normcase(os.path.abspath(out.stdout.strip()))
+    assert resolved != os.path.normcase(str(REPO_ROOT)), out.stdout + out.stderr
+    assert resolved == os.path.normcase(os.path.abspath(os.environ["STUDY_KB_ROOT"]))
+
+
+def test_per_test_env_override_is_restored_after_the_test(monkeypatch, tmp_path):
+    """场景 3（纯环境部分）：单测覆盖立即生效、退出后回到 session 根。
+
+    真正跑 CLI、断言"只写自己的 tmp_path"的那半在 `test_collection_boundary_cli.py`（cli 层）——
+    本文件是 fast 层（纯函数/直接模块），不放起完整 CLI 的用例。
+    """
+    session_root = os.environ["STUDY_KB_ROOT"]
+    monkeypatch.setenv("STUDY_KB_ROOT", str(tmp_path))
+    assert os.environ["STUDY_KB_ROOT"] == str(tmp_path)
+    monkeypatch.undo()
+    assert os.environ["STUDY_KB_ROOT"] == session_root

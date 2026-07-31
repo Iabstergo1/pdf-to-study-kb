@@ -176,8 +176,19 @@ python -m pytest tests -q -m fast        # daily tier, seconds (counts drift; py
 python -m pytest tests/test_doctor_cli.py -q   # targeted subsystem run when touching that CLI
 python -m pytest tests -q                # full gate ~3 min before publish/refactor
 # only if the default temp dir is locked — absolute, repo-anchored, never $PWD:
-python -m pytest tests -q --basetemp="D:\pdf-to-study-kb\tmp\pt-$(Get-Random)"
+python -m pytest tests -q --basetemp="<repo-root>\tmp\pt-$(Get-Random)"
 ```
+
+**`STUDY_KB_ROOT` must never point at a real vault while running pytest.** `_workspace_root()` trusts
+that variable unconditionally and falls back to the **repo root** when it is unset, so a test that
+forgets to override it writes a real `wiki/` / SQLite / `staging/`. `tests/conftest.py` therefore
+fail-closes **before collection**: an incoming value outside the temp sandbox (system temp or
+`<repo>/tmp/`) aborts the run with `unsafe STUDY_KB_ROOT for tests` — it is rejected, not silently
+overridden, because the caller needs to learn that their command was dangerous. A clean session is
+then handed its **own** temporary workspace root, inherited by every subprocess; individual tests may
+still override it to their `tmp_path`. **Just don't set it when running tests.** A real
+`STUDY_KB_ROOT=<vault>` belongs only to manual acceptance commands run *outside* pytest, and those
+stay **dry-run by default** unless the task explicitly authorises `--apply`.
 
 ## 9. Authority & do-not-reintroduce
 

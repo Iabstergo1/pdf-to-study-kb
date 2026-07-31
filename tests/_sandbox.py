@@ -62,6 +62,34 @@ def basetemp_violations(basetemp, repo_root, temp_roots) -> list[str]:
     ]
 
 
+def study_kb_root_violations(value, repo_root, temp_roots) -> list[str]:
+    """调用方传入的 ``STUDY_KB_ROOT`` 边界判定 → 违规消息（空 = 合规或未设置）。
+
+    **动机**：`pipeline._workspace_root()` 未设该变量时回落到**仓库根**，设了就无条件采信。
+    部分 CLI 测试会自行把它指向 ``tmp_path``，但那是分散约定、不是全局保证。一旦有人把它指向
+    一个真实知识库再跑 pytest，任何漏设该变量、又起子进程调 CLI 的用例都会
+    **直接写那个真实 vault / SQLite / staging**。
+
+    因此 pytest 侧改成 fail-closed：只接受临时区之下的根（系统临时目录或 `<repo>/tmp/`），
+    其余一律拒绝而**不是静默覆盖**——静默覆盖会让调用者不知道自己刚才那条命令本身有数据风险。
+    纯函数（不触磁盘）；fail-closed 语义由 ``conftest.py`` 兑现。
+    """
+    if value is None or not str(value).strip():
+        return []
+    target = _normalised(value)
+    allowed = [_normalised(Path(repo_root) / "tmp")]
+    allowed += [_normalised(root) for root in temp_roots]
+    if any(_is_below(target, root) for root in allowed):
+        return []
+    return [
+        f"unsafe STUDY_KB_ROOT for tests: {value}"
+        f"（只允许 {Path(repo_root) / 'tmp'} 或系统临时区**之下**的目录。"
+        "pytest 会把这个根当成知识库工作区：漏设该变量的 CLI 用例会直接写真实 wiki/SQLite/staging。"
+        "跑测试时请不要设置它——conftest 会自动分配本次 session 独占的临时根；"
+        "真实 STUDY_KB_ROOT 只用于 pytest 之外的人工验收命令）"
+    ]
+
+
 def collected_outside_tests(collected_paths, tests_dir) -> list[str]:
     """收集到的用例路径 → 违规消息列表（空 = 全部落在 ``tests/`` 之内）。
 
