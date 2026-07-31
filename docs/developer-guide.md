@@ -1,6 +1,6 @@
 # PDF to Study KB — 开发实现说明（Developer Implementation Guide）
 
-> 本文面向开发者，描述仓库 `D:\pdf-to-study-kb` 的架构、模块职责、数据契约、命令层与测试。
+> 本文面向开发者，描述本仓库的架构、模块职责、数据契约、命令层与测试。
 > 所有结论以**源码为准**。
 > 面向使用者的操作说明见 [用户使用说明](user-guide.md)。
 > 版本锚点：当前工作树（2026-07-30 增量核对）；**49 个 CLI 子命令**（含 `adopt-vault` 基线接管、`reuse-source` 跨 vault 来源复用与 `reseal-source` 证据重封）/ 11 个技能。测试数量以 `pytest --collect-only -q` 为准——本轮两次证明精确计数写进文档当场就腐烂，故不再保留任何快照。
@@ -502,13 +502,61 @@ version 是两件事——后者记在 `mapping.json` 里并由 `mapping_sha256`
 完全验证重跑只有在 canonical evidence/source/state 与 registry/index/graph JSON+HTML/quiz/propositions
 六类派生文件都按当前 published 页重新计算一致后才在加锁前返回，是全 workspace byte/mtime no-op；派生缺失/
 损坏则进入目标锁内重建。published 后 target 页可被后续来源合法修改，
-只报 `post-reuse-target-live-drift`，历史 target copies 不重算；origin live、PDF、mapping raw bytes、
-evidence/source/state 任一漂移仍 fail-closed。manifest 不把临时 mapping 路径当身份，成功后可删除临时
-输入，并以 evidence 自带的 `mapping.json` 重放。
+只报 `post-reuse-target-live-drift`，历史 target copies 不重算。manifest 不把临时 mapping 路径当身份，
+成功后可删除临时输入，并以 evidence 自带的 `mapping.json` 重放。
+
+**origin 侧漂移判据分两层（2026-07-31）。** `origin_state_sha256` 只证明 evidence 内
+`origin-state.json` 归档字节未被篡改（不符即 `reuse-evidence-corrupt`），**不再**充当"live origin
+必须逐字节不变"的重放前提。重放比较的是 **frozen↔live 生产状态投影**：
+
+| 变化 | 判定 |
+|---|---|
+| 生产状态六表（`sources` / `source_stage_runs` / `artifacts` / `work_orders` / `ingest_progress` / `window_reads`）任一行任一字段 | **fail-closed** `origin production state drift` |
+| PDF、mapping raw bytes、origin source/concept/topic 页、evidence/source/目标 state | **fail-closed**（原样保留） |
+| 仅 `review_proposals`（运营诊断账本）增删改 | warning `post-reuse-origin-diagnostics-drift`，放行且仍是 byte/mtime no-op |
+
+诊断表必须排除的原因是**它会在没人碰这个来源的情况下增长**：对任何来源跑 lint，vault preflight 都以
+违规页自己的 owner 新增 proposal。把它当重放前提会造出无合法出口的死锁——reuse 拒绝、reseal 拒绝、
+而 `retract-source` 不支持 `reused/published` 终态。
+
+> **已知操作边界：死锁只是被收窄，没有消除。** 上面解除的是**诊断**漂移造成的死锁；**生产**状态
+> 漂移的无恢复路径**依然存在**。origin generation 一旦变化，`reuse-source` 与 `reseal-source` 都会
+> 拒绝生产投影漂移，而 `retract-source` 当前不支持 `reused/published` 终态——三条路同时不通，且
+> 手工把生产状态改回冻结值属于**伪造**，不是恢复方案。
+>
+> 生产漂移可以由**完全合法**的操作产生：对已被复用的 origin 来源执行 `reopen` 或重新摄取，就会改动
+> `source_stage_runs`、`work_orders.round`、`ingest_progress` 的 round/status/写集、`window_reads.round`、
+> `artifacts`，以及 published 页面及其哈希。
+>
+> 因此：**在下游 reuse evidence 仍需保持可重放、且尚无证据升级或安全退役路径之前，不要对被复用的
+> origin 来源执行 `reopen` 或重新摄取。** 确需更新时，先规划下游 evidence generation 升级再动 origin。
+> 未来若要支持，应另立 evidence upgrade 或安全退役方案——**不得塞进 mapping-only 的 `reseal-source`**
+> （它今天没有、也不应有这个能力）。
+
+投影字段**显式声明**（`_PRODUCTION_CONTRACT_V1`），不靠 `SELECT *` 决定证据语义：`_ensure_column`
+已经给三张生产表加过 `round`，加列是本项目的活跃行为。`_origin_state_snapshot` 在采集前对每张生产表
+跑 `PRAGMA table_info`，物理列 ≠ `included ∪ explicitly_excluded` 即 `origin-production-contract-mismatch`；
+归档快照的行字段判据是 `included ⊆ row ⊆ included ∪ excluded`（**不是严格相等**）：缺生产表、
+缺 **included** 字段，或出现 `included ∪ excluded` **之外**的未知字段时 fail-closed（缺表**不当空
+列表放行**）；而早于某个纯诊断列存在的旧快照，**允许**缺少后来才声明的 excluded 字段——否则把新
+物理列归入 excluded 这条扩展路径实际不可用，全部历史证据会当场判成不符。缺表仍不能用
+`reseal-source` 补救（它是 mapping-only），确需升级须另立 evidence upgrade 路径。frozen 与 live 共用唯一的
+`_origin_production_projection`，禁止两侧各维护一份字段或排序逻辑。`origin-state.json` 本身继续按
+`SELECT *` 导出全部八表（含 `review_proposals`）作为完整归档诊断，一个字节不减。
+
+`source_locks` 不进投影，但采集前仍显式断言为空——这是 **best-effort 竞态检测，不是跨库互斥锁**，
+也不构成"绝对一致快照"的保证：origin 是只读的，本命令无法在其上加锁。
 
 ### 4.2.3 reuse evidence 重封（`reseal-source`）
 
 选择独立子命令而非 `reuse-source --reseal`，因为普通复用的核心契约是“冻结后拒绝 mapping 变化”；把替换开关塞进同一命令会让一次参数误用翻转这条安全语义。`reseal-source` 的最小表面只有 source、新 mapping 与 `--from-manifest-sha256`，不存在 domain/title/PDF/origin 覆盖参数。`build_reseal_plan` 先完整加载并 `_validate_evidence` 旧代，再用旧 manifest 导出的 immutable 元数据计算新候选；mapping 必须 v1→非空 `topic_targets` 的 v2，concept `targets`、`mapped_target_count`、`zero_mapping_target_count`、`target_pages` 完全相同。证据格式 `version` 仍是 1，topic 只通过可选 `topic_target_pages` 与 mapping SHA 进入新代。
+
+**reseal 只改 mapping，origin 快照原样继承。** 旧代 `origin-state.json` 的字节与
+`origin_state_sha256` 必须原封不动进入新代——新代绝不用 live diagnostics 替换归档快照。实现上把
+frozen bytes **显式传进候选构建**（`build_plan(..., _frozen_origin_state_bytes=...)`），而不是先生成
+live 候选再逐字段覆盖：后者每加一个 manifest 字段都得记得同步覆盖，是合同的脆弱绕行。因此
+`origin_state_sha256` 得以继续留在 `_RESEAL_IMMUTABLE_MANIFEST_FIELDS` 中。frozen↔live 的生产投影
+比较照做：生产漂移仍 fail-closed，仅 diagnostics 漂移只 warning 并继续 reseal。
 
 operation id 是 canonical `{source_id, old_manifest_sha256, new_mapping_sha256}` 的 SHA-256 前缀。同一输入重试只命中一个 `pipeline-workspace/reuse-reseals/<src>/<id>/`；transition/source 字节/旧 evidence 任一碰撞不一致即拒绝，完全一致则继续恢复。日志记录日期，transition 负责串起新旧证据身份。
 

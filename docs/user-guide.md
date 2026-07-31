@@ -35,7 +35,7 @@
 | PyMuPDF + PyYAML（+ pytest） | **基础/开发依赖**：Markdown 与 PDF fast path 抽取、测试 | `requirements.txt` |
 | MinerU | **生产格式依赖**：strict PDF 双审、扫描 PDF、DOCX、PPTX 必须安装（未装则 fail-closed） | `requirements.txt` 末尾 MinerU 段 / `scripts/install_mineru.py` |
 | Claude Code 或 Codex | 对话接口，**二选一即可**（确定性行为一致） | README §安装 |
-| 项目本体 | 克隆到本地（示例：`D:\pdf-to-study-kb`） | — |
+| 项目本体 | 克隆到本地任意路径（下文一律用 `<repo-root>` 指代） | — |
 | Obsidian（可选） | 阅读成品 vault | README §安装 |
 | MinerU（可选） | PDF 严格验收的复核后端 + 扫描/低文本 PDF、DOCX/PPTX 的主解析器 | `requirements.txt` 末尾、README §安装 |
 
@@ -143,15 +143,16 @@ v2 在顶层多一个 `topic_targets`（形状与 `targets` 对称：`target` + 
 $env:PYTHONDONTWRITEBYTECODE=1
 python -B scripts/pipeline.py reuse-source --source mysql --title "MySQL是怎样运行的" --domain sql `
   --path "C:\books\mysql.pdf" --sha256 <64位SHA256> `
-  --origin-root "D:\pdf-to-study-kb" --origin-source mysql --mapping "C:\tmp\mysql-mapping.json"
+  --origin-root "<origin-vault-root>" --origin-source mysql --mapping "C:\tmp\mysql-mapping.json"
 ```
 
-- **启动契约**：dry-run 与 apply 都先设 `PYTHONDONTWRITEBYTECODE=1` 并用 `python -B`，因为正式 origin 也承载 CLI 代码；否则 Python import 可能更新 origin 的 `scripts/__pycache__`。origin state DB 必须是非 WAL rollback-journal 模式，且预先没有 `-wal/-shm` sidecar。
+- **占位符**：`<origin-vault-root>` 是**那个只读 vault 的根目录**（即含 `wiki/` 与 `pipeline-workspace/` 的目录），不是当前 vault，也不一定是本仓库。
+- **启动契约**：dry-run 与 apply 都先设 `PYTHONDONTWRITEBYTECODE=1` 并用 `python -B`，因为 origin vault 可能与 CLI 代码仓库同根；否则 Python import 可能更新 origin 的 `scripts/__pycache__`。origin state DB 必须是非 WAL rollback-journal 模式，且预先没有 `-wal/-shm` sidecar。
 - **默认行为**：byte-zero-write；PDF SHA、origin 的 read-only SQLite published state、canonical source 页、全部 concept/topic 页哈希、mapping 覆盖集与 origin 概念集相等、concept 与 topic 两个维度的目标归因边界任一不符即拒绝。
 - **可选形状确认**：`--expect-concepts N` / `--expect-topics N` 默认不设；只在你事先知道该拿到几张页时用来多加一道确认，不匹配即 fail-closed。
 - **目标归因前置**：非空映射目标必须已含 `source_refs: source: mysql`；两张零映射页必须不含 mysql，命令绝不替用户补写或伪造归因。
 - **确认后执行**：加 `--apply`。目标 vault 锁内写 `pipeline-workspace/reuses/mysql/` 的 manifest、原始 mapping、origin state、origin/target 首次快照和 canonical `wiki/sources/mysql.md`；派生层全成功后才登记 `external-vault-reuse`、`reused/published`。
-- **重复与漂移**：精确重跑先逐项验证 registry/index/graph/quiz/propositions 派生文件，再作全树 byte/mtime no-op；缺失/损坏会在目标锁内重建。后续 SQL 来源修改 target 页只报 `post-reuse-target-live-drift`，历史 target snapshot 不变。origin/PDF/mapping/evidence/source/state 漂移 fail-closed。成功后可删除临时 mapping，重放时把 `--mapping` 指向 evidence 自带的 `mapping.json`。
+- **重复与漂移**：精确重跑先逐项验证 registry/index/graph/quiz/propositions 派生文件，再作全树 byte/mtime no-op；缺失/损坏会在目标锁内重建。后续 SQL 来源修改 target 页只报 `post-reuse-target-live-drift`，历史 target snapshot 不变。origin **生产状态六表**（`sources`/`source_stage_runs`/`artifacts`/`work_orders`/`ingest_progress`/`window_reads`）与 PDF/mapping/evidence/source/state 漂移 fail-closed；origin 的 `review_proposals` 诊断账本变化只报 `post-reuse-origin-diagnostics-drift` 并放行——它会因为你对别的来源跑 lint 而自然增长，不代表被复用的内容有任何变化。成功后可删除临时 mapping，重放时把 `--mapping` 指向 evidence 自带的 `mapping.json`。
 - **台账边界**：本 vault 的 `work_orders`、`ingest_progress`、`window_reads` 对该来源始终为 0；origin 全程只读。
 
 ### 第 0C 步（仅证据返工）：把完整的 reuse mapping v1 重封为 v2
@@ -273,7 +274,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | `next` | 看每源下一步动作 | — | — | `python scripts/pipeline.py next` |
 | `init-vault` | 建 `wiki/` 脚手架（幂等） | — | — | `python scripts/pipeline.py init-vault` |
 | `adopt-vault` | 接管既有 vault；默认 byte-zero-write dry-run，legacy 内容门禁债 warning-only，安全/ZIP/证据/source/state/台账完整性 hard-block；`--apply` 在锁内落证据并重建派生层，成功后才登记 `adopted/published`；精确重跑 byte no-op，接管后 live 演进只报 drift warning，历史证据/状态漂移 fail-closed | `--source --title --domain --baseline-archive --baseline-sha256` | `--apply` | `... adopt-vault --source legacy-kb --title "既有库" --domain general --baseline-archive "C:\backups\wiki.zip" --baseline-sha256 <SHA256>` |
-| `reuse-source` | 从只读 published vault 登记选择性来源复用；核验 PDF/origin state/source 页与全部 concept/topic 页、mapping（v1/v2）覆盖集与 origin 概念集相等、concept 与 topic 两维的零映射目标不得有该归因；apply 冻结 evidence，派生成功后才登记 `reused/published`；精确重跑 byte no-op，target live 演进 warning-only，origin/mapping/evidence/source/state 漂移 fail-closed | `--source --title --domain --path --sha256 --origin-root --origin-source --mapping` | `--expect-concepts --expect-topics --apply` | `... reuse-source --source mysql --title "MySQL" --domain sql --path "C:\books\mysql.pdf" --sha256 <SHA256> --origin-root "D:\pdf-to-study-kb" --origin-source mysql --mapping "C:\tmp\mysql.json"` |
+| `reuse-source` | 从只读 published vault 登记选择性来源复用；核验 PDF/origin state/source 页与全部 concept/topic 页、mapping（v1/v2）覆盖集与 origin 概念集相等、concept 与 topic 两维的零映射目标不得有该归因；apply 冻结 evidence，派生成功后才登记 `reused/published`；精确重跑 byte no-op，target live 演进 warning-only，origin/mapping/evidence/source/state 漂移 fail-closed | `--source --title --domain --path --sha256 --origin-root --origin-source --mapping` | `--expect-concepts --expect-topics --apply` | `... reuse-source --source mysql --title "MySQL" --domain sql --path "C:\books\mysql.pdf" --sha256 <SHA256> --origin-root "<origin-vault-root>" --origin-source mysql --mapping "C:\tmp\mysql.json"` |
 | `reseal-source` | 仅在完整 reuse v1 证据上补 mapping v2 topic 维度；metadata/PDF/origin/concept mapping/计数/target baseline 不可变；apply 归档 v1 并以 running 中间态替换 evidence/source/派生/state，崩溃可前滚、精确重跑 no-op | `--source --mapping --from-manifest-sha256` | `--apply` | `... reseal-source --source mysql --mapping "C:\tmp\mysql-v2.json" --from-manifest-sha256 <旧SHA256>` |
 | `unlock` | 回收 stale vault 锁（活锁拒绝） | — | `--ttl 1800` | `python scripts/pipeline.py unlock` |
 | `fail` | 把崩溃残留的 running 阶段标 failed | `--source --stage --error` | — | `... fail --source X --stage converted --error "原因"` |
@@ -329,6 +330,8 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | `staging-clean` | **清理一本书处理时留下的临时文件**（可能几百 MB）。**默认只列清单不删**；`--apply` 前会自动检查"这本书是否已发布""图片是否已同步进 vault"，两条不满足直接拒绝执行 | `--source` | `--apply` |
 
 > **已知限制**：`retract-source` 尚不支持 `adopted/published` 与 `reused/published` 两类旁路终态；不要对这两类来源执行撤库。`reseal-source` 只替换证据，不提供退役能力。
+>
+> **被复用的来源不要随便 `reopen`**：只要另一个 vault 还在复用某个来源，就不要对它执行 `reopen` 或重新摄取——那会改变生产状态（阶段记录、round、窗口台账、页面哈希），而目前**没有**自动的证据升级或安全退役路径可用：复用与重封都会拒绝，撤库又不支持这类终态。真要更新，先规划下游证据升级再动 origin；把状态手工改回去是伪造，不是修复。（对别的来源跑 lint 导致该来源 `review_proposals` 增长属于正常运营，不受此限。）
 
 ### 5.4 主流程之外、你仍会接触的场景
 

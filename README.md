@@ -124,11 +124,11 @@ python scripts/pipeline.py adopt-vault --source <src> --title "<title>" --domain
 $env:PYTHONDONTWRITEBYTECODE=1
 python -B scripts/pipeline.py reuse-source --source mysql --title "MySQL是怎样运行的" --domain sql `
   --path "C:\books\mysql.pdf" --sha256 <64位SHA256> `
-  --origin-root "D:\pdf-to-study-kb" --origin-source mysql --mapping "C:\tmp\mysql-mapping.json"
+  --origin-root "<origin-vault-root>" --origin-source mysql --mapping "C:\tmp\mysql-mapping.json"
 # 核对打印出的 concepts / topics / mapped-targets / zero-mapping-targets 后，加 --apply
 ```
 
-`reuse-source` 默认 byte-zero-write，origin 全程以 read-only SQLite 和文件读取方式核验；origin state DB 必须使用非 WAL rollback journal，且调用前不得存在 `-wal/-shm` sidecar，否则在打开前 fail-closed。若 origin 同时是 CLI 代码仓库（正式 MySQL 场景即如此），dry-run 与 apply 都必须像上例同时设置 `PYTHONDONTWRITEBYTECODE=1` 并用 `python -B`，避免 import 更新 origin 下的 `scripts/__pycache__`。`--apply` 在目标 vault 锁内冻结 PDF、origin state/source 页与全部 concept/topic 页、mapping 与首次 target merge snapshot，新增 canonical source 页，重建全部派生层后才登记 `format=external-vault-reuse`、`reused/published`；三类 ingest 台账始终为 0。精确重跑会先验证 registry/index/graph/quiz/propositions 全部派生文件，再作全树 byte/mtime no-op；缺失或损坏则进入锁内重建。后续 target 页合法演进仅报 `post-reuse-target-live-drift`。origin/PDF/mapping/evidence/source/state 漂移 fail-closed。临时 mapping 可在成功后删除，正式重放改用 `pipeline-workspace/reuses/mysql/mapping.json`。
+`reuse-source` 默认 byte-zero-write，origin 全程以 read-only SQLite 和文件读取方式核验；origin state DB 必须使用非 WAL rollback journal，且调用前不得存在 `-wal/-shm` sidecar，否则在打开前 fail-closed。若 origin vault 与本 CLI 的代码仓库同根（把 `wiki/` 直接放在仓库里时即如此），dry-run 与 apply 都必须像上例同时设置 `PYTHONDONTWRITEBYTECODE=1` 并用 `python -B`，避免 import 更新 origin 下的 `scripts/__pycache__`。`--apply` 在目标 vault 锁内冻结 PDF、origin state/source 页与全部 concept/topic 页、mapping 与首次 target merge snapshot，新增 canonical source 页，重建全部派生层后才登记 `format=external-vault-reuse`、`reused/published`；三类 ingest 台账始终为 0。精确重跑会先验证 registry/index/graph/quiz/propositions 全部派生文件，再作全树 byte/mtime no-op；缺失或损坏则进入锁内重建。后续 target 页合法演进仅报 `post-reuse-target-live-drift`。origin **生产状态**（`sources`/`source_stage_runs`/`artifacts`/`work_orders`/`ingest_progress`/`window_reads` 六表任一字段）与 PDF/mapping/evidence/source/state 漂移 fail-closed；只有 origin 的 `review_proposals` 运营诊断账本变化例外——它会因为对**别的**来源跑 lint 而增长，故只报 `post-reuse-origin-diagnostics-drift` 并放行（归档字节仍由 manifest SHA 保护）。临时 mapping 可在成功后删除，正式重放改用 evidence 自带的 `pipeline-workspace/reuses/<src>/mapping.json`。
 
 既有 v1 一般无需迁移；**只有后来出现了 v1 无法声明的合法 topic 归因**时，才使用独立的 `reseal-source`，普通 `reuse-source` 永远不会自动进入替换分支。命令只接受 source、新 v2 mapping 与旧 manifest SHA；domain/title/PDF/origin 全由完整的旧证据导出，concept mapping、计数及 `target_pages` 必须逐字段不变。先 dry-run，确认后加 `--apply`：
 
@@ -348,6 +348,8 @@ pdf-to-study-kb/
 | `retract-source` | **证据先行撤库**（**默认 dry-run**）：先导出证据包（页字节 + SHA256 manifest + 全部账本行）并核验，才删该源独占页、清账本、重置状态、重建派生层；共享页与 `managed_by: human` 页只报告不删。**`overview.md` 是 vault 永久入口**：独占本源则旧版进证据包并在删后从 `templates/overview.md` 原样重建 seed（派生层重建之前）、shared/human 则字节不变保留；apply 后 overview 必定存在 | `--source [--to {workorder_ready,registered}] [--apply]` |
 
 > **已知限制**：`retract-source` 目前只支持普通 ingest 线性状态，不支持 `adopted/published` 或 `reused/published` 终态；不要对这两类来源执行撤库。`reseal-source` 只做证据替换，不是退役路径。
+>
+> **与之配套的另一条边界**：origin 来源一旦发生**生产状态**漂移（`reopen` 或重新摄取都会造成），当前**没有**自动的 evidence upgrade 或安全退役路径——`reuse-source` 与 `reseal-source` 都会拒绝生产投影漂移，`retract-source` 又不支持 `reused/published`。因此**在下游复用仍需有效期间，不要对被复用的 origin generation 执行 `reopen` / 重新摄取**；手工把状态改回冻结值属于伪造，不是恢复手段。（仅 `review_proposals` 诊断账本的变化不受此限，见开发文档 §4.2.2。）
 | `sync-assets` | 把本源 staging 难页 PNG 同步进 `wiki/assets/<src>/`（预处理 / reopen 会自动调用） | `--source` |
 | `staging-clean` | **磁盘治理**：staging 三分类报告（审计保留 / 可再生可删 mineru_raw·audit·diag·dump_* / unknown 一律保留）；**默认 dry-run**，`--apply` 双护栏（source 已 published + assets 同步核对通过） | `--source [--apply]` |
 | `promotion-candidates` | 检测跨域提升候选（人工确认） | `--propose` |

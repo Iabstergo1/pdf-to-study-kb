@@ -54,6 +54,47 @@ _EXPORT_QUERIES = {
     "ingest_progress": "SELECT * FROM ingest_progress WHERE source_id=? ORDER BY id",
     "window_reads": "SELECT * FROM window_reads WHERE source_id=? ORDER BY window_id",
 }
+# ── origin 生产状态合同（v1）────────────────────────────────────────────────
+# `origin_state_sha256` 只证明 evidence 内 origin-state.json 未被篡改；**重放的硬判据是下面
+# 这个生产状态投影**。运营账本（review_proposals）不进投影：对**任何**来源跑 lint 时，vault
+# preflight 都会以违规页自己的 owner 新增 proposal（pipeline.py 的 add_review_proposal），
+# 所以被复用来源的 proposal 会在完全不碰它的情况下增长——把它当重放前提会让正常运营锁死复用。
+#
+# **字段必须显式声明，不得让 SELECT * 决定证据语义**：state_store._ensure_column 已经给
+# work_orders / ingest_progress / window_reads 加过 round 列，加列是本项目的活跃行为；靠
+# SELECT * 会让一次 schema 演进静默改写所有历史证据的含义。
+_PRODUCTION_CONTRACT_V1 = {
+    "sources": ("source_id", "domain", "format", "added_at", "current_stage", "current_status"),
+    "source_stage_runs": ("id", "source_id", "stage", "status", "started_at", "finished_at",
+                          "input_hash", "output_hash", "error"),
+    "artifacts": ("id", "source_id", "kind", "path", "sha256", "created_at"),
+    "work_orders": ("source_id", "path", "registry_hash", "write_scope_json", "created_at",
+                    "round"),
+    "ingest_progress": ("id", "source_id", "window_id", "input_hash", "started_at", "finished_at",
+                        "status", "write_set_json", "proposal_set_json", "error", "round"),
+    "window_reads": ("source_id", "window_id", "read_at", "round"),
+}
+# 显式判定为"仅诊断、不进投影"的物理列。当前六表为空——新增物理列时开发者必须二选一：
+# 归入这里（纯诊断），或新增合同版本 + 升级路径（生产证据）。不得直接改 v1 字段清单，
+# 那会让既存 evidence 被静默重新解释。
+_PRODUCTION_EXCLUDED_FIELDS_V1 = {table: () for table in _PRODUCTION_CONTRACT_V1}
+# 稳定主键排序（全部 NOT NULL）：投影必须与采集顺序无关。
+_PRODUCTION_SORT_KEYS_V1 = {
+    "sources": ("source_id",), "source_stage_runs": ("id",), "artifacts": ("id",),
+    "work_orders": ("source_id",), "ingest_progress": ("id",),
+    "window_reads": ("source_id", "window_id"),
+}
+_PRODUCTION_CONTRACTS = {
+    1: (_PRODUCTION_CONTRACT_V1, _PRODUCTION_EXCLUDED_FIELDS_V1, _PRODUCTION_SORT_KEYS_V1),
+}
+# origin 表三分类：互斥且全集覆盖 _ORIGIN_TABLES（由 tests 与下面的断言共同钉住）。
+_DIAGNOSTICS_TABLES = {"review_proposals"}
+_TRANSIENT_TABLES = {"source_locks"}
+assert set(_PRODUCTION_CONTRACT_V1) | _DIAGNOSTICS_TABLES | _TRANSIENT_TABLES == _ORIGIN_TABLES
+assert not (set(_PRODUCTION_CONTRACT_V1) & _DIAGNOSTICS_TABLES)
+assert not (set(_PRODUCTION_CONTRACT_V1) & _TRANSIENT_TABLES)
+assert not (_DIAGNOSTICS_TABLES & _TRANSIENT_TABLES)
+
 _DERIVED = {
     "index.generated.md", "quiz-index.generated.md", "propositions.generated.md",
     "knowledge-graph.generated.html", "graph-data.generated.json", "aliases.md", "log.md",
@@ -112,6 +153,99 @@ def _page_entry(path: Path, root: Path, rel: str, **extra) -> dict:
             "sha256": hashlib.sha256(raw).hexdigest(), **extra}
 
 
+def _production_contract(contract_version: int) -> tuple[dict, dict, dict]:
+    try:
+        return _PRODUCTION_CONTRACTS[contract_version]
+    except KeyError:
+        raise ReuseError(
+            "origin-production-contract-mismatch: unknown production contract version "
+            f"{contract_version!r}") from None
+
+
+def _assert_live_production_schema(con, *, contract_version: int = 1) -> None:
+    """运行时 schema 护栏：每张生产表的**物理列**必须等于 included ∪ explicitly_excluded。
+
+    只靠测试断言不够——测试跑在开发机，而复用读的是任意 origin 库。缺列、多出未分类列都
+    fail-closed，强迫开发者显式决定新列是诊断还是生产证据。
+    """
+    included, excluded, _sort = _production_contract(contract_version)
+    for table in sorted(included):
+        cols = {row["name"] for row in con.execute(f"PRAGMA table_info({table})")}
+        declared = set(included[table]) | set(excluded[table])
+        if cols != declared:
+            missing = sorted(declared - cols)
+            unclassified = sorted(cols - declared)
+            raise ReuseError(
+                f"origin-production-contract-mismatch: {table} physical columns differ from "
+                f"production contract v{contract_version} (missing={missing}, "
+                f"unclassified={unclassified}); classify every new column as diagnostics or as "
+                "production evidence (new contract version) before reusing this origin")
+
+
+def _origin_production_projection(snapshot: dict, *, contract_version: int = 1) -> dict:
+    """frozen 与 live **共用的唯一**生产状态投影实现（两侧分开维护必然口径漂移）。"""
+    included, excluded, sort_keys = _production_contract(contract_version)
+    if not isinstance(snapshot, dict):
+        raise ReuseError("origin-production-contract-mismatch: origin state must be a JSON object")
+    if snapshot.get("schema_version") != 1:
+        raise ReuseError(
+            "origin-production-contract-mismatch: unsupported origin state schema_version "
+            f"{snapshot.get('schema_version')!r}")
+    out: dict = {"contract_version": contract_version, "schema_version": 1}
+    for table in sorted(included):
+        rows = snapshot.get(table)
+        if not isinstance(rows, list):
+            # 早于当前合同的 frozen evidence 缺表：**不得**当空列表放行，也不能用 reseal
+            # 补救（reseal 是 mapping-only）。将来真的发生要另立 evidence upgrade 路径。
+            raise ReuseError(
+                "origin-production-contract-mismatch: origin state lacks production table "
+                f"{table} required by contract v{contract_version}")
+        fields = included[table]
+        required = set(fields)
+        allowed = required | set(excluded[table])
+        projected = []
+        for row in rows:
+            # `included ⊆ row ⊆ included ∪ excluded`，**不是**严格相等：把某个新物理列
+            # 归为纯诊断（进 excluded）后，早于该列存在的旧 evidence 快照里不可能有它，
+            # 严格相等会把全部历史证据判成 contract-mismatch——那等于禁止使用 excluded 这条
+            # 扩展路径。缺 included 字段、或出现两者之外的未知字段，仍然 fail-closed。
+            if not isinstance(row, dict):
+                raise ReuseError(
+                    f"origin-production-contract-mismatch: {table} row must be a JSON object "
+                    f"(production contract v{contract_version})")
+            row_fields = set(row)
+            if not required.issubset(row_fields) or not row_fields.issubset(allowed):
+                missing = sorted(required - row_fields)
+                unknown = sorted(row_fields - allowed)
+                raise ReuseError(
+                    f"origin-production-contract-mismatch: {table} row fields differ from "
+                    f"production contract v{contract_version} (missing={missing}, "
+                    f"unknown={unknown})")
+            projected.append({field: row[field] for field in fields})
+        projected.sort(key=lambda r: tuple(r[key] for key in sort_keys[table]))
+        out[table] = projected
+    return out
+
+
+def _origin_production_bytes(snapshot: dict, *, contract_version: int = 1) -> bytes:
+    return _json_bytes(
+        _origin_production_projection(snapshot, contract_version=contract_version))
+
+
+def _frozen_origin_state(evidence_dir: Path, manifest: dict) -> dict:
+    """读 evidence 内 origin-state.json：**先按 manifest SHA 验字节，再解析**。"""
+    path = evidence_dir / "origin-state.json"
+    if not path.is_file() or path.is_symlink():
+        raise ReuseError("reuse-evidence-corrupt: stored origin state bytes differ")
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != manifest.get("origin_state_sha256"):
+        raise ReuseError("reuse-evidence-corrupt: stored origin state bytes differ")
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ReuseError("reuse-evidence-corrupt: stored origin state is not valid JSON") from exc
+
+
 def _read_only_db(path: Path, *, label: str) -> sqlite3.Connection:
     resolved = path.resolve()
     for suffix in ("-wal", "-shm"):
@@ -156,6 +290,8 @@ def _origin_state_snapshot(origin_root: Path, source: str, pdf_path: Path,
         missing = sorted(_ORIGIN_TABLES - tables)
         if missing:
             raise ReuseError(f"origin state schema missing tables: {', '.join(missing)}")
+        # 运行时字段合同护栏：先于任何导出，确保 live origin 的物理列与生产合同一致。
+        _assert_live_production_schema(con)
         locks = [dict(row) for row in con.execute(
             "SELECT * FROM source_locks ORDER BY scope")]
         if locks:
@@ -673,8 +809,14 @@ def build_plan(*, workspace: Path, source: str, title: str, domain: str,
                origin_source: str, mapping_path: Path, lock_ttl_seconds: int = 1800,
                allowed_lock_holder: str | None = None,
                expect_concepts: int | None = None, expect_topics: int | None = None,
-               _candidate_only: bool = False) -> dict:
-    """只读构建跨 vault 复用计划；不创建目录、数据库、报告或锁。"""
+               _candidate_only: bool = False,
+               _frozen_origin_state_bytes: bytes | None = None) -> dict:
+    """只读构建跨 vault 复用计划；不创建目录、数据库、报告或锁。
+
+    `_frozen_origin_state_bytes` 只由 `build_reseal_plan` 传入：新证据代必须原样继承旧代的
+    `origin-state.json` 字节与 SHA（reseal 只改 mapping），因此候选不能拿 live diagnostics
+    去替换归档快照。传入后仍照常做 frozen↔live 的生产投影比较。
+    """
     if not _SOURCE_ID.fullmatch(source) or not _SOURCE_ID.fullmatch(origin_source):
         raise ReuseError("source ids must use only ASCII letters/digits/./_/-")
     if source != origin_source:
@@ -715,8 +857,22 @@ def build_plan(*, workspace: Path, source: str, title: str, domain: str,
         raise ReuseError(
             "mapping JSON inside reuse evidence must be the immutable evidence mapping.json")
 
-    origin_state, origin_state_bytes = _origin_state_snapshot(
+    origin_state, live_state_bytes = _origin_state_snapshot(
         origin_root, origin_source, pdf_path, actual_pdf_sha)
+    live_production_bytes = _origin_production_bytes(origin_state)
+    diagnostics_drift = False
+    if _frozen_origin_state_bytes is None:
+        origin_state_bytes = live_state_bytes
+    else:
+        try:
+            frozen_state = json.loads(_frozen_origin_state_bytes.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ReuseError(
+                "reuse-evidence-corrupt: stored origin state is not valid JSON") from exc
+        if _origin_production_bytes(frozen_state) != live_production_bytes:
+            raise ReuseError("origin production state drift from immutable reuse evidence")
+        origin_state_bytes = _frozen_origin_state_bytes
+        diagnostics_drift = live_state_bytes != _frozen_origin_state_bytes
     origin_source_page, origin_concepts, origin_topics = _origin_pages(
         origin_root, origin_source, expected_domain=origin_state["sources"][0]["domain"],
         expect_concepts=expect_concepts, expect_topics=expect_topics)
@@ -763,7 +919,9 @@ def build_plan(*, workspace: Path, source: str, title: str, domain: str,
         manifest_data, manifest_bytes = stored
         # target 页字节允许在登记之后合法演进（只报 warning），所以两个 *_pages 键都不进
         # 稳定键集合；键集合本身仍被比较——v1 证据配 v2 mapping（或反之）会在这里 fail-closed。
-        volatile = {"target_pages", "topic_target_pages"}
+        # `origin_state_sha256` 也不再当稳定键：它证明的是 evidence 内归档快照未被篡改
+        # （下面 _frozen_origin_state 按它验字节），而**重放的硬判据是生产投影**。
+        volatile = {"target_pages", "topic_target_pages", "origin_state_sha256"}
         stable_keys = set(current_manifest) - volatile
         if set(current_manifest) != set(manifest_data):
             raise ReuseError(
@@ -772,10 +930,16 @@ def build_plan(*, workspace: Path, source: str, title: str, domain: str,
         if any(current_manifest[key] != manifest_data.get(key) for key in stable_keys):
             if (current_manifest["origin_concepts"] != manifest_data.get("origin_concepts")
                     or current_manifest["origin_topics"] != manifest_data.get("origin_topics")
-                    or current_manifest["origin_source_page"] != manifest_data.get("origin_source_page")
-                    or current_manifest["origin_state_sha256"] != manifest_data.get("origin_state_sha256")):
+                    or current_manifest["origin_source_page"] != manifest_data.get("origin_source_page")):
                 raise ReuseError("origin snapshot drift from immutable reuse manifest")
             raise ReuseError("reuse manifest metadata/mapping/PDF drift")
+        # 归档快照先按 manifest SHA 验字节（篡改 → reuse-evidence-corrupt），再取生产投影
+        # 与 live 比较：生产漂移 fail-closed，仅 diagnostics 漂移只 warning。
+        frozen_state = _frozen_origin_state(evidence_dir, manifest_data)
+        if _origin_production_bytes(frozen_state) != live_production_bytes:
+            raise ReuseError("origin production state drift from immutable reuse evidence")
+        if hashlib.sha256(live_state_bytes).hexdigest() != manifest_data["origin_state_sha256"]:
+            diagnostics_drift = True
         old_targets = {entry["path"]: entry for entry in
                        manifest_data["target_pages"] + manifest_data.get("topic_target_pages", [])}
         new_targets = {entry["path"]: entry for entry in target_pages + topic_target_pages}
@@ -791,12 +955,22 @@ def build_plan(*, workspace: Path, source: str, title: str, domain: str,
                 "detail": f"target pages changed after reuse; historical bytes preserved: {len(changed)}",
             })
 
+    # 仅诊断漂移（review_proposals 增删改）：生产投影已证明相同，归档字节由 manifest SHA
+    # 保护，因此放行并只报 warning。绝不用它掩盖真实生产漂移——那条在上面已 fail-closed。
+    if diagnostics_drift:
+        warnings.append({
+            "rule": "post-reuse-origin-diagnostics-drift", "path": "origin",
+            "detail": "origin diagnostics ledger (review_proposals) changed after this evidence "
+                      "was frozen; production state is identical and archived bytes are unchanged",
+        })
+
     manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
     plan = {
         "workspace": workspace, "vault": vault, "source": source, "title": title,
         "domain": domain, "pdf_path": pdf_path, "pdf_sha256": actual_pdf_sha,
         "origin_root": origin_root, "origin_source": origin_source,
         "origin_state": origin_state, "origin_state_bytes": origin_state_bytes,
+        "origin_production_bytes": live_production_bytes,
         "origin_source_page": origin_source_page, "origin_concepts": origin_concepts,
         "origin_topics": origin_topics, "mapping_path": mapping_path,
         "mapping_bytes": mapping_bytes, "mapping_sha256": mapping_sha, "mapping": mapping,
@@ -869,11 +1043,13 @@ def verify_live_inputs(plan: dict) -> None:
     if hashlib.sha256(plan["mapping_path"].read_bytes()).hexdigest() != \
             plan["mapping_sha256"]:
         raise ReuseError("mapping drift after validation")
-    _state, state_bytes = _origin_state_snapshot(
+    # 第二次采集同样只比较**生产投影**：diagnostics 可以在这两次采集之间合法变化
+    # （对别的来源跑一次 lint 就够了），而生产状态变了必须整体中止。
+    live_state, _live_bytes = _origin_state_snapshot(
         plan["origin_root"], plan["origin_source"],
         plan["pdf_path"], plan["pdf_sha256"])
-    if state_bytes != plan["origin_state_bytes"]:
-        raise ReuseError("origin state drift after validation")
+    if _origin_production_bytes(live_state) != plan["origin_production_bytes"]:
+        raise ReuseError("origin production state drift after validation")
     origin_vault = plan["origin_root"] / "wiki"
     for entry in ([plan["origin_source_page"]] + plan["origin_concepts"]
                   + plan["origin_topics"]):
@@ -1188,13 +1364,18 @@ def build_reseal_plan(*, workspace: Path, source: str, mapping_path: Path,
     if old_mapping["version"] != 1:
         raise ReuseError("reseal topic-only migration requires mapping version 1 as its baseline")
 
+    # reseal 只改 mapping：新代 evidence 必须原样继承旧代的 origin-state.json 字节与 SHA。
+    # 因此把 frozen bytes **显式传进候选构建**（而不是先生成 live 候选再覆盖字段——那样
+    # 每加一个字段都得记得同步覆盖，是合同的脆弱绕行）。frozen↔live 的生产投影比较照做，
+    # 所以 `origin_state_sha256` 得以继续留在 _RESEAL_IMMUTABLE_MANIFEST_FIELDS 里。
+    frozen_origin_state_bytes = (old_evidence_dir / "origin-state.json").read_bytes()
     candidate = build_plan(
         workspace=workspace, source=source, title=old_manifest["title"],
         domain=old_manifest["domain"], pdf_path=Path(old_manifest["pdf_path"]),
         pdf_sha256=old_manifest["pdf_sha256"], origin_root=Path(old_manifest["origin_root"]),
         origin_source=old_manifest["origin_source"], mapping_path=mapping_path,
         lock_ttl_seconds=lock_ttl_seconds, allowed_lock_holder=allowed_lock_holder,
-        _candidate_only=True)
+        _candidate_only=True, _frozen_origin_state_bytes=frozen_origin_state_bytes)
     if candidate["mapping"]["version"] != 2 or not candidate["mapping"]["topic_targets"]:
         raise ReuseError("reseal requires mapping v2 with a non-empty topic_targets dimension")
     if candidate["mapping"]["targets"] != old_mapping["targets"]:

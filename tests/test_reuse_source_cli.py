@@ -1096,3 +1096,330 @@ def test_reuse_source_rejects_unmapped_target_page_symlink_before_source_ref_sca
     assert result.returncode != 0
     assert "target Markdown page escapes its vault" in (result.stdout + result.stderr)
     assert _tree_state(fx["target"]) == target_before
+
+
+# ── origin diagnostics 漂移解锁（2026-07-31）──────────────────────────────────
+# `origin_state_sha256` 只证明 evidence 内归档快照未被篡改；重放的硬判据是**生产状态投影**。
+# review_proposals 是运营账本：对**任何**来源跑 lint，vault preflight 都会以违规页自己的
+# owner 新增 proposal，被复用来源的账本因此会在没人碰它的情况下增长。把它当重放前提会让
+# 正常运营锁死复用（reuse 拒绝、reseal 拒绝、retract 不支持 reused 终态 = 无合法出口）。
+
+def _origin_db(fx):
+    return fx["origin"] / "pipeline-workspace" / "state" / "study-kb.sqlite"
+
+
+def _origin_exec(fx, sql, params=()):
+    con = sqlite3.connect(_origin_db(fx))
+    try:
+        con.execute(sql, params)
+        con.commit()
+    finally:
+        con.close()
+
+
+_INSERT_PROPOSAL = (
+    "INSERT INTO review_proposals(source_id,target_path,kind,diff_path,reason,created_at,status)"
+    " VALUES ('mysql','domains/database-systems/concepts/origin-00.md','broken-link',NULL,"
+    "'found by vault preflight while linting a different source','2026-07-30T00:00:00+00:00',?)")
+_SEED_PROPOSAL = (lambda fx: _origin_exec(fx, _INSERT_PROPOSAL, ("open",)))
+
+
+@pytest.mark.parametrize("label,setup,mutate", [
+    ("insert", None, _SEED_PROPOSAL),
+    ("resolve", _SEED_PROPOSAL, lambda fx: _origin_exec(
+        fx, "UPDATE review_proposals SET status='resolved' WHERE source_id='mysql'")),
+    ("delete", _SEED_PROPOSAL, lambda fx: _origin_exec(
+        fx, "DELETE FROM review_proposals WHERE source_id='mysql'")),
+])
+def test_reuse_source_origin_diagnostics_drift_warns_and_stays_byte_noop(
+        tmp_path, label, setup, mutate):
+    """proposal 新增 / resolve / 删除都不再阻断重放：warning + 全树 byte/mtime no-op。"""
+    fx = _fixture(tmp_path)
+    if setup is not None:
+        setup(fx)
+    first = _run([*fx["args"], "--apply"], fx["target"])
+    assert first.returncode == 0, first.stdout + first.stderr
+    target_before = _tree_state(fx["target"])
+    origin_wiki_before = _tree_state(fx["origin"] / "wiki")
+
+    mutate(fx)
+    second = _run([*fx["args"], "--apply"], fx["target"])
+
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert "post-reuse-origin-diagnostics-drift" in second.stdout
+    assert "fully verified" in second.stdout
+    assert _tree_state(fx["target"]) == target_before          # 目标 vault 零写
+    assert _tree_state(fx["origin"] / "wiki") == origin_wiki_before   # origin 仍只读
+
+
+def test_reuse_source_exact_replay_without_diagnostics_drift_reports_no_warning(tmp_path):
+    """未发生 diagnostics 漂移时不得凭空多出 warning（防把新 warning 变成常态噪音）。"""
+    fx = _fixture(tmp_path)
+    assert _run([*fx["args"], "--apply"], fx["target"]).returncode == 0
+    before = _tree_state(fx["target"])
+
+    again = _run([*fx["args"], "--apply"], fx["target"])
+
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert "post-reuse-origin-diagnostics-drift" not in again.stdout
+    assert _tree_state(fx["target"]) == before
+
+
+@pytest.mark.parametrize("label,sql", [
+    # 六张生产表逐一：字段更新 / 增行 / 删行。刻意选**显式断言抓不到**的字段，
+    # 这样通过与否只取决于生产投影本身。
+    ("sources.added_at",
+     "UPDATE sources SET added_at='2026-07-31T00:00:00+00:00' WHERE source_id='mysql'"),
+    ("source_stage_runs.output_hash",
+     "UPDATE source_stage_runs SET output_hash='tampered' WHERE source_id='mysql'"),
+    ("source_stage_runs.insert",
+     "INSERT INTO source_stage_runs(source_id,stage,status,started_at,finished_at,input_hash,"
+     "output_hash,error) VALUES ('mysql','profile','done','2026-07-29T00:00:00+00:00',"
+     "'2026-07-29T00:00:00+00:00','h','h',NULL)"),
+    ("artifacts.insert",
+     "INSERT INTO artifacts(source_id,kind,path,sha256,created_at) VALUES "
+     "('mysql','digest','/tmp/x.md','" + "0" * 64 + "','2026-07-29T00:00:00+00:00')"),
+    ("work_orders.registry_hash",
+     "UPDATE work_orders SET registry_hash='rotated' WHERE source_id='mysql'"),
+    ("work_orders.write_scope_json",
+     "UPDATE work_orders SET write_scope_json='[\"topics/**\"]' WHERE source_id='mysql'"),
+    ("work_orders.round", "UPDATE work_orders SET round=2 WHERE source_id='mysql'"),
+    ("ingest_progress.write_set_json",
+     "UPDATE ingest_progress SET write_set_json='[\"a.md\"]' WHERE source_id='mysql'"),
+    ("ingest_progress.status",
+     "UPDATE ingest_progress SET status='failed' WHERE source_id='mysql'"),
+    ("ingest_progress.round", "UPDATE ingest_progress SET round=2 WHERE source_id='mysql'"),
+    ("ingest_progress.delete", "DELETE FROM ingest_progress WHERE source_id='mysql'"),
+    # window ID 集合不变、只有 round 变——旧的窄投影会漏掉，这里必须拒绝。
+    ("window_reads.round", "UPDATE window_reads SET round=2 WHERE source_id='mysql'"),
+    ("window_reads.delete", "DELETE FROM window_reads WHERE source_id='mysql'"),
+])
+def test_reuse_source_origin_production_drift_is_fail_closed(tmp_path, label, sql):
+    fx = _fixture(tmp_path)
+    assert _run([*fx["args"], "--apply"], fx["target"]).returncode == 0
+    before = _tree_state(fx["target"])
+
+    _origin_exec(fx, sql)
+    result = _run([*fx["args"], "--apply"], fx["target"])
+
+    assert result.returncode != 0, f"{label} 未被拒绝: {result.stdout}"
+    assert "origin production state drift" in (result.stdout + result.stderr)
+    assert _tree_state(fx["target"]) == before
+
+
+def test_reuse_source_rejects_unclassified_live_production_column(tmp_path):
+    """运行时 schema 护栏：物理列多出未分类字段即 fail-closed（不能只靠测试期断言）。"""
+    fx = _fixture(tmp_path)
+    _origin_exec(fx, "ALTER TABLE window_reads ADD COLUMN experimental_note TEXT")
+
+    result = _run(fx["args"], fx["target"])
+
+    out = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "origin-production-contract-mismatch" in out
+    assert "experimental_note" in out
+
+
+def _rewrite_canonical(path, payload):
+    raw = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    Path(path).write_bytes(raw)
+    return raw
+
+
+@pytest.mark.parametrize("label,mutate", [
+    ("missing-table", lambda d: d.pop("window_reads")),
+    ("missing-field", lambda d: [row.pop("round") for row in d["window_reads"]]),
+    ("extra-field", lambda d: [row.update({"note": "x"}) for row in d["window_reads"]]),
+])
+def test_reuse_source_frozen_snapshot_contract_mismatch_is_fail_closed(tmp_path, label, mutate):
+    """归档快照缺生产表、缺 included 字段或出现未声明字段 → contract mismatch，不得当空列表放行。
+
+    "未声明" 是关键：合同显式列出的 excluded 诊断字段不算多余（旧快照可以没有它们，
+    见 `test_production_projection_allows_legacy_snapshot_to_omit_later_excluded_field`）。
+    """
+    fx = _fixture(tmp_path)
+    assert _run([*fx["args"], "--apply"], fx["target"]).returncode == 0
+    evidence = fx["target"] / "pipeline-workspace" / "reuses" / "mysql"
+
+    state = json.loads((evidence / "origin-state.json").read_text(encoding="utf-8"))
+    mutate(state)
+    raw = _rewrite_canonical(evidence / "origin-state.json", state)
+    # 同步 manifest 的 SHA，否则先撞 evidence-corrupt 而测不到合同检查本身。
+    manifest = json.loads((evidence / "manifest.json").read_text(encoding="utf-8"))
+    manifest["origin_state_sha256"] = hashlib.sha256(raw).hexdigest()
+    _rewrite_canonical(evidence / "manifest.json", manifest)
+
+    result = _run(fx["args"], fx["target"])
+
+    assert result.returncode != 0
+    assert "origin-production-contract-mismatch" in (result.stdout + result.stderr)
+
+
+def test_reuse_source_tampered_frozen_origin_state_still_reports_evidence_corrupt(tmp_path):
+    """只改归档字节而不改 manifest SHA：仍然是 evidence 损坏，不是合同不符。"""
+    fx = _fixture(tmp_path)
+    assert _run([*fx["args"], "--apply"], fx["target"]).returncode == 0
+    evidence = fx["target"] / "pipeline-workspace" / "reuses" / "mysql"
+    state = json.loads((evidence / "origin-state.json").read_text(encoding="utf-8"))
+    state["review_proposals"] = [{"forged": True}]
+    _rewrite_canonical(evidence / "origin-state.json", state)
+
+    result = _run(fx["args"], fx["target"])
+
+    assert result.returncode != 0
+    assert "reuse-evidence-corrupt" in (result.stdout + result.stderr)
+
+
+def test_reseal_source_survives_diagnostics_drift_and_inherits_frozen_origin_state(tmp_path):
+    """proposal 漂移后 mapping reseal 仍可进行；新代必须原样继承旧代 origin-state 与 SHA。"""
+    fx = _reseal_fixture(tmp_path)
+    evidence = fx["evidence"]
+    frozen_state_bytes = (evidence / "origin-state.json").read_bytes()
+    old_manifest = json.loads((evidence / "manifest.json").read_text(encoding="utf-8"))
+    _SEED_PROPOSAL(fx)   # origin 侧运营账本在冻结之后增长
+
+    resealed = _run([*fx["reseal_args"], "--apply"], fx["target"])
+
+    assert resealed.returncode == 0, resealed.stdout + resealed.stderr
+    assert (evidence / "origin-state.json").read_bytes() == frozen_state_bytes
+    new_manifest = json.loads((evidence / "manifest.json").read_text(encoding="utf-8"))
+    assert new_manifest["origin_state_sha256"] == old_manifest["origin_state_sha256"]
+    for field in ("source_id", "domain", "title", "format", "version", "pdf_path", "pdf_sha256",
+                  "origin_root", "origin_source", "origin_source_page", "origin_concepts",
+                  "origin_topics"):
+        assert new_manifest[field] == old_manifest[field], field
+    assert new_manifest["mapping_sha256"] != old_manifest["mapping_sha256"]
+    assert "topic_target_pages" in new_manifest
+
+    replay = _run([*fx["v2_replay_args"], "--apply"], fx["target"])
+    assert replay.returncode == 0, replay.stdout + replay.stderr
+    assert "post-reuse-origin-diagnostics-drift" in replay.stdout
+
+
+def test_reseal_source_still_refuses_real_origin_production_drift(tmp_path):
+    """diagnostics 放行不得顺带放过真实生产漂移。"""
+    fx = _reseal_fixture(tmp_path)
+    _origin_exec(fx, "UPDATE work_orders SET round=2 WHERE source_id='mysql'")
+
+    resealed = _run([*fx["reseal_args"], "--apply"], fx["target"])
+
+    assert resealed.returncode != 0
+    assert "origin production state drift" in (resealed.stdout + resealed.stderr)
+
+
+def _source_reuse_module():
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import source_reuse
+    return source_reuse
+
+
+def test_origin_table_classification_is_mutually_exclusive_and_total():
+    sr = _source_reuse_module()
+    production = set(sr._PRODUCTION_CONTRACT_V1)
+    assert production | sr._DIAGNOSTICS_TABLES | sr._TRANSIENT_TABLES == sr._ORIGIN_TABLES
+    assert not (production & sr._DIAGNOSTICS_TABLES)
+    assert not (production & sr._TRANSIENT_TABLES)
+    assert not (sr._DIAGNOSTICS_TABLES & sr._TRANSIENT_TABLES)
+    assert set(sr._PRODUCTION_EXCLUDED_FIELDS_V1) == production
+    assert set(sr._PRODUCTION_SORT_KEYS_V1) == production
+
+
+def test_production_contract_matches_live_schema_columns(tmp_path):
+    """合同字段清单必须等于真实物理列——加列时这条先红，强迫显式归类。"""
+    sr = _source_reuse_module()
+    import state_store
+    db = tmp_path / "schema.sqlite"
+    state_store.init_db(db)
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    try:
+        con.execute("CREATE TABLE IF NOT EXISTS window_reads (source_id TEXT NOT NULL,"
+                    " window_id TEXT NOT NULL, read_at TEXT NOT NULL, round INTEGER,"
+                    " UNIQUE(source_id, window_id))")
+        for table, fields in sr._PRODUCTION_CONTRACT_V1.items():
+            cols = {row["name"] for row in con.execute(f"PRAGMA table_info({table})")}
+            declared = set(fields) | set(sr._PRODUCTION_EXCLUDED_FIELDS_V1[table])
+            assert cols == declared, (table, sorted(cols ^ declared))
+    finally:
+        con.close()
+
+
+def test_frozen_and_live_share_one_projection_implementation():
+    """禁止 frozen/live 各维护一份字段或排序逻辑：合同常量只许 _production_contract 读。"""
+    import ast
+    src = (ROOT / "scripts" / "source_reuse.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    versioned = {"_PRODUCTION_CONTRACT_V1", "_PRODUCTION_SORT_KEYS_V1",
+                 "_PRODUCTION_EXCLUDED_FIELDS_V1"}
+    versioned_readers, registry_readers, callers = set(), set(), {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+        if names & versioned:
+            versioned_readers.add(node.name)
+        if "_PRODUCTION_CONTRACTS" in names:
+            registry_readers.add(node.name)
+        callers[node.name] = {n.func.id for n in ast.walk(node)
+                              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    # 版本化字段清单不许被任何函数直接读；一律经注册表 + 单一访问器，
+    # 这样新增合同版本时不会有第二处字段/排序逻辑悄悄分叉。
+    assert versioned_readers == set(), versioned_readers
+    assert registry_readers == {"_production_contract"}, registry_readers
+    assert "_origin_production_bytes" in callers["build_plan"]
+    assert "_origin_production_bytes" in callers["verify_live_inputs"]
+    assert "_assert_live_production_schema" in callers["_origin_state_snapshot"]
+
+
+def test_production_projection_is_order_independent():
+    """两侧共用的投影必须按稳定主键规范化，采集顺序不得影响判定。"""
+    sr = _source_reuse_module()
+    base = {"schema_version": 1}
+    for table, fields in sr._PRODUCTION_CONTRACT_V1.items():
+        base[table] = []
+    base["window_reads"] = [
+        {"source_id": "mysql", "window_id": "w0002", "read_at": "t", "round": 1},
+        {"source_id": "mysql", "window_id": "w0001", "read_at": "t", "round": 1},
+    ]
+    shuffled = {**base, "window_reads": list(reversed(base["window_reads"]))}
+    assert sr._origin_production_bytes(base) == sr._origin_production_bytes(shuffled)
+    # diagnostics 表整表缺失也不影响投影（它根本不参与）
+    assert sr._origin_production_bytes({**base, "review_proposals": [{"x": 1}]}) == \
+        sr._origin_production_bytes(base)
+
+
+def test_production_projection_allows_legacy_snapshot_to_omit_later_excluded_field(monkeypatch):
+    """把新物理列归为纯诊断（excluded）后，早于该列的旧 evidence 必须仍可重放。
+
+    行字段判据是 `included ⊆ row ⊆ included ∪ excluded`，不是严格相等——严格相等会让
+    excluded 这条声明好的扩展路径实际不可用（所有历史快照当场 contract-mismatch）。
+    """
+    sr = _source_reuse_module()
+    monkeypatch.setitem(sr._PRODUCTION_EXCLUDED_FIELDS_V1, "window_reads", ("diagnostic_note",))
+
+    base = {"schema_version": 1}
+    for table in sr._PRODUCTION_CONTRACT_V1:
+        base[table] = []
+    legacy_row = {"source_id": "mysql", "window_id": "w0001", "read_at": "t", "round": 1}
+    live_row = {**legacy_row, "diagnostic_note": "column added after this evidence was frozen"}
+    frozen = {**base, "window_reads": [legacy_row]}
+    live = {**base, "window_reads": [live_row]}
+
+    # 旧快照缺该列、live 行带该列 → 生产投影必须逐字节相同（只投影 included 字段）
+    assert sr._origin_production_bytes(frozen) == sr._origin_production_bytes(live)
+
+    # 边界不得被这次放宽顺带削弱：缺 included 字段仍拒绝
+    with pytest.raises(sr.ReuseError) as missing:
+        sr._origin_production_bytes(
+            {**base, "window_reads": [{k: v for k, v in legacy_row.items() if k != "round"}]})
+    assert "origin-production-contract-mismatch" in str(missing.value)
+    assert "missing=['round']" in str(missing.value)
+
+    # included/excluded 之外的未知字段仍拒绝
+    with pytest.raises(sr.ReuseError) as unknown:
+        sr._origin_production_bytes({**base, "window_reads": [{**legacy_row, "mystery": 1}]})
+    assert "unknown=['mystery']" in str(unknown.value)
+
+    # 生产字段本身的漂移仍 fail-closed（excluded 放宽不影响 included 的比较）
+    drifted = {**base, "window_reads": [{**live_row, "round": 2}]}
+    assert sr._origin_production_bytes(drifted) != sr._origin_production_bytes(frozen)
