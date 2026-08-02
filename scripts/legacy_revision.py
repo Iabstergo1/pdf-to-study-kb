@@ -1,0 +1,1231 @@
+"""Auditable revisions for pages inherited through ``adopt-vault``.
+
+This module deliberately does not manufacture ingest work orders or mutate the
+main state schema.  Authorization lives in an immutable sidecar operation; a
+mutable candidate is linted in a complete vault overlay and only then switched
+into the live vault under the existing vault lock.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import sqlite3
+import tempfile
+import uuid
+from datetime import date, datetime, timezone
+from pathlib import Path
+
+import yaml
+
+import concept_store
+import evidence_fs
+import graph_analysis
+import graph_data
+import graph_html
+import graph_lint
+import graph_model
+import locks
+import mdpage
+import vault_adoption
+import wiki_gate
+
+
+CONTRACT_VERSION = 1
+_SOURCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_OPERATION_ID = re.compile(r"[0-9a-f]{20}")
+_LOG_ANCHOR = re.compile(
+    r"^## \[(?P<date>\d{4}-\d{2}-\d{2})\] revise-adopted \| "
+    r"(?P<source>[A-Za-z0-9][A-Za-z0-9._-]*) \| operation "
+    r"(?P<operation>[0-9a-f]{20}) post (?P<post>[0-9a-f]{12})$")
+_IMMUTABLE_FRONTMATTER = (
+    "type", "canonical_id", "canonical_name", "aliases", "scope", "domain",
+    "page_path", "managed_by", "source_refs",
+)
+_DERIVED = (
+    "concepts/_registry.yaml",
+    "index.generated.md",
+    "graph-data.generated.json",
+    "knowledge-graph.generated.html",
+    "quiz-index.generated.md",
+    "propositions.generated.md",
+)
+_EXCLUDED_TOP = {".obsidian", "Review-Queue", "_meta", "assets"}
+
+
+class LegacyRevisionError(evidence_fs.EvidenceBoundaryError):
+    """The adopted-revision contract was not satisfied."""
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _fault_point(_point: str) -> None:
+    """No-op seam used by recovery tests; production callers never configure it."""
+
+
+def _sha_bytes(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _json_bytes(value) -> bytes:
+    return evidence_fs.json_bytes(value)
+
+
+def _load_canonical_json(path: Path, label: str):
+    try:
+        raw = path.read_bytes()
+        value = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise LegacyRevisionError(f"{label} is unreadable or invalid JSON: {path}") from exc
+    if raw != _json_bytes(value):
+        raise LegacyRevisionError(f"{label} is not canonical JSON: {path}")
+    return value, raw
+
+
+def _atomic_write(path: Path, raw: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        tmp.write_bytes(raw)
+        if tmp.read_bytes() != raw:
+            raise LegacyRevisionError(f"failed to verify temporary write: {path}")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def _assert_direct_path(path: Path, root: Path, label: str) -> None:
+    evidence_fs.assert_direct_contained(
+        path, root, label, error=LegacyRevisionError)
+
+
+def _safe_rel(value: object) -> str:
+    if not isinstance(value, str):
+        raise LegacyRevisionError("page path must be a string")
+    rel = value.replace("\\", "/")
+    parts = rel.split("/")
+    if (not rel.endswith(".md") or rel.startswith("/")
+            or re.match(r"^[A-Za-z]:", rel)
+            or any(part in ("", ".", "..") for part in parts)):
+        raise LegacyRevisionError(f"unsafe page path: {value!r}")
+    if parts[0] in _EXCLUDED_TOP or rel.startswith("sources/") or rel in {
+            "overview.md", "log.md", "index.generated.md", "quiz-index.generated.md",
+            "propositions.generated.md"}:
+        raise LegacyRevisionError(f"page path is outside the legacy revision surface: {rel}")
+    return rel
+
+
+def _parse_datetime(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise LegacyRevisionError("valid_until must be an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise LegacyRevisionError("valid_until must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise LegacyRevisionError("valid_until must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _assert_not_expired(valid_until: str) -> None:
+    if _now() > _parse_datetime(valid_until):
+        raise LegacyRevisionError(f"revision authorization expired at {valid_until}")
+
+
+def _citation_from_evidence(entry: dict) -> dict:
+    citation = dict(entry["citation"])
+    citation["supports"] = entry["supports"]
+    return citation
+
+
+def _validate_request(path: Path, source: str) -> tuple[dict, bytes, str]:
+    if not _SOURCE_ID.fullmatch(source):
+        raise LegacyRevisionError("invalid source id")
+    try:
+        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise LegacyRevisionError(f"revision request is unreadable: {path}") from exc
+    if not isinstance(data, dict):
+        raise LegacyRevisionError("revision request must be a YAML mapping")
+    allowed_top = {"version", "source_id", "valid_until", "mode", "pages",
+                   "revert_operation"}
+    unknown = sorted(set(data) - allowed_top)
+    if unknown:
+        raise LegacyRevisionError(f"revision request has unknown fields: {unknown}")
+    if data.get("version") != CONTRACT_VERSION:
+        raise LegacyRevisionError(f"revision request version must be {CONTRACT_VERSION}")
+    if data.get("source_id") != source:
+        raise LegacyRevisionError("request source_id does not match --source")
+    valid_until = data.get("valid_until")
+    _parse_datetime(valid_until)
+    mode = data.get("mode")
+    if mode not in {"edit", "revert"}:
+        raise LegacyRevisionError("request mode must be edit or revert")
+    revert_operation = data.get("revert_operation")
+    if mode == "revert":
+        if not isinstance(revert_operation, str) or not _OPERATION_ID.fullmatch(revert_operation):
+            raise LegacyRevisionError("revert mode requires a valid revert_operation")
+    elif revert_operation is not None:
+        raise LegacyRevisionError("revert_operation is only valid in revert mode")
+    pages = data.get("pages")
+    if not isinstance(pages, list) or not pages:
+        raise LegacyRevisionError("revision request pages must be a non-empty list")
+    normal_pages = []
+    seen = set()
+    for page in pages:
+        if not isinstance(page, dict) or set(page) != {
+                "path", "reason", "evidence", "citation_removals"}:
+            raise LegacyRevisionError("each request page must contain path/reason/evidence/citation_removals")
+        rel = _safe_rel(page["path"])
+        if rel in seen:
+            raise LegacyRevisionError(f"duplicate request page path: {rel}")
+        seen.add(rel)
+        reason = page["reason"]
+        if not isinstance(reason, str) or not reason.strip():
+            raise LegacyRevisionError(f"page reason must not be empty: {rel}")
+        evidence = page["evidence"]
+        if not isinstance(evidence, list) or not evidence:
+            raise LegacyRevisionError(f"page evidence must be a non-empty list: {rel}")
+        clean_evidence = []
+        for item in evidence:
+            if not isinstance(item, dict) or set(item) != {"citation", "supports"}:
+                raise LegacyRevisionError(f"invalid evidence entry: {rel}")
+            citation = item["citation"]
+            if not isinstance(citation, dict):
+                raise LegacyRevisionError(f"citation must be a mapping: {rel}")
+            required = {"source", "title", "url", "accessed_on"}
+            if not required.issubset(citation) or set(citation) - (required | {"locator"}):
+                raise LegacyRevisionError(f"citation fields invalid: {rel}")
+            if any(not isinstance(citation[k], str) or not citation[k].strip()
+                   for k in required):
+                raise LegacyRevisionError(f"citation fields must not be empty: {rel}")
+            if not citation["url"].startswith("https://"):
+                raise LegacyRevisionError(f"citation URL must use https: {rel}")
+            try:
+                date.fromisoformat(citation["accessed_on"])
+            except ValueError as exc:
+                raise LegacyRevisionError(f"citation accessed_on must be an ISO date: {rel}") from exc
+            if not isinstance(item["supports"], str) or not item["supports"].strip():
+                raise LegacyRevisionError(f"evidence supports must not be empty: {rel}")
+            clean_evidence.append({"citation": {k: citation[k] for k in sorted(citation)},
+                                   "supports": item["supports"].strip()})
+        removals = page["citation_removals"]
+        if not isinstance(removals, list):
+            raise LegacyRevisionError(f"citation_removals must be a list: {rel}")
+        clean_removals = []
+        removal_seen = set()
+        for removal in removals:
+            if not isinstance(removal, dict) or set(removal) != {"sha256", "reason"}:
+                raise LegacyRevisionError(f"invalid citation removal: {rel}")
+            digest = str(removal["sha256"]).lower()
+            if not _SHA256.fullmatch(digest) or digest in removal_seen:
+                raise LegacyRevisionError(f"invalid/duplicate citation removal SHA-256: {rel}")
+            if not isinstance(removal["reason"], str) or not removal["reason"].strip():
+                raise LegacyRevisionError(f"citation removal reason must not be empty: {rel}")
+            removal_seen.add(digest)
+            clean_removals.append({"sha256": digest, "reason": removal["reason"].strip()})
+        normal_pages.append({
+            "path": rel, "reason": reason.strip(), "evidence": clean_evidence,
+            "citation_removals": sorted(clean_removals, key=lambda x: x["sha256"]),
+        })
+    normal = {"version": CONTRACT_VERSION, "source_id": source,
+              "valid_until": valid_until, "mode": mode,
+              "pages": sorted(normal_pages, key=lambda x: x["path"])}
+    if mode == "revert":
+        normal["revert_operation"] = revert_operation
+    raw = _json_bytes(normal)
+    return normal, raw, _sha_bytes(raw)
+
+
+def _sources(meta: dict) -> set[str]:
+    out = set()
+    direct = meta.get("source") or meta.get("source_id")
+    if isinstance(direct, str):
+        out.add(direct)
+    for ref in meta.get("source_refs") or []:
+        if isinstance(ref, str):
+            out.add(ref.split(":", 1)[0])
+        elif isinstance(ref, dict) and isinstance(ref.get("source"), str):
+            out.add(ref["source"])
+    return out
+
+
+def _frontmatter_identity(meta: dict) -> dict:
+    return {key: meta.get(key) for key in _IMMUTABLE_FRONTMATTER}
+
+
+def _adoption_context(workspace: Path, source: str,
+                      allowed_lock_holder: str | None = None,
+                      lock_ttl_seconds: int = 1800) -> dict:
+    workspace = Path(workspace).resolve()
+    vault = workspace / "wiki"
+    db = workspace / "pipeline-workspace" / "state" / "study-kb.sqlite"
+    evidence_dir = workspace / "pipeline-workspace" / "adoptions" / source
+    if not vault.is_dir() or not db.is_file():
+        raise LegacyRevisionError("wiki vault or state database is missing")
+    stored = vault_adoption._load_stored_manifest(evidence_dir)
+    if stored is None:
+        raise LegacyRevisionError(f"adoption manifest not found for source {source}")
+    manifest, manifest_raw = stored
+    if manifest.get("source_id") != source or manifest.get("format") != "legacy-vault":
+        raise LegacyRevisionError("adoption manifest source/format mismatch")
+    findings = vault_adoption._validate_existing_evidence(
+        evidence_dir, manifest_raw, manifest["pages"])
+    if findings:
+        raise LegacyRevisionError(
+            f"adoption evidence invalid: {findings[0]['rule']}: {findings[0]['detail']}")
+    snapshot = vault_adoption._state_snapshot(db, source)
+    if not snapshot:
+        raise LegacyRevisionError(f"adopted source state not found: {source}")
+    evidence_fs.reject_lock(snapshot, lock_ttl_seconds, allowed_lock_holder,
+                            command="revise-adopted", error=LegacyRevisionError)
+    manifest_sha = _sha_bytes(manifest_raw)
+    src = snapshot.get("source") or {}
+    actual_source = (src.get("domain"), src.get("format"), src.get("current_stage"),
+                     src.get("current_status"))
+    expected_source = (manifest["domain"], "legacy-vault", "adopted", "published")
+    stages = [(r["stage"], r["status"], r["input_hash"], r["output_hash"])
+              for r in snapshot.get("stages") or []]
+    artifacts = [(r["kind"], r["path"], r["sha256"])
+                 for r in snapshot.get("artifacts") or []]
+    expected_artifact = ("adoption_evidence", str((evidence_dir / "manifest.json").resolve()),
+                         manifest_sha)
+    if actual_source != expected_source:
+        raise LegacyRevisionError("source is not exact legacy-vault adopted/published state")
+    if stages != [("adopted", "done", manifest_sha, manifest_sha)]:
+        raise LegacyRevisionError("adopted source stage ledger drift")
+    if artifacts != [expected_artifact]:
+        raise LegacyRevisionError("adopted source artifact ledger drift")
+    if snapshot.get("ledgers") != {"work_orders": 0, "ingest_progress": 0,
+                                    "window_reads": 0}:
+        raise LegacyRevisionError("adopted source ingest ledgers must remain zero")
+    source_page = vault / "sources" / f"{source}.md"
+    if not source_page.is_file():
+        raise LegacyRevisionError("adopted source page is missing")
+    source_meta, _ = mdpage.read_page(source_page)
+    if (source_meta.get("adoption_manifest_sha256") != manifest_sha
+            or source_meta.get("format") != "legacy-vault"):
+        raise LegacyRevisionError("adopted source page evidence identity drift")
+    return {"workspace": workspace, "vault": vault, "db": db,
+            "evidence_dir": evidence_dir, "manifest": manifest,
+            "manifest_bytes": manifest_raw, "manifest_sha256": manifest_sha,
+            "snapshot": snapshot}
+
+
+def _candidate_citations(page_request: dict) -> list[dict]:
+    return [_citation_from_evidence(item) for item in page_request["evidence"]]
+
+
+def _citation_hash(value) -> str:
+    return _sha_bytes(_json_bytes(value))
+
+
+def _build_authorization(context: dict, request: dict, request_sha: str) -> tuple[dict, dict]:
+    vault = context["vault"]
+    manifest_paths = {entry["path"] for entry in context["manifest"]["pages"]}
+    revert_op = None
+    if request["mode"] == "revert":
+        revert_id = request["revert_operation"]
+        revert_op = _operation_root(context["workspace"], request["source_id"]) / revert_id
+        prior = _verify_operation(revert_op, context["workspace"], allow_live_drift=True)
+        if prior["phase"] != "completed":
+            raise LegacyRevisionError("revert_operation must name a completed operation")
+        prior_paths = {p["path"] for p in prior["authorization"]["pages"]}
+        if prior_paths != {p["path"] for p in request["pages"]}:
+            raise LegacyRevisionError("revert page set must equal the completed operation page set")
+    pages = []
+    initial_candidates = {}
+    for item in request["pages"]:
+        rel = item["path"]
+        if rel not in manifest_paths:
+            raise LegacyRevisionError(f"target is not in adoption manifest: {rel}")
+        path = vault / rel
+        if not path.is_file() or path.is_symlink() or evidence_fs.resolved_inside(path, vault) is None:
+            raise LegacyRevisionError(f"target is missing or redirected: {rel}")
+        raw = path.read_bytes()
+        meta, _body = mdpage.read_page(path)
+        if meta.get("managed_by") == "human":
+            raise LegacyRevisionError(f"managed_by: human page is never writable: {rel}")
+        if meta.get("managed_by") != "pipeline" or meta.get("status") != "published":
+            raise LegacyRevisionError(f"target must be pipeline-managed and published: {rel}")
+        if request["source_id"] not in _sources(meta):
+            raise LegacyRevisionError(f"target no longer cites adopted source {request['source_id']}: {rel}")
+        if request["mode"] == "revert":
+            prior_post = revert_op / "post" / "files" / rel
+            prior_pre = revert_op / "pre" / "files" / rel
+            if not prior_post.is_file() or raw != prior_post.read_bytes():
+                raise LegacyRevisionError(
+                    f"revert-not-applicable-after-live-drift: {rel}")
+            old_meta, old_body = mdpage.read_page(prior_pre)
+            old_meta["status"] = "proposed"
+            fm = yaml.safe_dump(old_meta, allow_unicode=True, sort_keys=True,
+                                default_flow_style=False)
+            initial_candidates[rel] = f"---\n{fm}---\n{old_body}".encode("utf-8")
+        else:
+            initial_candidates[rel] = raw
+        pages.append({
+            "path": rel,
+            "pre_sha256": _sha_bytes(raw),
+            "pre_size": len(raw),
+            "reason": item["reason"],
+            "evidence": item["evidence"],
+            "citation_plan": {
+                "add": _candidate_citations(item),
+                "remove_sha256": [x["sha256"] for x in item["citation_removals"]],
+                "removals": item["citation_removals"],
+            },
+            "immutable_frontmatter": _frontmatter_identity(meta),
+            "immutable_frontmatter_sha256": _sha_bytes(
+                _json_bytes(_frontmatter_identity(meta))),
+        })
+    identity = {
+        "contract_version": CONTRACT_VERSION,
+        "source_id": request["source_id"],
+        "adoption_manifest_sha256": context["manifest_sha256"],
+        "request_sha256": request_sha,
+        "valid_until": request["valid_until"],
+        "mode": request["mode"],
+        "revert_operation": request.get("revert_operation"),
+        "pages": pages,
+    }
+    operation_id = _sha_bytes(_json_bytes(identity))[:20]
+    authorization = dict(identity)
+    authorization["operation_id"] = operation_id
+    return authorization, initial_candidates
+
+
+def _operation_root(workspace: Path, source: str) -> Path:
+    return Path(workspace) / "pipeline-workspace" / "legacy-revisions" / source
+
+
+def _phase_from_events(events: list[dict]) -> str:
+    if not events:
+        return "none"
+    return events[-1]["event"]
+
+
+def _events(op: Path) -> tuple[list[dict], list[bytes]]:
+    event_dir = op / "events"
+    if not event_dir.exists():
+        return [], []
+    files = sorted(event_dir.glob("*.json"))
+    events, raws = [], []
+    for index, path in enumerate(files, 1):
+        if path.name != f"{index:04d}-{path.stem.split('-', 1)[-1]}.json":
+            raise LegacyRevisionError(f"legacy revision event numbering drift: {path}")
+        event, raw = _load_canonical_json(path, "legacy revision event")
+        expected_prev = _sha_bytes(raws[-1]) if raws else None
+        if event.get("sequence") != index or event.get("previous_event_sha256") != expected_prev:
+            raise LegacyRevisionError(f"legacy revision event chain drift: {path}")
+        if event.get("event") != path.stem.split("-", 1)[1]:
+            raise LegacyRevisionError(f"legacy revision event filename/type drift: {path}")
+        events.append(event)
+        raws.append(raw)
+    sequence = [e.get("event") for e in events]
+    legal = (
+        ["prepared"], ["prepared", "aborted"],
+        ["prepared", "committing"], ["prepared", "committing", "completed"],
+        ["prepared", "committing", "recovery_requested"],
+        ["prepared", "committing", "recovery_requested", "completed"],
+        ["prepared", "committing", "rollback_requested"],
+        ["prepared", "committing", "rollback_requested", "rolled_back"],
+        ["prepared", "committing", "recovery_requested", "rollback_requested"],
+        ["prepared", "committing", "recovery_requested", "rollback_requested",
+         "rolled_back"],
+    )
+    if sequence not in legal:
+        raise LegacyRevisionError(f"illegal legacy revision event sequence: {sequence}")
+    return events, raws
+
+
+def _write_event(op: Path, event_type: str, extra: dict | None = None, *,
+                 operation_id: str | None = None) -> dict:
+    events, raws = _events(op)
+    sequence = len(events) + 1
+    event = {
+        "contract_version": CONTRACT_VERSION,
+        "event": event_type,
+        "operation_id": operation_id or op.name,
+        "previous_event_sha256": _sha_bytes(raws[-1]) if raws else None,
+        "recorded_at": _now().isoformat(timespec="seconds"),
+        "sequence": sequence,
+    }
+    event.update(extra or {})
+    _atomic_write(op / "events" / f"{sequence:04d}-{event_type}.json", _json_bytes(event))
+    return event
+
+
+def _manifest(kind: str, operation_id: str, files: dict[str, bytes]) -> dict:
+    return {"contract_version": CONTRACT_VERSION, "kind": kind,
+            "operation_id": operation_id,
+            "entries": [{"path": rel, "sha256": _sha_bytes(raw), "size": len(raw)}
+                        for rel, raw in sorted(files.items())]}
+
+
+def _write_file_set(root: Path, kind: str, operation_id: str,
+                    files: dict[str, bytes]) -> bytes:
+    for rel, raw in sorted(files.items()):
+        target = root / "files" / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+    manifest_raw = _json_bytes(_manifest(kind, operation_id, files))
+    (root / "manifest.json").write_bytes(manifest_raw)
+    return manifest_raw
+
+
+def _verify_file_set(root: Path, kind: str, operation_id: str) -> tuple[dict, dict[str, bytes]]:
+    manifest, _raw = _load_canonical_json(root / "manifest.json", f"{kind} manifest")
+    if (manifest.get("contract_version") != CONTRACT_VERSION
+            or manifest.get("kind") != kind
+            or manifest.get("operation_id") != operation_id
+            or not isinstance(manifest.get("entries"), list)):
+        raise LegacyRevisionError(f"{kind} manifest schema drift")
+    files = {}
+    paths = []
+    for entry in manifest["entries"]:
+        if not isinstance(entry, dict) or set(entry) != {"path", "sha256", "size"}:
+            raise LegacyRevisionError(f"{kind} manifest entry schema drift")
+        rel = entry["path"]
+        if rel == "log.md" or rel in _DERIVED:
+            safe = rel
+        else:
+            safe = _safe_rel(rel)
+        path = root / "files" / safe
+        if not path.is_file() or path.is_symlink():
+            raise LegacyRevisionError(f"{kind} evidence file missing: {safe}")
+        raw = path.read_bytes()
+        if len(raw) != entry["size"] or _sha_bytes(raw) != entry["sha256"]:
+            raise LegacyRevisionError(f"{kind} evidence file hash mismatch: {safe}")
+        paths.append(safe)
+        files[safe] = raw
+    if paths != sorted(set(paths)):
+        raise LegacyRevisionError(f"{kind} manifest path order/uniqueness drift")
+    actual = {p.relative_to(root / "files").as_posix()
+              for p in (root / "files").rglob("*") if p.is_file()}
+    if actual != set(paths):
+        raise LegacyRevisionError(f"{kind} evidence file set mismatch")
+    return manifest, files
+
+
+def _prepare(op: Path, authorization: dict, candidates: dict[str, bytes], vault: Path) -> None:
+    parent = op.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    _assert_direct_path(parent, vault.parent, "legacy revision operation parent")
+    temp = parent / f".{op.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        temp.mkdir()
+        auth_raw = _json_bytes(authorization)
+        (temp / "authorization.json").write_bytes(auth_raw)
+        pre = {page["path"]: (vault / page["path"]).read_bytes()
+               for page in authorization["pages"]}
+        _write_file_set(temp / "pre", "pre", op.name, pre)
+        for rel, raw in sorted(candidates.items()):
+            target = temp / "candidate" / "files" / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+        _write_event(temp, "prepared", {
+            "authorization_sha256": _sha_bytes(auth_raw),
+            "pre_manifest_sha256": _sha_bytes((temp / "pre" / "manifest.json").read_bytes()),
+        }, operation_id=op.name)
+        temp.rename(op)
+    finally:
+        if temp.exists():
+            shutil.rmtree(temp)
+
+
+def _candidate_files(op: Path, authorization: dict) -> dict[str, bytes]:
+    root = op / "candidate" / "files"
+    _assert_direct_path(root, op, "legacy revision candidate root")
+    expected = {p["path"] for p in authorization["pages"]}
+    actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+    if actual != expected:
+        raise LegacyRevisionError(
+            f"candidate-set-mismatch: expected={sorted(expected)} actual={sorted(actual)}")
+    files = {}
+    for rel in sorted(expected):
+        path = root / rel
+        if path.is_symlink() or evidence_fs.resolved_inside(path, root) is None:
+            raise LegacyRevisionError(f"candidate path is redirected: {rel}")
+        files[rel] = path.read_bytes()
+    return files
+
+
+def _validate_candidates(op: Path, authorization: dict) -> tuple[dict[str, bytes], list[dict]]:
+    _pre_manifest, pre = _verify_file_set(op / "pre", "pre", op.name)
+    candidates = _candidate_files(op, authorization)
+    pages = []
+    for page in authorization["pages"]:
+        rel = page["path"]
+        raw = candidates[rel]
+        if raw == pre[rel]:
+            raise LegacyRevisionError(f"candidate page was not edited: {rel}")
+        try:
+            meta, body = mdpage.read_page(op / "candidate" / "files" / rel)
+        except (OSError, UnicodeError, yaml.YAMLError) as exc:
+            raise LegacyRevisionError(f"candidate page is invalid markdown/YAML: {rel}") from exc
+        if meta.get("status") != "proposed":
+            raise LegacyRevisionError(f"candidate status must be proposed: {rel}")
+        identity = _frontmatter_identity(meta)
+        if identity != page["immutable_frontmatter"]:
+            changed = [key for key in _IMMUTABLE_FRONTMATTER
+                       if identity.get(key) != page["immutable_frontmatter"].get(key)]
+            raise LegacyRevisionError(f"immutable frontmatter changed ({', '.join(changed)}): {rel}")
+        pre_meta, _ = mdpage.read_page(op / "pre" / "files" / rel)
+        old = list(pre_meta.get("citations") or [])
+        new = list(meta.get("citations") or [])
+        old_hashes = {_citation_hash(x): x for x in old}
+        new_hashes = {_citation_hash(x): x for x in new}
+        removed = set(old_hashes) - set(new_hashes)
+        added = set(new_hashes) - set(old_hashes)
+        allowed_removed = set(page["citation_plan"]["remove_sha256"])
+        required_add = {_citation_hash(x) for x in page["citation_plan"]["add"]}
+        if removed != allowed_removed:
+            raise LegacyRevisionError(f"citation removal does not match authorization: {rel}")
+        if added != required_add or not required_add.issubset(new_hashes):
+            raise LegacyRevisionError(f"citation additions/evidence do not match authorization: {rel}")
+        pages.append({"rel_path": rel, "meta": meta, "body": body})
+    return candidates, pages
+
+
+def _rebuild_derived(overlay: Path, final_vault: Path) -> None:
+    registry, errors, _warnings = concept_store.build_registry(
+        concept_store.scan_concept_pages(overlay))
+    if errors:
+        raise LegacyRevisionError("registry invalid in revision overlay: " + "; ".join(errors))
+    concept_store.write_registry(overlay, registry)
+    concept_store.remove_stale_aliases(overlay)
+    wiki_gate.write_index(overlay)
+    model = graph_model.build_graph_model(overlay)
+    analyzed = graph_analysis.analyze_graph(model)
+    data = graph_data.to_graph_data(analyzed)
+    result = graph_lint.validate_graph_data(data, vault=overlay)
+    if result["errors"]:
+        raise LegacyRevisionError("graph invalid in revision overlay: " + result["errors"][0])
+    (overlay / graph_data.GRAPH_DATA_FILE).write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8", newline="\n")
+    (overlay / graph_html.HTML_FILE).write_text(
+        graph_html.to_html(data, vault_root=final_vault.resolve().as_posix()),
+        encoding="utf-8", newline="\n")
+    wiki_gate.write_quiz_index(overlay)
+    props = wiki_gate.collect_propositions(overlay)
+    duplicates = wiki_gate.duplicate_proposition_names(props)
+    if duplicates:
+        raise LegacyRevisionError("duplicate proposition names in revision overlay: " + duplicates[0])
+    wiki_gate.write_propositions_index(overlay)
+
+
+def _log_line(source: str, operation_id: str, post_sha: str) -> str:
+    return wiki_gate.log_line(
+        "revise-adopted", source,
+        f"operation {operation_id} post {post_sha[:12]}", date.today().isoformat())
+
+
+def _build_transition(op: Path, authorization: dict, context: dict) -> dict:
+    existing = op / "transition.json"
+    if existing.exists():
+        transition, _raw, _switch, _post = _verify_transition(op, authorization)
+        return transition
+    candidates, pages = _validate_candidates(op, authorization)
+    vault = context["vault"]
+    for page in authorization["pages"]:
+        live = vault / page["path"]
+        if not live.is_file() or _sha_bytes(live.read_bytes()) != page["pre_sha256"]:
+            raise LegacyRevisionError(f"live pre SHA drift: {page['path']}")
+    with tempfile.TemporaryDirectory(prefix="legacy-revision-overlay-") as td:
+        overlay = Path(td) / "wiki"
+        shutil.copytree(vault, overlay)
+        for rel, raw in candidates.items():
+            (overlay / rel).write_bytes(raw)
+        violations = wiki_gate.lint_pages(overlay, pages, phase_e=False)
+        candidate_paths = set(candidates)
+        violations.extend(v for v in wiki_gate.vault_render_safety(
+            overlay, statuses=("published", "proposed")) if v["path"] not in candidate_paths)
+        if violations:
+            first = violations[0]
+            raise LegacyRevisionError(
+                f"candidate lint failed: {first['rule']} {first['path']}: {first['detail']}")
+        wiki_gate.promote(overlay, pages)
+        _rebuild_derived(overlay, vault)
+        post = {rel: (overlay / rel).read_bytes()
+                for rel in sorted(candidate_paths | set(_DERIVED))}
+    switch_pre = {}
+    for rel in sorted(set(post) | {"log.md"}):
+        path = vault / rel
+        switch_pre[rel] = path.read_bytes() if path.exists() else b""
+    post_manifest_raw = _json_bytes(_manifest("post", op.name, post))
+    post_sha = _sha_bytes(post_manifest_raw)
+    log_line = _log_line(authorization["source_id"], op.name, post_sha)
+    log_post = switch_pre["log.md"] + log_line.encode("utf-8")
+    transition = {
+        "contract_version": CONTRACT_VERSION,
+        "operation_id": op.name,
+        "authorization_sha256": _sha_bytes((op / "authorization.json").read_bytes()),
+        "candidate_sha256": {rel: _sha_bytes(raw) for rel, raw in sorted(candidates.items())},
+        "entries": [{
+            "path": rel,
+            "pre_sha256": _sha_bytes(switch_pre[rel]),
+            "post_sha256": _sha_bytes(post[rel]),
+            "pre_size": len(switch_pre[rel]),
+            "post_size": len(post[rel]),
+        } for rel in sorted(post)],
+        "log": {"line": log_line, "line_sha256": _sha_bytes(log_line.encode("utf-8")),
+                "pre_sha256": _sha_bytes(switch_pre["log.md"]),
+                "post_sha256": _sha_bytes(log_post),
+                "pre_size": len(switch_pre["log.md"]), "post_size": len(log_post)},
+        "post_manifest_sha256": post_sha,
+    }
+    temp = op / f".transition-{uuid.uuid4().hex}"
+    try:
+        temp.mkdir()
+        _write_file_set(temp / "switch-pre", "switch-pre", op.name, switch_pre)
+        _write_file_set(temp / "post", "post", op.name, post)
+        (temp / "transition.json").write_bytes(_json_bytes(transition))
+        for name in ("switch-pre", "post"):
+            (temp / name).rename(op / name)
+        (temp / "transition.json").replace(op / "transition.json")
+    finally:
+        if temp.exists():
+            shutil.rmtree(temp)
+    _fault_point("transition")
+    return transition
+
+
+def _expected_live_manifest(path: Path | None) -> dict[str, str] | None:
+    if path is None:
+        return None
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise LegacyRevisionError("--expect-live-manifest must be readable JSON") from exc
+    if not isinstance(data, dict) or any(not isinstance(k, str) or not _SHA256.fullmatch(str(v))
+                                         for k, v in data.items()):
+        raise LegacyRevisionError("--expect-live-manifest must map paths to SHA-256 strings")
+    return {k.replace("\\", "/"): str(v) for k, v in data.items()}
+
+
+def _unknown_live_bytes(op: Path, authorization: dict, vault: Path) -> dict[str, str]:
+    transition, _raw, switch, post = _verify_transition(op, authorization)
+    unknown = {}
+    for entry in transition["entries"]:
+        rel = entry["path"]
+        path = vault / rel
+        current = path.read_bytes() if path.exists() else b""
+        if current not in (switch[rel], post[rel]):
+            unknown[rel] = _sha_bytes(current)
+    log_path = vault / "log.md"
+    current_log = log_path.read_bytes() if log_path.exists() else b""
+    pre_log = switch["log.md"]
+    post_log = pre_log + transition["log"]["line"].encode("utf-8")
+    if current_log not in (pre_log, post_log):
+        unknown["log.md"] = _sha_bytes(current_log)
+    return unknown
+
+
+def _replace_controlled(vault: Path, rel: str, before: bytes, after: bytes,
+                        expected_unknown: dict[str, str] | None, conflicts: Path) -> None:
+    path = vault / rel
+    if path.exists():
+        if path.is_symlink() or evidence_fs.resolved_inside(path, vault) is None:
+            raise LegacyRevisionError(f"controlled live path is redirected outside vault: {rel}")
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _assert_direct_path(path.parent, vault, f"controlled live parent {rel}")
+    current = path.read_bytes() if path.exists() else b""
+    if current == after:
+        return
+    if current != before:
+        expected = (expected_unknown or {}).get(rel)
+        if expected != _sha_bytes(current):
+            raise LegacyRevisionError(
+                f"controlled live file is neither pre nor post: {rel}; provide --expect-live-manifest")
+        conflict = conflicts / rel
+        conflict.parent.mkdir(parents=True, exist_ok=True)
+        if conflict.exists() and conflict.read_bytes() != current:
+            raise LegacyRevisionError(f"conflict archive collision: {rel}")
+        if not conflict.exists():
+            conflict.write_bytes(current)
+    temp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    temp.write_bytes(after)
+    os.replace(temp, path)
+
+
+def _forward(op: Path, authorization: dict, context: dict, *,
+             expected_unknown: dict[str, str] | None = None) -> None:
+    transition, transition_raw, switch, post = _verify_transition(op, authorization)
+    events, _ = _events(op)
+    if _phase_from_events(events) == "prepared":
+        _write_event(op, "committing", {
+            "transition_sha256": _sha_bytes(transition_raw),
+            "post_manifest_sha256": transition["post_manifest_sha256"],
+        })
+        _fault_point("committing")
+    vault = context["vault"]
+    for index, entry in enumerate(transition["entries"]):
+        rel = entry["path"]
+        _replace_controlled(vault, rel, switch[rel], post[rel], expected_unknown,
+                            op / "conflicts" / "files")
+        _fault_point(f"switch:{index}:{rel}")
+    log_before = switch["log.md"]
+    log_after = log_before + transition["log"]["line"].encode("utf-8")
+    _replace_controlled(vault, "log.md", log_before, log_after, expected_unknown,
+                        op / "conflicts" / "files")
+    _fault_point("log")
+    for rel, raw in post.items():
+        if not (vault / rel).is_file() or (vault / rel).read_bytes() != raw:
+            raise LegacyRevisionError(f"post switch verification failed: {rel}")
+    if (vault / "log.md").read_bytes() != log_after:
+        raise LegacyRevisionError("post switch log verification failed")
+    derived = wiki_gate.derived_violations(vault)
+    if derived:
+        raise LegacyRevisionError(f"post switch derived verification failed: {derived[0]}")
+    con = sqlite3.connect(context["db"].resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        for table in ("work_orders", "ingest_progress", "window_reads"):
+            count = con.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE source_id=?",
+                (authorization["source_id"],),
+            ).fetchone()[0]
+            if count:
+                raise LegacyRevisionError(
+                    f"adopted source ingest ledger changed during switch: {table}={count}")
+    finally:
+        con.close()
+    _write_event(op, "completed", {
+        "log_line": transition["log"]["line"],
+        "log_line_sha256": transition["log"]["line_sha256"],
+        "post_manifest_sha256": transition["post_manifest_sha256"],
+    })
+    _fault_point("completed")
+
+
+def _rollback(op: Path, authorization: dict, context: dict,
+              expected_unknown: dict[str, str] | None = None) -> None:
+    transition, _transition_raw, switch, post = _verify_transition(op, authorization)
+    events, _ = _events(op)
+    if _phase_from_events(events) in {"committing", "recovery_requested"}:
+        _write_event(op, "rollback_requested")
+    vault = context["vault"]
+    for entry in reversed(transition["entries"]):
+        rel = entry["path"]
+        _replace_controlled(vault, rel, post[rel], switch[rel], expected_unknown,
+                            op / "conflicts" / "files")
+    log_pre = switch["log.md"]
+    log_post = log_pre + transition["log"]["line"].encode("utf-8")
+    _replace_controlled(vault, "log.md", log_post, log_pre, expected_unknown,
+                        op / "conflicts" / "files")
+    _write_event(op, "rolled_back")
+
+
+def _find_request_operation(root: Path, request_sha: str) -> Path | None:
+    if not root.exists():
+        return None
+    _assert_direct_path(root, root.parents[2], "legacy revision source root")
+    unexpected = [p.name for p in root.iterdir()
+                  if not p.is_dir() or not _OPERATION_ID.fullmatch(p.name)]
+    if unexpected:
+        raise LegacyRevisionError(f"unexpected legacy revision operation path(s): {sorted(unexpected)}")
+    matches = []
+    unfinished = []
+    for op in sorted(p for p in root.iterdir() if p.is_dir() and _OPERATION_ID.fullmatch(p.name)):
+        auth, _ = _load_canonical_json(op / "authorization.json", "authorization")
+        events, _ = _events(op)
+        phase = _phase_from_events(events)
+        if phase in {"prepared", "committing", "recovery_requested", "rollback_requested"}:
+            unfinished.append(op)
+        if auth.get("request_sha256") == request_sha:
+            matches.append(op)
+    if len(matches) > 1:
+        raise LegacyRevisionError("operation collision: multiple operations match this request")
+    if unfinished and (not matches or any(op not in matches for op in unfinished)):
+        raise LegacyRevisionError(
+            f"another unfinished legacy revision exists: {unfinished[0].name}")
+    return matches[0] if matches else None
+
+
+def _verify_authorization(op: Path, workspace: Path) -> tuple[dict, bytes]:
+    auth, raw = _load_canonical_json(op / "authorization.json", "authorization")
+    expected_keys = {
+        "adoption_manifest_sha256", "contract_version", "mode", "operation_id",
+        "pages", "request_sha256", "revert_operation", "source_id", "valid_until",
+    }
+    if not isinstance(auth, dict) or set(auth) != expected_keys:
+        raise LegacyRevisionError(f"authorization schema drift: {op}")
+    if (auth["contract_version"] != CONTRACT_VERSION
+            or auth["operation_id"] != op.name
+            or auth["source_id"] != op.parent.name
+            or auth["mode"] not in {"edit", "revert"}
+            or not _SHA256.fullmatch(str(auth["request_sha256"]))
+            or not _SHA256.fullmatch(str(auth["adoption_manifest_sha256"]))):
+        raise LegacyRevisionError(f"authorization identity drift: {op}")
+    _parse_datetime(auth["valid_until"])
+    if auth["mode"] == "revert":
+        if not isinstance(auth["revert_operation"], str) or not _OPERATION_ID.fullmatch(
+                auth["revert_operation"]):
+            raise LegacyRevisionError(f"authorization revert identity drift: {op}")
+    elif auth["revert_operation"] is not None:
+        raise LegacyRevisionError(f"edit authorization unexpectedly names revert operation: {op}")
+    if not isinstance(auth["pages"], list) or not auth["pages"]:
+        raise LegacyRevisionError(f"authorization pages invalid: {op}")
+    page_keys = {
+        "citation_plan", "evidence", "immutable_frontmatter",
+        "immutable_frontmatter_sha256", "path", "pre_sha256", "pre_size", "reason",
+    }
+    paths = []
+    for page in auth["pages"]:
+        if not isinstance(page, dict) or set(page) != page_keys:
+            raise LegacyRevisionError(f"authorization page schema drift: {op}")
+        rel = _safe_rel(page["path"])
+        if (not _SHA256.fullmatch(str(page["pre_sha256"]))
+                or not isinstance(page["pre_size"], int) or page["pre_size"] < 0
+                or page["immutable_frontmatter_sha256"] != _sha_bytes(
+                    _json_bytes(page["immutable_frontmatter"]))):
+            raise LegacyRevisionError(f"authorization page identity drift: {rel}")
+        paths.append(rel)
+    if paths != sorted(set(paths)):
+        raise LegacyRevisionError(f"authorization page order/uniqueness drift: {op}")
+    identity = {key: auth[key] for key in expected_keys if key != "operation_id"}
+    if _sha_bytes(_json_bytes(identity))[:20] != op.name:
+        raise LegacyRevisionError(f"authorization operation id is not derived from its identity: {op}")
+    manifest_path = (Path(workspace) / "pipeline-workspace" / "adoptions" /
+                     auth["source_id"] / "manifest.json")
+    _manifest, manifest_raw = _load_canonical_json(manifest_path, "adoption manifest")
+    if _sha_bytes(manifest_raw) != auth["adoption_manifest_sha256"]:
+        raise LegacyRevisionError(f"authorization adoption manifest identity drift: {op}")
+    return auth, raw
+
+
+def _verify_transition(op: Path, auth: dict) -> tuple[dict, bytes, dict[str, bytes],
+                                                       dict[str, bytes]]:
+    transition, transition_raw = _load_canonical_json(
+        op / "transition.json", "legacy revision transition")
+    expected_keys = {
+        "authorization_sha256", "candidate_sha256", "contract_version", "entries",
+        "log", "operation_id", "post_manifest_sha256",
+    }
+    if (not isinstance(transition, dict) or set(transition) != expected_keys
+            or transition["contract_version"] != CONTRACT_VERSION
+            or transition["operation_id"] != op.name
+            or transition["authorization_sha256"] != _sha_bytes(
+                (op / "authorization.json").read_bytes())):
+        raise LegacyRevisionError(f"transition schema/authorization drift: {op}")
+    switch_manifest, switch = _verify_file_set(op / "switch-pre", "switch-pre", op.name)
+    post_manifest, post = _verify_file_set(op / "post", "post", op.name)
+    post_manifest_raw = (op / "post" / "manifest.json").read_bytes()
+    if transition["post_manifest_sha256"] != _sha_bytes(post_manifest_raw):
+        raise LegacyRevisionError(f"transition/post manifest identity drift: {op}")
+    page_paths = {page["path"] for page in auth["pages"]}
+    expected_post = page_paths | set(_DERIVED)
+    if set(post) != expected_post or set(switch) != expected_post | {"log.md"}:
+        raise LegacyRevisionError(f"transition controlled file set drift: {op}")
+    candidates = _candidate_files(op, auth)
+    expected_candidate = {rel: _sha_bytes(raw) for rel, raw in sorted(candidates.items())}
+    if transition["candidate_sha256"] != expected_candidate:
+        raise LegacyRevisionError(f"frozen candidate bytes drift: {op}")
+    expected_entries = [{
+        "path": rel,
+        "pre_sha256": _sha_bytes(switch[rel]),
+        "post_sha256": _sha_bytes(post[rel]),
+        "pre_size": len(switch[rel]),
+        "post_size": len(post[rel]),
+    } for rel in sorted(post)]
+    if transition["entries"] != expected_entries:
+        raise LegacyRevisionError(f"transition entry bytes drift: {op}")
+    log = transition["log"]
+    if not isinstance(log, dict) or set(log) != {
+            "line", "line_sha256", "post_sha256", "post_size", "pre_sha256", "pre_size"}:
+        raise LegacyRevisionError(f"transition log schema drift: {op}")
+    line = log["line"]
+    log_post = switch["log.md"] + (line.encode("utf-8") if isinstance(line, str) else b"")
+    match = _LOG_ANCHOR.fullmatch(line.strip("\n")) if isinstance(line, str) else None
+    if (not match or match.group("source") != auth["source_id"]
+            or match.group("operation") != op.name
+            or match.group("post") != transition["post_manifest_sha256"][:12]
+            or log["line_sha256"] != _sha_bytes(line.encode("utf-8"))
+            or log["pre_sha256"] != _sha_bytes(switch["log.md"])
+            or log["pre_size"] != len(switch["log.md"])
+            or log["post_sha256"] != _sha_bytes(log_post)
+            or log["post_size"] != len(log_post)):
+        raise LegacyRevisionError(f"transition log identity drift: {op}")
+    return transition, transition_raw, switch, post
+
+
+def _verify_operation(op: Path, workspace: Path, *, allow_live_drift: bool) -> dict:
+    auth, auth_raw = _verify_authorization(op, workspace)
+    events, raws = _events(op)
+    if not events or events[0].get("authorization_sha256") != _sha_bytes(auth_raw):
+        raise LegacyRevisionError(f"prepared event authorization identity drift: {op}")
+    if any(event.get("operation_id") != op.name for event in events):
+        raise LegacyRevisionError(f"event/operation identity drift: {op}")
+    pre_manifest, pre = _verify_file_set(op / "pre", "pre", op.name)
+    expected_pre = {page["path"]: (page["pre_size"], page["pre_sha256"])
+                    for page in auth["pages"]}
+    if ({rel: (len(raw), _sha_bytes(raw)) for rel, raw in pre.items()} != expected_pre
+            or events[0].get("pre_manifest_sha256") != _sha_bytes(
+                (op / "pre" / "manifest.json").read_bytes())):
+        raise LegacyRevisionError(f"authorization/pre evidence identity drift: {op}")
+    candidate_paths = {p.relative_to(op / "candidate" / "files").as_posix()
+                       for p in (op / "candidate" / "files").rglob("*") if p.is_file()}
+    if candidate_paths != {p["path"] for p in auth["pages"]}:
+        raise LegacyRevisionError(f"candidate-set-mismatch: {op}")
+    phase = _phase_from_events(events)
+    if phase in {"committing", "recovery_requested", "rollback_requested",
+                 "completed", "rolled_back"}:
+        transition, transition_raw, switch, post = _verify_transition(op, auth)
+        committing = events[1]
+        if (committing.get("transition_sha256") != _sha_bytes(transition_raw)
+                or committing.get("post_manifest_sha256") != transition["post_manifest_sha256"]):
+            raise LegacyRevisionError(f"committing event transition identity drift: {op}")
+        if phase == "completed":
+            completed = events[-1]
+            if completed.get("post_manifest_sha256") != transition["post_manifest_sha256"]:
+                raise LegacyRevisionError(f"completed event post identity drift: {op}")
+            line = completed.get("log_line")
+            if (not isinstance(line, str)
+                    or completed.get("log_line_sha256") != _sha_bytes(line.encode("utf-8"))):
+                raise LegacyRevisionError(f"completed log anchor identity drift: {op}")
+            log = Path(workspace) / "wiki" / "log.md"
+            count = log.read_text(encoding="utf-8").count(line) if log.is_file() else 0
+            if count != 1:
+                raise LegacyRevisionError(f"completed operation log anchor count is {count}: {op.name}")
+            if not allow_live_drift:
+                for page in auth["pages"]:
+                    live = Path(workspace) / "wiki" / page["path"]
+                    if not live.is_file() or live.read_bytes() != post[page["path"]]:
+                        raise LegacyRevisionError(f"post-legacy-revision-live-drift: {page['path']}")
+        elif phase == "rolled_back" and not allow_live_drift:
+            for page in auth["pages"]:
+                live = Path(workspace) / "wiki" / page["path"]
+                if not live.is_file() or live.read_bytes() != switch[page["path"]]:
+                    raise LegacyRevisionError(f"post-legacy-revision-rollback-live-drift: {page['path']}")
+    return {"phase": phase, "authorization": auth, "events": events}
+
+
+def evidence_findings(workspace: Path) -> list[dict]:
+    """Return hard/warning findings for every sidecar operation and log anchor."""
+    workspace = Path(workspace)
+    root = workspace / "pipeline-workspace" / "legacy-revisions"
+    vault = workspace / "wiki"
+    findings = []
+    operations = {}
+    if root.exists():
+        try:
+            _assert_direct_path(root, workspace, "legacy revision evidence root")
+        except LegacyRevisionError as exc:
+            return [{"severity": "error", "rule": "legacy-revision-evidence-invalid",
+                     "path": str(root), "detail": str(exc)}]
+        for source_dir in sorted(root.iterdir()):
+            if (not source_dir.is_dir() or source_dir.is_symlink()
+                    or evidence_fs.resolved_inside(source_dir, root) is None
+                    or not _SOURCE_ID.fullmatch(source_dir.name)):
+                findings.append({"severity": "error", "rule": "legacy-revision-orphan-path",
+                                 "path": str(source_dir), "detail": "unexpected source directory"})
+                continue
+            for op in sorted(source_dir.iterdir()):
+                if (not op.is_dir() or op.is_symlink()
+                        or evidence_fs.resolved_inside(op, source_dir) is None
+                        or not _OPERATION_ID.fullmatch(op.name)):
+                    findings.append({"severity": "error", "rule": "legacy-revision-orphan-path",
+                                     "path": str(op), "detail": "unexpected operation directory"})
+                    continue
+                operations[(source_dir.name, op.name)] = op
+                try:
+                    verified = _verify_operation(op, workspace, allow_live_drift=True)
+                    phase = verified["phase"]
+                    if phase in {"committing", "recovery_requested", "rollback_requested"}:
+                        findings.append({
+                            "severity": "error", "rule": "legacy-revision-committing",
+                            "path": str(op),
+                            "detail": "unfinished committing operation; recover it before ordinary lint",
+                        })
+                    elif phase == "completed":
+                        _post_manifest, post = _verify_file_set(op / "post", "post", op.name)
+                        drift = [p["path"] for p in verified["authorization"]["pages"]
+                                 if not (vault / p["path"]).is_file()
+                                 or (vault / p["path"]).read_bytes() != post[p["path"]]]
+                        if drift:
+                            findings.append({
+                                "severity": "warning",
+                                "rule": "post-legacy-revision-live-drift", "path": drift[0],
+                                "detail": f"completed history remains valid; live target drifted ({len(drift)} page(s))",
+                            })
+                except (LegacyRevisionError, OSError, UnicodeError, yaml.YAMLError) as exc:
+                    findings.append({"severity": "error", "rule": "legacy-revision-evidence-invalid",
+                                     "path": str(op), "detail": str(exc)})
+    anchors = []
+    log = vault / "log.md"
+    if log.is_file():
+        for line in log.read_text(encoding="utf-8").splitlines():
+            match = _LOG_ANCHOR.fullmatch(line)
+            if match:
+                anchors.append((match.group("source"), match.group("operation"), line))
+    for source, operation, _line in anchors:
+        if (source, operation) not in operations:
+            findings.append({
+                "severity": "error", "rule": "legacy-revision-orphan-log-anchor",
+                "path": "wiki/log.md",
+                "detail": f"orphan revise-adopted log anchor has no operation directory: {source}/{operation}",
+            })
+    return findings
+
+
+def _locked_run(*, workspace: Path, source: str, request: dict, request_sha: str,
+                request_path: Path, apply: bool, abort: bool, recover: str | None,
+                expect_live_manifest: Path | None, lock_ttl_seconds: int) -> dict:
+    context = _adoption_context(workspace, source, lock_ttl_seconds=lock_ttl_seconds)
+    root = _operation_root(workspace, source)
+    op = _find_request_operation(root, request_sha)
+    hard_findings = [finding for finding in evidence_findings(workspace)
+                     if finding["severity"] == "error"
+                     and not (finding["rule"] == "legacy-revision-committing"
+                              and op is not None and Path(finding["path"]) == op)]
+    if hard_findings:
+        finding = hard_findings[0]
+        raise LegacyRevisionError(
+            f"{finding['rule']} {finding['path']}: {finding['detail']}")
+    if op is None:
+        _assert_not_expired(request["valid_until"])
+        authorization, candidates = _build_authorization(context, request, request_sha)
+        op = root / authorization["operation_id"]
+        if not apply:
+            return {"phase": "planned", "operation_id": op.name,
+                    "pages": [p["path"] for p in authorization["pages"]],
+                    "message": "authorization plan verified", "dry_run": True,
+                    "warnings": []}
+    else:
+        authorization, _ = _load_canonical_json(op / "authorization.json", "authorization")
+        candidates = None
+    verified = _verify_operation(op, workspace, allow_live_drift=True) if op.exists() else None
+    phase = verified["phase"] if verified else "none"
+    if phase in {"completed", "aborted", "rolled_back"}:
+        return {"phase": phase, "operation_id": op.name,
+                "pages": [p["path"] for p in authorization["pages"]],
+                "message": f"{phase} fully verified", "dry_run": not apply,
+                "warnings": []}
+    if apply and phase == "prepared" and not abort:
+        _assert_not_expired(authorization["valid_until"])
+        try:
+            _validate_candidates(op, authorization)
+        except LegacyRevisionError as exc:
+            if "was not edited" not in str(exc):
+                raise
+            return {"phase": "prepared", "operation_id": op.name,
+                    "pages": [p["path"] for p in authorization["pages"]],
+                    "message": "prepared; waiting for candidate edits",
+                    "dry_run": False, "warnings": []}
+    if not apply:
+        if phase == "prepared":
+            _assert_not_expired(authorization["valid_until"])
+            try:
+                _validate_candidates(op, authorization)
+                message = "prepared candidate verified and ready to commit"
+            except LegacyRevisionError as exc:
+                if "was not edited" not in str(exc):
+                    raise
+                message = "prepared; waiting for candidate edits"
+            return {"phase": "prepared", "operation_id": op.name,
+                    "pages": [p["path"] for p in authorization["pages"]],
+                    "message": message, "dry_run": True, "warnings": []}
+        return {"phase": phase, "operation_id": op.name,
+                "pages": [p["path"] for p in authorization["pages"]],
+                "message": f"{phase} requires --apply recovery", "dry_run": True,
+                "warnings": []}
+    db = context["db"]
+    holder = f"revise-adopted:{source}:{os.getpid()}"
+    if not locks.acquire(db, scope="vault", holder=holder, pid=os.getpid()):
+        current = locks.get(db, scope="vault")
+        raise LegacyRevisionError(
+            f"active vault lock held by {current['holder'] if current else 'unknown'}")
+    try:
+        context = _adoption_context(workspace, source, allowed_lock_holder=holder,
+                                    lock_ttl_seconds=lock_ttl_seconds)
+        if phase == "none":
+            _assert_not_expired(authorization["valid_until"])
+            _prepare(op, authorization, candidates, context["vault"])
+            _fault_point("prepared")
+            return {"phase": "prepared", "operation_id": op.name,
+                    "pages": [p["path"] for p in authorization["pages"]],
+                    "message": "prepared; edit sidecar candidate files", "dry_run": False,
+                    "warnings": []}
+        if abort:
+            if phase != "prepared":
+                raise LegacyRevisionError("--abort is only valid for a prepared operation")
+            _write_event(op, "aborted")
+            return {"phase": "aborted", "operation_id": op.name,
+                    "pages": [p["path"] for p in authorization["pages"]],
+                    "message": "prepared operation aborted; live vault unchanged",
+                    "dry_run": False, "warnings": []}
+        if phase == "prepared":
+            _assert_not_expired(authorization["valid_until"])
+            _build_transition(op, authorization, context)
+            _forward(op, authorization, context,
+                     expected_unknown=_expected_live_manifest(expect_live_manifest))
+        elif phase in {"committing", "recovery_requested", "rollback_requested"}:
+            supplied = _expected_live_manifest(expect_live_manifest)
+            direction = recover
+            expected = supplied
+            if phase == "committing" and recover is not None:
+                unknown = _unknown_live_bytes(op, authorization, context["vault"])
+                if unknown and supplied is None:
+                    raise LegacyRevisionError(
+                        "controlled live bytes are neither pre nor post; "
+                        "provide --expect-live-manifest before freezing recovery")
+                if supplied is not None and supplied != unknown:
+                    raise LegacyRevisionError(
+                        f"expected live manifest does not exactly match unknown bytes: "
+                        f"expected={unknown} supplied={supplied}")
+                recovery_event = _write_event(op, "recovery_requested", {
+                    "direction": recover,
+                    "expected_live_sha256": supplied or {},
+                })
+                direction = recovery_event["direction"]
+                expected = recovery_event["expected_live_sha256"]
+            elif phase == "recovery_requested":
+                events, _ = _events(op)
+                recovery_event = events[-1]
+                direction = recovery_event.get("direction")
+                frozen_expected = recovery_event.get("expected_live_sha256")
+                if direction not in {"forward", "rollback"} or not isinstance(
+                        frozen_expected, dict):
+                    raise LegacyRevisionError("recovery_requested event schema drift")
+                if recover is not None and recover != direction:
+                    raise LegacyRevisionError("recovery direction differs from frozen event")
+                if supplied is not None and supplied != frozen_expected:
+                    raise LegacyRevisionError("expected live manifest differs from frozen recovery event")
+                expected = frozen_expected
+            if direction == "rollback" or phase == "rollback_requested":
+                _rollback(op, authorization, context, expected)
+            else:
+                _forward(op, authorization, context, expected_unknown=expected)
+        result = _verify_operation(op, workspace, allow_live_drift=False)
+        return {"phase": result["phase"], "operation_id": op.name,
+                "pages": [p["path"] for p in authorization["pages"]],
+                "message": f"{result['phase']} fully verified", "dry_run": False,
+                "warnings": []}
+    finally:
+        locks.release(db, scope="vault", holder=holder)
+
+
+def run(*, workspace: Path, source: str, request_path: Path, apply: bool = False,
+        abort: bool = False, recover: str | None = None,
+        expect_live_manifest: Path | None = None,
+        lock_ttl_seconds: int = 1800) -> dict:
+    """Plan, prepare, finalize, or recover one deterministic revision operation."""
+    if abort and recover:
+        raise LegacyRevisionError("--abort and --recover are mutually exclusive")
+    if recover not in {None, "forward", "rollback"}:
+        raise LegacyRevisionError("--recover must be forward or rollback")
+    if (abort or recover or expect_live_manifest) and not apply:
+        raise LegacyRevisionError("--abort/--recover/--expect-live-manifest require --apply")
+    request, _request_raw, request_sha = _validate_request(Path(request_path), source)
+    return _locked_run(
+        workspace=Path(workspace).resolve(), source=source, request=request,
+        request_sha=request_sha, request_path=Path(request_path), apply=apply,
+        abort=abort, recover=recover, expect_live_manifest=expect_live_manifest,
+        lock_ttl_seconds=lock_ttl_seconds)

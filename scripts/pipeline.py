@@ -2041,6 +2041,13 @@ def _mineru_risk_violations(source_id, proposed, written):
 
 def cmd_lint(args):
     """收尾门禁（spec §10/§11）：lint proposed 集合 → 过则 promote+重建派生；败则回滚+Review-Queue。"""
+    import legacy_revision
+    legacy_findings = legacy_revision.evidence_findings(_workspace_root())
+    for finding in legacy_findings:
+        print(f"[{finding['severity']}] {finding['rule']} {finding['path']}: "
+              f"{finding['detail']}")
+    if any(finding["severity"] == "error" for finding in legacy_findings):
+        raise SystemExit("legacy revision evidence invalid; ordinary lint refused")
     import state_store
     import wiki_gate
     import concept_store
@@ -2561,10 +2568,17 @@ def cmd_proposals_resolve(args):
 def cmd_vault_lint(args):
     """全库渲染安全健康门禁（零 LLM，只读，不写任何行）：扫描 published ∪ proposed 页的
     已知渲染陷阱（callout 类型/嵌套/数学分隔符/空题干），有违规则非零退出（可 CI 化）。"""
+    import legacy_revision
     import wiki_gate
     vault = _vault_dir()
     if not vault.exists():
         raise SystemExit("no wiki/ vault yet")
+    legacy_findings = legacy_revision.evidence_findings(_workspace_root())
+    for finding in legacy_findings:
+        print(f"[{finding['severity']}] {finding['rule']} {finding['path']}: "
+              f"{finding['detail']}")
+    if any(finding["severity"] == "error" for finding in legacy_findings):
+        raise SystemExit("legacy revision evidence invalid; vault-lint refused")
     vs = wiki_gate.vault_render_safety(vault, statuses=("published", "proposed"))
     if not vs:
         print("[OK] vault-lint: 0 render-safety violations")
@@ -2572,6 +2586,33 @@ def cmd_vault_lint(args):
     for v in vs:
         print(f"[vault-lint] {v['rule']} {v['path']} (owner: {v['owner']}): {v['detail']}")
     raise SystemExit(1)
+
+
+def cmd_revise_adopted(args):
+    """修订 adopted legacy 页：默认只读；--apply 才创建、提交或恢复 sidecar operation。"""
+    import legacy_revision
+
+    try:
+        result = legacy_revision.run(
+            workspace=_workspace_root(), source=args.source,
+            request_path=Path(args.request), apply=args.apply,
+            abort=args.abort, recover=args.recover,
+            expect_live_manifest=(Path(args.expect_live_manifest)
+                                  if args.expect_live_manifest else None),
+            lock_ttl_seconds=LOCK_TTL_SECONDS,
+        )
+    except legacy_revision.LegacyRevisionError as exc:
+        raise SystemExit(str(exc))
+    print(f"[plan] revise-adopted source={args.source} operation={result['operation_id']} "
+          f"phase={result['phase']} pages={len(result['pages'])}")
+    for rel in result["pages"]:
+        print(f"[page] {rel}")
+    for warning in result.get("warnings", []):
+        print(f"[warning] {warning}")
+    if result["dry_run"]:
+        print(f"[dry-run] {result['message']}; byte-zero-write")
+    else:
+        print(f"[OK] revise-adopted {result['message']}")
 
 
 def cmd_ingest_stats(args):
@@ -2823,6 +2864,18 @@ def main():
                      help="基线归档的预期 SHA-256")
     adp.add_argument("--apply", action="store_true",
                      help="执行接管（默认仅扫描、核验并打印计划，零写入）")
+    lrp = subparsers.add_parser(
+        "revise-adopted",
+        help="修订 adopted legacy 页：sidecar 候选、完整 lint、可恢复切换（默认只读）")
+    lrp.add_argument("--source", required=True)
+    lrp.add_argument("--request", required=True, help="人工审阅的 revision-request.yaml")
+    lrp.add_argument("--apply", action="store_true")
+    lrp.add_argument("--abort", action="store_true",
+                     help="终止 prepared operation（必须与 --apply 同用）")
+    lrp.add_argument("--recover", choices=("forward", "rollback"),
+                     help="恢复 committing operation（必须与 --apply 同用）")
+    lrp.add_argument("--expect-live-manifest",
+                     help="冲突恢复时的 JSON：vault 相对路径到当前 SHA-256")
     rsp = subparsers.add_parser(
         "reuse-source", help="复用只读 published vault 的来源（默认 dry-run；--apply 登记专用终态）")
     rsp.add_argument("--source", required=True, help="目标 vault 的 source_id")
@@ -2991,6 +3044,7 @@ def main():
         'fail': cmd_fail,
         'init-vault': cmd_init_vault,
         'adopt-vault': cmd_adopt_vault,
+        'revise-adopted': cmd_revise_adopted,
         'reuse-source': cmd_reuse_source,
         'reseal-source': cmd_reseal_source,
         'apply-obsidian-style': cmd_apply_obsidian_style,

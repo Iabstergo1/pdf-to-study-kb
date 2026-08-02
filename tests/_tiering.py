@@ -38,6 +38,7 @@ FILE_TIERS = {
     "test_adopt_vault_cli.py": ("cli",),
     "test_collection_boundary_cli.py": ("cli",),
     "test_reuse_source_cli.py": ("cli",),
+    "test_legacy_revision_cli.py": ("cli",),
     # ---- skill 协议 / 文档契约 ----
     "test_command_docs.py": ("skill",),
     "test_ingest_fidelity_contract.py": ("skill",),
