@@ -171,6 +171,60 @@ python -B scripts/pipeline.py reseal-source --source mysql `
 - **apply 与恢复**：在 vault 锁内先暂存 transition + 完整新证据；把 source state 从 published 降为 `reused/running` 后才归档旧 evidence、激活新 evidence、替换 source 页并重建派生层，最后原子更新 stage/artifact SHA 并恢复 published。中途失败用同一命令重跑，按确定性 operation id 前滚；published 状态不会指向另一代文件。若进程被 OS 直接杀死而留下 stale vault lock，先按常规 `unlock` 协议回收再重跑。
 - **审计与重放**：旧 v1 全目录在 `pipeline-workspace/reuse-reseals/<src>/<operation-id>/old-evidence/`；transition 串起新旧 SHA，`log.md` 记发生日期。成功后普通 `reuse-source` 用 v2 mapping 重放应为 byte/mtime no-op；精确 reseal 重跑也不再新建归档。
 
+### 第 0D 步（仅 adopted legacy 页）：受控修订既有笔记
+
+`adopt-vault` 只把既有页纳入治理，不会凭空产生书籍 workorder。若 QA 后确认某张
+`adopted/published` legacy 页要修，使用 `revise-adopted`，不要绕过 `check-write`、手填数据库或借一篇
+无关资料扩大 `source_refs`。这条命令给的是**写入授权**，不是“内容已有书源”的证明；外部依据逐条写入
+`citations`，仍要由独立内容 QA 判断依据是否真的支持结论。
+
+先准备一份人工审阅过的请求文件：
+
+```yaml
+version: 1
+source_id: legacy-kb
+valid_until: "2026-08-09T12:00:00+00:00"
+mode: edit
+pages:
+  - path: domains/statistics/concepts/example.md
+    reason: 修正统计解释并补全适用边界
+    evidence:
+      - citation:
+          source: NIST/SEMATECH e-Handbook
+          title: Engineering Statistics Handbook
+          url: https://www.itl.nist.gov/div898/handbook/
+          accessed_on: "2026-08-02"
+          locator: Chapter 1
+        supports: 统计结论必须写明适用条件
+    citation_removals: []
+```
+
+然后按四步操作：
+
+```powershell
+# 1. 只读看计划
+python scripts/pipeline.py revise-adopted --source legacy-kb --request revision-request.yaml
+
+# 2. 确认后准备 operation；live wiki 仍不变
+python scripts/pipeline.py revise-adopted --source legacy-kb --request revision-request.yaml --apply
+
+# 3. 只编辑输出 operation 下 candidate/files/ 内获授权的页面
+# 4. 原命令再次 --apply：全 vault overlay lint 通过后才切换 live
+python scripts/pipeline.py revise-adopted --source legacy-kb --request revision-request.yaml --apply
+```
+
+- **固定边界**：只能改接管 manifest 内、`managed_by: pipeline`、仍引用该 legacy source 的 published 页；
+  `managed_by: human`、source 页、派生文件、Review-Queue 和越界路径一律拒绝。候选必须把 `status` 改为
+  `proposed`，但 `canonical_id`、路径身份、`source_refs` 等不可变字段不能变。
+- **崩溃恢复**：prepared 尚未切换可用 `--abort --apply`；committing 后普通 `lint` / `vault-lint`
+  会 hard fail，必须用同一请求前滚，或显式 `--recover rollback --expect-live-manifest <json> --apply`。
+  committing 事件已经落盘后不再检查 `valid_until`，避免授权过期把恢复路径锁死。
+- **撤回窗口**：`mode: revert` 只在当前 live 仍逐字节等于旧 operation 的 post 时允许整文件恢复；若页面
+  后来已被其他来源更新，revert 会拒绝，正确做法是从当前 live 新建 `mode: edit` 前向修正。
+- **发布后的书源出口**：某个普通书源已完成一轮并发布、其旧 workorder 快照又被 legacy 修订改过时，
+  `check-write` 会先拒绝过期哈希；该书源处于 `lint/published` 时用 `reopen` 重建 workorder 后再继续。
+  若它当前已在 `ingesting/running`，应 `resume`，不是 `reopen`。
+
 ### 第 1 步（可选但推荐）：填学习目标
 
 - **目的**：让产出贴合你的需求。
@@ -264,7 +318,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 ### 5.3 底层 CLI 操作（高级排障 / 手动重跑）
 
 > 所有 skill 背后都是 `python scripts/pipeline.py <command>`。下面按生命周期分组，标注**必填/可选参数**。
-> 共 **49 个**子命令（完整实现映射见开发文档 §3；含 `adopt-vault` 既有库基线接管、`reuse-source` 跨 vault 来源复用、`reseal-source` v1→v2 证据重封、`vault-lint` 全库渲染安全健康门禁、`lint --source kb-save --session <run_id>` 会话发布路径与 `retract-source` 证据先行撤库）。
+> 共 **50 个**子命令（完整实现映射见开发文档 §3；含 `adopt-vault` 既有库基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用、`reseal-source` v1→v2 证据重封、`vault-lint` 全库渲染安全健康门禁、`lint --source kb-save --session <run_id>` 会话发布路径与 `retract-source` 证据先行撤库）。
 
 **状态与维护：**
 
@@ -274,6 +328,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | `next` | 看每源下一步动作 | — | — | `python scripts/pipeline.py next` |
 | `init-vault` | 建 `wiki/` 脚手架（幂等） | — | — | `python scripts/pipeline.py init-vault` |
 | `adopt-vault` | 接管既有 vault；默认 byte-zero-write dry-run，legacy 内容门禁债 warning-only，安全/ZIP/证据/source/state/台账完整性 hard-block；`--apply` 在锁内落证据并重建派生层，成功后才登记 `adopted/published`；精确重跑 byte no-op，接管后 live 演进只报 drift warning，历史证据/状态漂移 fail-closed | `--source --title --domain --baseline-archive --baseline-sha256` | `--apply` | `... adopt-vault --source legacy-kb --title "既有库" --domain general --baseline-archive "C:\backups\wiki.zip" --baseline-sha256 <SHA256>` |
+| `revise-adopted` | 对 adopted legacy 页建立 sidecar 写前证据、可编辑候选、全 vault overlay lint 与可恢复切换；默认只读，首次 apply 只准备，候选编辑后再次 apply 才提交；写入授权不改变 `source_refs`，外部依据进入 `citations` | `--source --request` | `--apply` `--abort` `--recover {forward,rollback}` `--expect-live-manifest <json>` | `... revise-adopted --source legacy-kb --request revision-request.yaml` |
 | `reuse-source` | 从只读 published vault 登记选择性来源复用；核验 PDF/origin state/source 页与全部 concept/topic 页、mapping（v1/v2）覆盖集与 origin 概念集相等、concept 与 topic 两维的零映射目标不得有该归因；apply 冻结 evidence，派生成功后才登记 `reused/published`；精确重跑 byte no-op，target live 演进 warning-only，origin/mapping/evidence/source/state 漂移 fail-closed | `--source --title --domain --path --sha256 --origin-root --origin-source --mapping` | `--expect-concepts --expect-topics --apply` | `... reuse-source --source mysql --title "MySQL" --domain sql --path "C:\books\mysql.pdf" --sha256 <SHA256> --origin-root "<origin-vault-root>" --origin-source mysql --mapping "C:\tmp\mysql.json"` |
 | `reseal-source` | 仅在完整 reuse v1 证据上补 mapping v2 topic 维度；metadata/PDF/origin/concept mapping/计数/target baseline 不可变；apply 归档 v1 并以 running 中间态替换 evidence/source/派生/state，崩溃可前滚、精确重跑 no-op | `--source --mapping --from-manifest-sha256` | `--apply` | `... reseal-source --source mysql --mapping "C:\tmp\mysql-v2.json" --from-manifest-sha256 <旧SHA256>` |
 | `unlock` | 回收 stale vault 锁（活锁拒绝） | — | `--ttl 1800` | `python scripts/pipeline.py unlock` |
@@ -332,6 +387,10 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 > **已知限制**：`retract-source` 尚不支持 `adopted/published` 与 `reused/published` 两类旁路终态；不要对这两类来源执行撤库。`reseal-source` 只替换证据，不提供退役能力。
 >
 > **被复用的来源不要随便 `reopen`**：只要另一个 vault 还在复用某个来源，就不要对它执行 `reopen` 或重新摄取——那会改变生产状态（阶段记录、round、窗口台账、页面哈希），而目前**没有**自动的证据升级或安全退役路径可用：复用与重封都会拒绝，撤库又不支持这类终态。真要更新，先规划下游证据升级再动 origin；把状态手工改回去是伪造，不是修复。（对别的来源跑 lint 导致该来源 `review_proposals` 增长属于正常运营，不受此限。）
+>
+> **legacy 修订不是永久撤销键**：精确 revert 只在页面还等于旧 post 时可用；已有后续合法更新时改走
+> `mode: edit`。`committing` operation 会阻断普通 lint，须先前滚或回滚。系统也尚无 generation lineage，
+> 所以 completed 后只知道 live 漂移，不能自动证明是哪一次后续 ingest 造成的。
 
 ### 5.4 主流程之外、你仍会接触的场景
 
@@ -342,6 +401,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | **查知识库**（读到一半想查某概念） | "知识库里关于纳什均衡怎么说" | 只读回答 + 一个 query-session（**不写库**） |
 | **把查询结论沉淀回库**（承接上一步） | 查完接着说"把刚才那个纳什均衡 vs 帕累托最优的对比存进 wiki" | `comparison`/`synthesis` proposed 页 → lint 后入库。**有准入门槛**：一次性事实、原样复述会被门拦下（见 `docs/skill-runtime/save-back-policy.md`） |
 | **处理复核队列**（lint 失败 / 有待人工决策项） | "处理一下复核队列 / 看看待复核的项" | 逐条分析 lint 失败项、跨域提升候选、被覆盖保护拒绝的改动；**最终采纳与否你定夺** |
+| **修订 adopted legacy 页**（QA 已确认、用户已批准） | "按这份证据修正这几张接管页" | `revise-adopted` 先生成 sidecar candidate，编辑候选后全库 lint 再切 live；它只授权写入，不替内容追加书源归因 |
 | **语义体检**（想查质量而非结构） | "给知识库做个语义体检 / 查有没有跨页矛盾" | 检查对比页维度是否完整、跨页结论是否自相矛盾、近期保存是否有增量价值 → 只出 Review-Queue proposal，**不改页** |
 | **QA / 覆盖率审计** | "给知识库做次 QA / 审计覆盖率 / 抽查证据" | 覆盖率报告 + 概念污染检查 → `pipeline-workspace/reports/` + Review-Queue proposal |
 | **拆书阅读笔记**（对已发布来源） | "给博弈论这本书做拆书阅读笔记" | 只写 `pipeline-workspace/reports/source-xray/`，**不动 vault** |

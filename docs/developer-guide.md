@@ -3,7 +3,7 @@
 > 本文面向开发者，描述本仓库的架构、模块职责、数据契约、命令层与测试。
 > 所有结论以**源码为准**。
 > 面向使用者的操作说明见 [用户使用说明](user-guide.md)。
-> 版本锚点：当前工作树（2026-07-30 增量核对）；**49 个 CLI 子命令**（含 `adopt-vault` 基线接管、`reuse-source` 跨 vault 来源复用与 `reseal-source` 证据重封）/ 11 个技能。测试数量以 `pytest --collect-only -q` 为准——本轮两次证明精确计数写进文档当场就腐烂，故不再保留任何快照。
+> 版本锚点：当前工作树（2026-08-02 增量核对）；**50 个 CLI 子命令**（含 `adopt-vault` 基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用与 `reseal-source` 证据重封）/ 11 个技能。测试数量以 `pytest --collect-only -q` 为准——本轮两次证明精确计数写进文档当场就腐烂，故不再保留任何快照。
 > 2026-07-11 六阶段重构后的新机制（§7 已更新，其余章节以源码为准）：统一 callout 解析器
 > `page_rules.parse_callouts`（唯一语法入口，错误不吞节点）、渲染安全唯一实现 + **vault preflight
 > 事务隔离**（published 旧伤阻断 promote 但不回滚当前批）、`vault-lint` 全库健康门禁、归属≠记账
@@ -30,7 +30,7 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 
 | 入口 | 文件 | 说明 |
 |------|------|------|
-| 唯一 CLI 入口 | `scripts/pipeline.py` → `main()` | argparse 分发 **49 个**子命令（见 §3；含 `adopt-vault` / `reuse-source` / `reseal-source` 三条确定性旁路/维护路径）。 |
+| 唯一 CLI 入口 | `scripts/pipeline.py` → `main()` | argparse 分发 **50 个**子命令（见 §3；含 `adopt-vault` / `revise-adopted` / `reuse-source` / `reseal-source` 四条确定性旁路/维护路径）。 |
 | LLM 编排入口 | `.claude/skills/ingest/SKILL.md`（+ `references/*`） | 端到端入库 skill；常规 ingest 是唯一 LLM 写库步骤，legacy-vault 接管分支为零 LLM。 |
 | 无人值守续跑 | `scripts/resume-ingest.ps1` | OS 调度触发的有界续跑脚本（PowerShell）。 |
 | 可选后端安装 | `scripts/install_mineru.py` → `main()` | 按机型自动安装 MinerU + 匹配 CUDA torch。 |
@@ -40,9 +40,10 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 
 | 模块 | 职责 | 关键符号 |
 |------|------|----------|
-| `pipeline.py` | CLI 分发 + 各阶段编排（每个 `cmd_*` 一个子命令，共 49 个） | `main()`、`cmd_*` 函数族、`_workspace_root()`、`_vault_dir()`、`_staging_dir()` |
+| `pipeline.py` | CLI 分发 + 各阶段编排（每个 `cmd_*` 一个子命令，共 50 个） | `main()`、`cmd_*` 函数族、`_workspace_root()`、`_vault_dir()`、`_staging_dir()` |
 | `state_store.py` | 单一业务 SQLite 状态机（**8 张表**）+ 原子阶段 API + 轮次 token | `STAGES`、`NEXT`、`start_stage/complete_stage/fail_stage`、`should_run_stage`、`adopt_source`、`reuse_source`、`reopen_source`、`reset_source`、`RESETTABLE_TARGETS`、`resolve_review_proposals`、`source_stats`、`*_window`、`round_anchor`、`window_reads_in_round`、`export_source_rows`、`purge_source_ledgers` |
 | `vault_adoption.py` | 既有 vault 的只读接管计划、ZIP/页面集合核验、不可变逐页证据、canonical source 页与历史基线/接管后 live drift 分层 | `AdoptionError`、`build_plan`、`write_evidence`、`write_source_page` |
+| `legacy_revision.py` | adopted legacy 页的请求校验、授权/pre/candidate/post sidecar、全 vault overlay lint、哈希链事件与可恢复切换；普通 lint/vault-lint 共用证据核验 | `LegacyRevisionError`、`run`、`evidence_findings`、`CONTRACT_VERSION` |
 | `source_reuse.py` | published origin vault 的只读状态/来源文件/概念与主题页核验、mapping v1/v2 解析与覆盖集相等性、concept 与 topic 两维的目标归因边界、不可变 origin/target evidence 与 live target drift 分层 | `ReuseError`、`build_plan`、`write_evidence`、`write_source_page` |
 | `evidence_fs.py` | 两条零 LLM 旁路共用的证据落盘底座：路径边界、canonical JSON、流式哈希、vault 锁前置检查（纯函数、无业务语义；`AdoptionError`/`ReuseError` 都继承它的基类但互不为别名） | `EvidenceBoundaryError`、`sha256_file`、`json_bytes`、`resolved_inside`、`assert_direct_contained`、`reject_lock` |
 | `locks.py` | 单 vault 写锁（scope 固定 `"vault"`） | `acquire/release/heartbeat/is_stale/break_stale` |
@@ -206,11 +207,13 @@ pdf-to-study-kb/
 ├── .gitattributes
 │
 ├── scripts/                     # ⭐ 全部业务逻辑（零 LLM）
-│   ├── pipeline.py              # 唯一 CLI 入口（48 子命令）
+│   ├── pipeline.py              # 唯一 CLI 入口（50 子命令）
 │   ├── state_store.py           # 状态机 SQLite（8 张表：sources/source_stage_runs/artifacts/
 │   │                            #   work_orders/source_locks/review_proposals/ingest_progress/
 │   │                            #   window_reads）
 │   ├── vault_adoption.py        # 既有 vault 只读计划 + 不可变证据 + 漂移拒绝
+│   ├── legacy_revision.py       # adopted legacy 页 sidecar 修订 + 事件链 + 恢复
+│   ├── source_reuse.py          # 跨 vault 来源复用 / reseal 证据
 │   ├── locks.py                 # 单 vault 写锁
 │   ├── source_profile.py        # L1 逐页 profile + needs_vision
 │   ├── source_convert.py        # L1 dispatcher（选后端 + 持久化）
@@ -300,6 +303,7 @@ pdf-to-study-kb/
 | 列出各源下一步动作 | `next` | `cmd_next` → `state_store.next_actions` | state db | 终端打印 | 无 | `test_pipeline_status.py` | 准确 |
 | 建 vault 脚手架 | `init-vault` | `cmd_init_vault` | `templates/overview.md` | `wiki/` 目录 + overview/log/purpose + `.obsidian/{graph,app}.json` | 写盘（幂等不覆盖） | `test_vault_init_cli.py` | 准确 |
 | 接管既有 vault 基线 | `adopt-vault --source --title --domain --baseline-archive --baseline-sha256 [--apply]` | `cmd_adopt_vault` → `vault_adoption.build_plan/write_evidence/write_source_page` + 派生重建 + `state_store.adopt_source` | 已有 `wiki/` + 接管前 ZIP 及预期 SHA-256 | 默认只打印逐页计划；apply 在锁内落不可变证据/canonical source 页，派生层全成功后登记 `legacy-vault` 的 `adopted/published` | 首次 legacy 内容债 warning-only，安全/ZIP/证据/source/state/台账完整性 hard-block；精确重跑 byte no-op，登记后 live drift 只 warning、历史证据不变；`work_orders/ingest_progress/window_reads=0` | `test_adopt_vault_cli.py` | 准确 |
+| 修订 adopted legacy 页 | `revise-adopted --source --request [--apply] [--abort] [--recover forward\|rollback --expect-live-manifest <json>]` | `cmd_revise_adopted` → `legacy_revision.run`；`cmd_lint`/`cmd_vault_lint` → `legacy_revision.evidence_findings` | v1 request YAML + 完整 adoption evidence + `adopted/published` source | 默认只读计划；首次 apply 写 authorization/pre/candidate/prepared，候选编辑后再次 apply 在 overlay 完整 lint 并冻结 transition/switch-pre/post，再以事件链切换 live | 主 SQLite schema/source/stage/artifact 与三类 ingest ledger 不变；source_refs/身份 frontmatter 不可变；committing 可前滚/回滚，证据或孤儿日志锚点损坏 fail-closed，completed live drift warning-only | `test_legacy_revision_cli.py` | 准确 |
 | 复用 published vault 来源 | `reuse-source --source --title --domain --path --sha256 --origin-root --origin-source --mapping [--apply]` | `cmd_reuse_source` → `source_reuse.build_plan/write_evidence/write_source_page` + 派生重建 + `state_store.reuse_source` | 只读 origin root + PDF/SHA + mapping v1/v2 + 已完成 merge/source_refs 的目标页 | 默认 byte-zero-write；apply 在目标锁内冻结 origin state/source 页与全部 concept/topic 页、mapping（v1/v2）与首次 concept+topic target snapshot，派生成功后登记 `external-vault-reuse` 的 `reused/published` | mapping 覆盖集 == origin 概念集（故各恰好一次）；v2 的 topic 维度只校验引用存在性与不重复，不要求全覆盖；两维的零映射目标都不得获该来源归因；精确重跑 no-op，target live drift warning-only，origin/mapping/evidence/source/state drift fail-closed；三台账为 0 | `test_reuse_source_cli.py` | 准确 |
 | 重封 reuse v1→v2 topic 证据 | `reseal-source --source --mapping --from-manifest-sha256 [--apply]` | `cmd_reseal_source` → `source_reuse.build_reseal_plan/prepare_reseal_archive/archive_reseal_old_evidence/activate_reseal_evidence/replace_reseal_source_page` + 派生重建 + `state_store.begin_reuse_reseal/complete_reuse_reseal` | 完整现役 v1 evidence + 新 v2 mapping；metadata/PDF/origin 从旧 manifest 导出 | 默认 byte-zero-write；apply 以确定性 operation 暂存新证据、running 中间态替换 active evidence/source、归档 v1、重建派生，最后原子更新 state hash 并 republish | 仅 topic 维度可新增；concept targets/计数/target_pages 也固定；每个持久化边界崩溃均以前滚恢复，精确重跑 no-op；损坏旧证据不准借 reseal 覆盖 | `test_reuse_source_cli.py` | 准确 |
 | 回收 stale 锁 | `unlock [--ttl 1800]` | `cmd_unlock` → `locks.break_stale` | state db | 释放锁 | 删锁行（活锁拒绝） | `test_locks.py` | 准确 |
@@ -577,6 +581,50 @@ operation id 是 canonical `{source_id, old_manifest_sha256, new_mapping_sha256}
 
 **已知但不在本路径解决的缺口**：`retract-source` 尚不支持 `adopted/published` 或 `reused/published` 旁路终态。不得把 reseal 当退役；也不要对这两类来源调用现行撤库命令，需另立证据退役设计。
 
+### 4.2.4 adopted legacy 页受控修订（`revise-adopted`）
+
+`adopt-vault` 冻结的是接管事实，不创建普通 ingest 的 workorder/window 台账；因此 adopted legacy 页
+不能伪装成某本书的 ingest 来获得写权限。`revise-adopted` 提供一条独立合同：**写入授权允许某些已接管
+页面接受一次有证据的修订，但不声称这些页面因此拥有新的书源**。请求 v1 固定
+`source_id/valid_until/mode/pages`，每页必须给 `reason`、非空 `evidence` 与
+`citation_removals`；citation 至少含 `source/title/https url/accessed_on`，可带 `locator`，并用
+`supports` 明说支撑哪条结论。候选中的 citation 增删必须与请求完全一致，`source_refs` 以及
+`canonical_id/page_path/managed_by` 等身份字段不得变化，human 页无条件拒绝。
+
+实现使用 `pipeline-workspace/legacy-revisions/<source>/<operation-id>/` sidecar，不在 live 页上边改边验。
+首次 `--apply` 在 vault 锁内冻结 canonical `authorization.json`、永久 `pre/files` 与可编辑
+`candidate/files`，live 零变化；编辑 candidate 后再次 `--apply` 建完整 overlay vault，运行页面 lint、
+全库 render-safety、promotion 以及 registry/index/graph/HTML/quiz/propositions 重算。全部成功才冻结
+`transition.json`、`switch-pre` 与 `post`，写 `committing` 事件，再 compare-and-replace live 文件并追加
+唯一 `log.md` 锚点，最后写 `completed`。主 SQLite 不增表/列，adopted source/state/artifact 与
+`work_orders/ingest_progress/window_reads=0` 全程不变。
+
+事件是 canonical JSON 追加链（`prepared → committing → completed`，另有 abort/recovery/rollback
+分支），每项冻结前一事件 SHA。`legacy_revision.evidence_findings` 是唯一核验实现，由命令自身、普通
+`lint` 与 `vault-lint` 共同调用；它双向核对 operation 目录与 log 锚点、授权/pre/candidate/transition/
+post/事件链及路径边界。证据损坏、孤儿锚点或未收尾 `committing` 都 hard fail；completed 后 live 的
+合法演进只报 `post-legacy-revision-live-drift` warning。
+
+恢复合同刻意不让有效期制造死锁：`valid_until` 只在 preparation 与首次进入 committing 之前校验；
+committing 事件一旦存在，前滚与 rollback 均不再校验。正常崩溃用同一 request 幂等前滚；若 live 出现
+既非 switch-pre 也非 post 的未知字节，必须用 `--expect-live-manifest` 精确声明当前 SHA，未知字节先归档
+到 `conflicts/`，再显式 `--recover forward|rollback`。prepared 可 `--abort --apply`，所有终态重放为
+byte/mtime no-op。
+
+**已知边界：**
+
+- `mode: revert` 是整文件恢复，只在目标 live 仍逐字节等于旧 operation post 时可用。页面后来被其他
+  来源更新后必须拒绝 revert，改从当前 live 新建 `mode: edit` 前向修正；不能自动拼接“旧正文 + 当前
+  frontmatter”并冒险抹掉后来贡献。
+- committing operation 会阻断普通 `lint` / `vault-lint`，直到原 operation 前滚或回滚；这是避免其他
+  发布越过半完成切换的安全门，不是可忽略 warning。
+- 项目尚无 generation lineage。completed 后可以发现 live SHA 漂移，但不能只靠最终字节自动证明是哪次
+  后续 ingest 造成；本合同只证明自己的 pre/post 与切换过程。
+- 普通书源若已完成一轮并发布，而旧 workorder 快照早于 legacy 修订，后续 `check-write` 会以
+  `disk hash changed since snapshot` 拒绝。合法出口是在该书源仍为 `lint/published` 时 `reopen`，按当前
+  live 重建 workorder 后再 `ingest-start → check-write`；若当前已 `ingesting/running`，应 resume，不能
+  为迁就测试放宽 `REOPENABLE`。
+
 ### 4.3 输入注册 / 添加流程（`add-source`）
 
 `register_source` 向 `sources` 表 `INSERT OR IGNORE`（`current_stage="registered"`、
@@ -732,7 +780,7 @@ stage/artifact SHA 并恢复 published。`next` 会把崩溃残留显示为 `res
 | `knowledge-graph.generated.html` | lint / rebuild-graph（graph_html） | 力导向交互 HTML | 点击节点跳 `obsidian://` 对应笔记；publish-isolated（失败不阻断发布） |
 | `quiz-index.generated.md` | lint / rebuild-quiz（`wiki_gate.write_quiz_index`） | 零 LLM 派生 | published 页 `[!question]` 题干 + 回链，按 domain 分组，不含答案；publish-isolated |
 | `propositions.generated.md` | lint / rebuild-propositions（`wiki_gate.write_propositions_index`） | 零 LLM 派生 | published 页具名命题（`**命题（名）**：…`）+ 回链，按 domain 分组，名字即锚点、v1 不编号；publish-isolated |
-| `log.md` | ingest + lint / retract-source / adopt-vault / reuse-source / reseal-source 追加 | append-only | 操作日志；唯一格式由 `wiki_gate.log_line()` 定义（`## [日期] 动词 \| 来源 \| 摘要`）。adopt/reuse 只在终态首次登记时追加；reseal 按新 manifest 短 SHA 去重，允许“状态已完成但日志尚未写”的崩溃恢复，精确重跑仍是全树 byte/mtime no-op；`log.md` 不是派生产物输入 |
+| `log.md` | ingest + lint / retract-source / adopt-vault / revise-adopted / reuse-source / reseal-source 追加 | append-only | 操作日志；唯一格式由 `wiki_gate.log_line()` 定义（`## [日期] 动词 \| 来源 \| 摘要`）。adopt/reuse 只在终态首次登记时追加；reseal 按新 manifest 短 SHA 去重；revise-adopted 追加含 operation id 与 post manifest 短 SHA 的唯一锚点，并与 operation 目录双向核验；`log.md` 不是派生产物输入 |
 | `Review-Queue/*.md` | lint 失败 / promotion | — | 未过门禁 / 待人工决策项 |
 | `_meta/purpose.md` | **用户手写**（init-vault 落空模板） | — | 学习目标与偏好；ingest 读取，优先级高于内容路由/装置预算等 advisory |
 
@@ -850,6 +898,7 @@ python -m pytest tests --collect-only -q --basetemp=$bt   # 只看分层收集
 | `test_tiering_guard.py` | **fail-closed 归层守卫**：`tests/_tiering.py` 注册表 vs 磁盘漂移、非法/冲突 tier 判定（daily 白名单不静默漏测） |
 | `test_skill_standard.py` | 九段合约（T1）、**双树协议/语义对等**（T2，归一 project-truth 指针后逐字比对）、卫生（T3）、协议关键词完好（T4，含 `kb-postmortem`/`pipeline-doctor` 词表）、source-xray guard（T5） |
 | `test_state_store.py` | 状态机单向转换、幂等跳过、reopen、window 记账 |
+| `test_legacy_revision_cli.py` | adopted revision 请求/候选/overlay lint、主状态零改、崩溃前滚/rollback/abort/revert、事件与日志防伪、live drift 分层、过期 committing 可恢复、published 书源旧快照经 reopen 刷新 |
 | `test_locks.py` | 单 vault 锁获取/释放/stale 判定/受控破锁 |
 | `test_preflight_eval.py` | 13 项 check 各自行为（纯 check_* 已 parametrize；CLI wiring 拆在 `test_preflight_eval_cli.py`，端到端 evaluate 独立） |
 | `test_source_convert.py` | 后端选择 + 转换契约（needs-vision/backend/classify 判定矩阵已 parametrize，真实 PDF/convert 独立） |

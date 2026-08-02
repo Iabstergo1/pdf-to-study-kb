@@ -25,10 +25,14 @@ proposals only; it does not edit content pages.
 - `pipeline-workspace/reports/kb-qa/<run_id>.md`: the QA report.
 - For actionable findings, write `wiki/Review-Queue/kb-qa-<YYYY-MM-DD>.md` proposals; no direct content-page edits.
 - The report covers scope, the Q-chain, sampled items, findings, risk level, and the suggested follow-up skill (usually `kb-review`).
+- For an actionable finding on an `adopted/published` legacy page, distinguish the later
+  `revise-adopted` **write authorization** from content attribution: record official evidence for the
+  finding, but do not add a book to `source_refs` or claim that the legacy page has acquired a source.
 
 ## 4. Dependencies
 
 - CLI: `python scripts/pipeline.py status`; if needed `python scripts/pipeline.py lint --source <source_id>`.
+  `revise-adopted` belongs to the confirmed-fix path in `kb-review`, never to this read-only QA run.
 - Protocols: `docs/skill-runtime/schema.md`, `save-back-policy.md`, `concept-resolution.md`.
 - Triggers mutually exclusive with `wiki-lint-semantic`: semantic-health words are not handled here.
 
@@ -46,6 +50,8 @@ python scripts/pipeline.py lint --source <source_id>
 ```
 
 This skill never promotes, rolls back, or edits content pages; fixes go to `kb-review` or the matching write skill.
+If the finding targets an adopted legacy page, the handoff must say that `revise-adopted` can authorize
+the later edit but cannot validate the evidence or change `source_refs`.
 
 ## 7. Workflow
 
@@ -97,7 +103,8 @@ per-assertion pass supports a page-level conclusion.
 
 vault/index missing; scope unclear; the request is really a semantic-health check (switch to
 `wiki-lint-semantic`); deterministic lint already failed with no stable QA scope; an evidence path is
-missing; the user asks to edit content pages directly (switch to `kb-review` and wait for confirmation).
+missing; the user asks to edit content pages directly (switch to `kb-review` and wait for confirmation);
+an adopted-page finding has no official evidence strong enough to support the proposed correction.
 **Recovery:** the report + proposals are the durable output; re-run after the scope is clarified.
 
 ## 9. Acceptance criteria
@@ -105,5 +112,7 @@ missing; the user asks to edit content pages directly (switch to `kb-review` and
 - The QA report is written under `pipeline-workspace/reports/kb-qa/`.
 - Every Q-chain item has a question, evidence, judgement, and a follow-up action.
 - Actionable findings are written as Review-Queue proposals.
+- Adopted legacy findings separate “evidence supports this correction” from “the pipeline authorizes a
+  later write”; no new `source_refs` are inferred from a citation or from `revise-adopted`.
 - No wiki content page was edited directly.
 - None of `wiki-lint-semantic`'s exclusive triggers were handled.

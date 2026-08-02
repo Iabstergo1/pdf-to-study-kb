@@ -40,7 +40,11 @@ def test_docs_command_count_matches_cli():
         assert all(c == n for c in claims), f"{rel} 声称的子命令数 {claims} ≠ CLI 真值 {n}"
         table_rows = [ln for ln in text.splitlines() if ln.lstrip().startswith("|")]
         assert any("vault-lint" in ln for ln in table_rows), f"{rel} 的命令表缺 vault-lint 条目"
+        assert any("revise-adopted" in ln for ln in table_rows), \
+            f"{rel} 的命令表缺 revise-adopted 条目"
         assert "--session" in text and "kb-save" in text, f"{rel} 缺 kb-save 会话发布路径说明"
+        for must in ("写入授权", "source_refs", "committing", "generation lineage"):
+            assert must in text, f"{rel} 缺 adopted revision 边界：{must}"
 
 
 def test_docs_no_hardcoded_test_counts():
@@ -154,7 +158,12 @@ def test_kb_save_skill_gate_and_discipline():
 
 def test_kb_review_and_semantic_lint_skills():
     rev = _skill("kb-review")
-    assert "Review-Queue" in rev and "review_proposals" in rev and "promotion-candidate" in rev
+    for must in ["Review-Queue", "review_proposals", "promotion-candidate", "revise-adopted",
+                 "write authorization", "source_refs", "candidate/files/"]:
+        assert must in rev, f"kb-review missing: {must}"
+    qa = _skill("kb-qa")
+    for must in ["revise-adopted", "write authorization", "source_refs"]:
+        assert must in qa, f"kb-qa missing adopted revision boundary: {must}"
     sem = _skill("wiki-lint-semantic")
     for must in ["L4", "contradiction", "Q2", "proposal", "does not directly edit"]:
         assert must in sem, f"wiki-lint-semantic missing: {must}"

@@ -116,6 +116,19 @@ python scripts/pipeline.py adopt-vault --source <src> --title "<title>" --domain
 
 `adopt-vault` 默认 **byte-zero-write**。首次接管只对安全/可读性/published status、ZIP↔live 知识页集合与字节、锁及证据/source/state/三类 ingest 台账完整性做 hard-block；现行 `wiki_gate` 发现的 legacy 内容债全部列为 warning-only，接管本身不是质量证书。`--apply` 在 vault 锁内新增不可变 manifest/逐页原始字节证据与 canonical `wiki/sources/<src>.md`，重建 index、registry、graph、quiz、propositions，全部成功后才登记 `format=legacy-vault`、`adopted/published`；它**不会自动改写既有知识页**，也不会伪造 `work_orders`、`ingest_progress` 或 `window_reads`。完全验证的精确重跑是全树 byte no-op；接管后 live 知识页的正常演进只报 `post-adoption-live-drift` warning，历史 manifest/evidence 不变，不会因此 fail-closed。归档、证据、source 页、接管元数据或状态漂移仍 fail-closed；内容债请随后用正式 `vault-lint` / `graph-lint` 治理。
 
+### 可选分支：受控修订 adopted legacy 页
+
+接管后若 QA 确认 legacy 页要修，用 `revise-adopted`，不要伪造普通 ingest 历史。先提交人工审阅的
+`revision-request.yaml`（固定页集合、有效期、修改理由、逐条 HTTPS citation 与访问日期），默认 dry-run
+只打印计划；首次 `--apply` 只生成永久 pre 快照和可编辑的 sidecar candidate，live wiki 不变。编辑
+`pipeline-workspace/legacy-revisions/<source>/<operation-id>/candidate/files/` 后，再次运行相同 `--apply`
+命令；系统在完整 overlay vault 中 lint 并重建派生层，全部通过才可恢复地切换 live。
+
+这条路径只授予“允许改这些页”，**不提供内容归因**：`source_refs` 不得变化，外部依据进入
+`citations`，内容是否被证据支持仍需独立 QA。prepared 可显式 abort；committing 后须用原 operation
+前滚或 rollback，普通 lint 不得越过。精确 revert 只在 live 仍等于旧 post 时可用，已有后续合法更新时
+改走新的 `mode: edit` 前向修正。
+
 ### 可选分支：从只读 published Vault 复用一个来源
 
 若另一个 pipeline vault 已把同一 PDF 完整发布，而目标 vault 已人工完成选择性合并，可用显式 mapping 登记复用事实，不必伪造一次新的 ingest。mapping 有两个版本，**都受支持**：v1 顶层为 `version`/`source_id`/`targets[]`（每项 `target` + 排序后的 `origin_concepts[]`），只有 concept 维度；v2 在此之上加 `topic_targets[]`（每项 `target` + 排序后的 `origin_topics[]`），用于登记 topic 页的聚合归因。既有 v1 mapping 与已冻结的 v1 evidence 无需迁移——v1 走下来的 manifest 与 source 页逐字节不变，重放仍是 byte no-op。命令要求 mapping 覆盖的 origin concept 集合与 origin 实际拥有的 published concept 集合**完全相等**，因而不遗漏、不多余、各主映射一次；目标页张数由 mapping 自己决定，不设固定形状。**topic 维度刻意不要求全覆盖**：只校验引用到的 origin topic 真实存在且不被重复引用——强制覆盖等于逼人为每张 origin topic 在目标库造一张页，那正是门禁不该做的事。非空目标须预先有 `source_refs: source: <src>`，显式零映射目标反而不得有该归因。可选的 `--expect-concepts` / `--expect-topics` 用于在已知形状时额外确认。
@@ -229,9 +242,10 @@ pdf-to-study-kb/
 ├── README.md                 # 本文件
 ├── requirements.txt          # 基础依赖 PyMuPDF + PyYAML + pytest（生产格式另需 MinerU，见末尾可选段）
 ├── scripts/
-│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（48 子命令，全部业务逻辑在此）
+│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（50 子命令，全部业务逻辑在此）
 │   ├── state_store.py / locks.py                # 业务 SQLite 状态机 / 单-ingest 并发锁
-│   ├── vault_adoption.py / source_reuse.py       # 既有 vault 接管 / 跨库来源复用：只读规划 + 不可变证据 + 漂移拒绝
+│   ├── vault_adoption.py / legacy_revision.py / source_reuse.py
+│   │                                           # 既有 vault 接管 / adopted 页受控修订 / 跨库来源复用
 │   ├── source_profile.py / source_convert.py / source_artifacts.py / chaptering.py   # L1 解析 + L2 结构契约
 │   ├── source_backends/      # 后端：pymupdf（fast path）/ markdown / 可选 mineru（结构化）
 │   ├── windowing.py / workorder.py / preflight_eval.py   # L3 切窗 / 事务契约 / L4 验收门
@@ -277,14 +291,14 @@ pdf-to-study-kb/
 
 所有 skill 背后调用的都是 `python scripts/pipeline.py <command>`（零 LLM、可独立运行，**全部业务逻辑与安全守卫都在这里**）。日常对话无需手动输入；该接口面向**精细控制、问题排查、手动重跑某一阶段、无人值守脚本化**等高级场景。
 
-命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 49 个子命令（以 `python scripts/pipeline.py --help` 为准）：
+命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 50 个子命令（以 `python scripts/pipeline.py --help` 为准）：
 
 <details>
 <summary><b>展开：完整 CLI 命令参考</b></summary>
 
 ### 状态与维护
 
-> **为什么有这组**：ingest 是可中断的长任务，且同一 vault 受并发锁保护。这组命令让你不依赖 LLM 就能"看清现状 + 崩溃自救"——`status`/`next` 回答"每个来源走到哪一步、锁在谁手里、下一步该做什么"；`fail` 把崩溃残留的 `running` 阶段标记 `failed` 以便重跑；`unlock` 受控回收超时的 stale 锁（活锁拒绝，防误删）；`adopt-vault` 以不可变基线接管既有库；`reuse-source` 从只读 published vault 登记选择性复用；`reseal-source` 在旧证据完整前提下受控替换 v1→v2 topic 证据；`rebuild-registry` 从概念页 frontmatter 重建派生索引；`rebuild-graph` 从 published 图谱重建 graph-data + 离线 HTML 力导向图（派生阅读层，fail-hard）、`graph-lint` 校验图谱产物；`rebuild-quiz` 从 published 页的 `[!question]` 重建自测题库索引（复习入口，派生阅读层）；`rebuild-propositions` 从 published 页的具名命题（`**命题（名）**：…`）重建命题总表（全库结论清单，名字即锚点）；`init-vault` 幂等搭起空脚手架。
+> **为什么有这组**：ingest 是可中断的长任务，且同一 vault 受并发锁保护。这组命令让你不依赖 LLM 就能"看清现状 + 崩溃自救"——`status`/`next` 回答"每个来源走到哪一步、锁在谁手里、下一步该做什么"；`fail` 把崩溃残留的 `running` 阶段标记 `failed` 以便重跑；`unlock` 受控回收超时的 stale 锁（活锁拒绝，防误删）；`adopt-vault` 以不可变基线接管既有库；`revise-adopted` 通过 sidecar 候选与不可变事件链修订 adopted legacy 页；`reuse-source` 从只读 published vault 登记选择性复用；`reseal-source` 在旧证据完整前提下受控替换 v1→v2 topic 证据；`rebuild-registry` 从概念页 frontmatter 重建派生索引；`rebuild-graph` 从 published 图谱重建 graph-data + 离线 HTML 力导向图（派生阅读层，fail-hard）、`graph-lint` 校验图谱产物；`rebuild-quiz` 从 published 页的 `[!question]` 重建自测题库索引（复习入口，派生阅读层）；`rebuild-propositions` 从 published 页的具名命题（`**命题（名）**：…`）重建命题总表（全库结论清单，名字即锚点）；`init-vault` 幂等搭起空脚手架。
 
 | 命令 | 作用 | 关键参数 |
 |------|------|------|
@@ -292,6 +306,7 @@ pdf-to-study-kb/
 | `next` | 列出每个 source 的**下一步人工动作** + stale 锁清理建议 | — |
 | `init-vault` | 建 `wiki/` 脚手架 + 种子文件（幂等，不覆盖） | — |
 | `adopt-vault` | 接管既有 vault 基线：默认零写 dry-run；legacy `wiki_gate` 内容债 warning-only，安全/ZIP/证据/source/state/台账完整性才 hard-block；`--apply` 在锁内落不可变证据、重建派生层，成功后登记 `legacy-vault` 的 `adopted/published`，既有知识页不改写、三类 ingest 台账为零；精确重跑全树 byte no-op，接管后 live 演进只报 drift warning，历史归档/证据/状态漂移仍 fail-closed | `--source --title --domain --baseline-archive --baseline-sha256 [--apply]` |
+| `revise-adopted` | 修订 `adopted/published` legacy 页：默认只读规划；首次 `--apply` 生成永久 pre 快照和可编辑 sidecar candidate，候选通过全 vault overlay lint 后再次 `--apply` 才以可恢复事务切换 live。授权只说明“允许改”，不新增书源归因；证据须逐条进入 `citations` | `--source --request [--apply] [--abort] [--recover {forward,rollback} --expect-live-manifest <json>]` |
 | `reuse-source` | 从只读 published vault 复用来源：默认零写；核验 PDF SHA、origin state/source 页与全部 concept/topic 页、mapping（v1/v2）覆盖集与 origin 概念集相等、concept 与 topic 两个维度的目标归因边界；apply 冻结 origin/mapping/首次 target snapshot，派生成功后登记 `external-vault-reuse` 的 `reused/published`，三类 ingest 台账为零；target live 演进 warning-only，origin/mapping/evidence/source/state 漂移 fail-closed | `--source --title --domain --path --sha256 --origin-root --origin-source --mapping [--expect-concepts --expect-topics --apply]` |
 | `reseal-source` | 仅在完整旧 reuse v1 证据上补 topic 维度：默认零写；不可改 metadata/PDF/origin/concept mapping/计数/target baseline；apply 先暂存新代、降为 running、归档 v1、替换 evidence/source、重建派生，最后原子更新 state SHA 并 republish；确定性 operation 支持崩溃前滚与精确 no-op | `--source --mapping --from-manifest-sha256 [--apply]` |
 | `unlock` | 受控回收 stale vault 锁；活锁拒绝 | `--ttl 1800` |
@@ -350,6 +365,8 @@ pdf-to-study-kb/
 > **已知限制**：`retract-source` 目前只支持普通 ingest 线性状态，不支持 `adopted/published` 或 `reused/published` 终态；不要对这两类来源执行撤库。`reseal-source` 只做证据替换，不是退役路径。
 >
 > **与之配套的另一条边界**：origin 来源一旦发生**生产状态**漂移（`reopen` 或重新摄取都会造成），当前**没有**自动的 evidence upgrade 或安全退役路径——`reuse-source` 与 `reseal-source` 都会拒绝生产投影漂移，`retract-source` 又不支持 `reused/published`。因此**在下游复用仍需有效期间，不要对被复用的 origin generation 执行 `reopen` / 重新摄取**；手工把状态改回冻结值属于伪造，不是恢复手段。（仅 `review_proposals` 诊断账本的变化不受此限，见开发文档 §4.2.2。）
+>
+> **adopted 修订的边界**：`revise-adopted` 的精确 `mode: revert` 只在 live 仍等于被撤 operation 的 post 字节时可用；页面后来被其他来源更新后须从当前 live 新建 `mode: edit` 前向修正。任一 operation 处于 `committing` 都会让普通 `lint` / `vault-lint` hard fail，必须先按原 operation 前滚或回滚。项目目前没有 generation lineage，无法仅凭最终 live SHA 自动归因 completed 之后的漂移。
 | `sync-assets` | 把本源 staging 难页 PNG 同步进 `wiki/assets/<src>/`（预处理 / reopen 会自动调用） | `--source` |
 | `staging-clean` | **磁盘治理**：staging 三分类报告（审计保留 / 可再生可删 mineru_raw·audit·diag·dump_* / unknown 一律保留）；**默认 dry-run**，`--apply` 双护栏（source 已 published + assets 同步核对通过） | `--source [--apply]` |
 | `promotion-candidates` | 检测跨域提升候选（人工确认） | `--propose` |

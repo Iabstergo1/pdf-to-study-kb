@@ -24,11 +24,14 @@ skill only orchestrates, surfaces acceptance, and marks failure stops.
 
 - For each item: a classification, the risk, a suggested fix, and whether a user decision is needed.
 - After the user confirms, execute the matching fix/promotion/marking; without confirmation, do not edit the target.
+  For an `adopted/published` legacy page, prepare a `revise-adopted` sidecar operation instead of
+  fabricating an ingest workorder or editing live first.
 - Append `> handled: <conclusion>` to a processed Review-Queue item, or note that it still awaits the user.
 
 ## 4. Dependencies
 
-- CLI: `status`, `lint`, `promote-concept`, `rebuild-registry`; if needed, return to `ingest` or the target source's lint loop.
+- CLI: `status`, `lint`, `revise-adopted`, `promote-concept`, `rebuild-registry`; if needed, return to
+  `ingest` or the target source's lint loop.
 - Protocols: `docs/skill-runtime/schema.md`, `concept-resolution.md`, `save-back-policy.md`.
 - Human-page protection stays top priority: a human page is edited by the user, never auto-overwritten by the skill.
 
@@ -42,6 +45,8 @@ skill only orchestrates, surfaces acceptance, and marks failure stops.
 
 ```text
 python scripts/pipeline.py status
+python scripts/pipeline.py revise-adopted --source <legacy_source> --request <revision-request.yaml>
+python scripts/pipeline.py revise-adopted --source <legacy_source> --request <revision-request.yaml> --apply
 python scripts/pipeline.py lint --source <source_id>
 python scripts/pipeline.py promote-concept --id <canonical_id>
 python scripts/pipeline.py rebuild-registry
@@ -52,6 +57,14 @@ Run vault-changing commands (e.g. `promote-concept` / page fixes / marking handl
 After a fix is verified, retire the matching `review_proposals` rows with `proposals-resolve` (dry-run
 first, then `--apply` after user confirmation) so the skill-mine backlog stops counting fixed signals.
 
+For adopted legacy pages, **write authorization is not content attribution**. The revision request must
+name each target, reason, expiry, and structured HTTPS evidence; the credential freezes the current live
+page. Edit only the generated `candidate/files/` copies, never the live pages. `source_refs` and identity
+frontmatter stay unchanged; external support is added through the credentialed `citations`. The first
+`--apply` prepares the operation, and a later identical `--apply` commits only after full overlay lint.
+If the operation is `committing`, recover that operation before any ordinary lint. Do not use
+`revise-adopted` for human-managed pages or as a substitute for a real book ingest.
+
 ## 7. Workflow
 
 | Sub-unit | Input | Output | Acceptance | Persisted | Failure stop |
@@ -59,15 +72,17 @@ first, then `--apply` after user confirmation) so the skill-mine backlog stops c
 | R1 collect queue | Review-Queue + status | pending list | files and ledger aligned | — | queue missing |
 | R2 classify | one item | lint/promotion/coverage/semantic/overwrite class | class maps to a fix path | analysis draft | type unclear |
 | R3 suggest | item + related pages | fix/reject/promote suggestion | states risk, affected pages, commands | chat output | evidence thin |
-| R4 user confirm | user decision | execute or reject | no target edit without confirmation | Review-Queue mark | human-page conflict |
+| R4 user confirm | user decision | execute or reject | no target edit without confirmation; adopted legacy edits use a bounded revise-adopted request | Review-Queue mark / sidecar operation | human-page conflict |
 | R5 verify loop | fix result | lint/rebuild/check result | the command passes or re-enqueues on failure | new proposal/mark | verify fails |
 
 ## 8. Failure stops / recovery
 
 User has not confirmed; target `managed_by: human`; cross-domain promotion semantics unclear; a homonym
 promotion; a lint fix would exceed the write scope; `promote-concept` or `rebuild-registry` fails; an item
-lacks evidence. **Recovery:** unresolved items stay in `Review-Queue` with their state; re-run the matching
-`lint` after fixes.
+lacks evidence; an adopted revision request is expired; an operation is already `committing`; a revert
+target has changed since its recorded post. **Recovery:** unresolved items stay in `Review-Queue` with
+their state. Abort an uncommitted prepared operation, recover a committing operation with its frozen
+manifest, or use a new forward `mode: edit` after later live drift; then re-run the matching lint.
 
 ## 9. Acceptance criteria
 
@@ -76,4 +91,6 @@ lacks evidence. **Recovery:** unresolved items stay in `Review-Queue` with their
 - A promotion-candidate has been judged "semantic reuse vs homonym".
 - After a confirmed promotion, `promote-concept` + `rebuild-registry` were run.
 - After a lint-violation fix, the matching `lint` was re-run; failures stay in Review-Queue.
+- Adopted legacy fixes used `revise-adopted`; their citations match the approved evidence and their
+  `source_refs` were not changed by the authorization path.
 - No human page was auto-overwritten.
