@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PIPELINE = ROOT / "scripts" / "pipeline.py"
 SOURCE = "legacy-resume-wiki"
 PAGE_REL = "domains/statistics/concepts/legacy-test.md"
+PAGE_REL_2 = "domains/statistics/concepts/legacy-test-two.md"
 
 
 def _run(args, workspace):
@@ -37,17 +38,19 @@ def _tree_state(root):
 
 
 def _write_page(path, *, managed_by="pipeline", status="published",
-                source_refs=None, citations=None, suffix=""):
+                source_refs=None, citations=None, suffix="", page_rel=PAGE_REL):
+    slug = Path(page_rel).stem
+    name = "Legacy test" if page_rel == PAGE_REL else slug.replace("-", " ").title()
     source_refs = source_refs if source_refs is not None else [
-        {"source": SOURCE, "sections": [f"legacy-page:{PAGE_REL}"]}]
+        {"source": SOURCE, "sections": [f"legacy-page:{page_rel}"]}]
     meta = {
-        "aliases": ["Legacy test"],
-        "canonical_id": "concept.statistics.legacy-test",
-        "canonical_name": "Legacy test",
+        "aliases": [name],
+        "canonical_id": f"concept.statistics.{slug}",
+        "canonical_name": name,
         "citations": citations or [],
         "domain": "statistics",
         "managed_by": managed_by,
-        "page_path": PAGE_REL,
+        "page_path": page_rel,
         "scope": "domain",
         "source_refs": source_refs,
         "status": status,
@@ -65,13 +68,17 @@ def _write_page(path, *, managed_by="pipeline", status="published",
     path.write_text(f"---\n{fm}---\n{body}\n", encoding="utf-8", newline="\n")
 
 
-def _adopted_workspace(tmp_path):
+def _adopted_workspace(tmp_path, *, page_rels=(PAGE_REL,)):
     vault = tmp_path / "wiki"
-    page = vault / PAGE_REL
-    _write_page(page)
+    pages = []
+    for rel in page_rels:
+        page = vault / rel
+        _write_page(page, page_rel=rel)
+        pages.append(page)
     archive = tmp_path / "legacy-baseline.zip"
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as zf:
-        zf.writestr(f"wiki/{PAGE_REL}", page.read_bytes())
+        for rel, page in zip(page_rels, pages):
+            zf.writestr(f"wiki/{rel}", page.read_bytes())
     result = _run([
         "adopt-vault", "--source", SOURCE,
         "--title", "Legacy baseline", "--domain", "data-analysis-interview",
@@ -79,28 +86,33 @@ def _adopted_workspace(tmp_path):
         "--apply",
     ], tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
-    return vault, page
+    return vault, pages[0]
+
+
+def _request_page(page_rel, *, citation=None):
+    citation = citation or {
+        "source": "NIST/SEMATECH e-Handbook",
+        "title": "Engineering Statistics Handbook",
+        "url": "https://www.itl.nist.gov/div898/handbook/",
+        "accessed_on": "2026-08-02",
+        "locator": "Chapter 1",
+    }
+    return {
+        "path": page_rel,
+        "reason": "修正 legacy 页中的统计解释，并明确证据边界",
+        "evidence": [{
+            "citation": citation,
+            "supports": "统计结论必须写明适用条件",
+        }],
+        "citation_removals": [],
+    }
 
 
 def _request(tmp_path, *, valid_until=None, pages=None, mode="edit",
              revert_operation=None):
     valid_until = valid_until or (
         datetime.now(timezone.utc) + timedelta(days=7)).isoformat(timespec="seconds")
-    pages = pages or [{
-        "path": PAGE_REL,
-        "reason": "修正 legacy 页中的统计解释，并明确证据边界",
-        "evidence": [{
-            "citation": {
-                "source": "NIST/SEMATECH e-Handbook",
-                "title": "Engineering Statistics Handbook",
-                "url": "https://www.itl.nist.gov/div898/handbook/",
-                "accessed_on": "2026-08-02",
-                "locator": "Chapter 1",
-            },
-            "supports": "统计结论必须写明适用条件",
-        }],
-        "citation_removals": [],
-    }]
+    pages = pages or [_request_page(PAGE_REL)]
     payload = {"version": 1, "source_id": SOURCE, "valid_until": valid_until,
                "mode": mode, "pages": pages}
     if revert_operation:
@@ -132,9 +144,10 @@ def _operation_dir(tmp_path):
     return dirs[0]
 
 
-def _edit_candidate(tmp_path, *, change_sources=False, add_citation=True):
+def _edit_candidate(tmp_path, *, change_sources=False, add_citation=True,
+                    page_rel=PAGE_REL, citation=None):
     op = _operation_dir(tmp_path)
-    candidate = op / "candidate" / "files" / PAGE_REL
+    candidate = op / "candidate" / "files" / page_rel
     text = candidate.read_text(encoding="utf-8")
     end = text.find("\n---\n", 4)
     meta = yaml.safe_load(text[4:end + 1])
@@ -143,7 +156,7 @@ def _edit_candidate(tmp_path, *, change_sources=False, add_citation=True):
     if change_sources:
         meta["source_refs"].append({"source": "invented-book", "sections": ["p1"]})
     if add_citation:
-        meta["citations"].append({
+        candidate_citation = dict(citation or {
             "source": "NIST/SEMATECH e-Handbook",
             "title": "Engineering Statistics Handbook",
             "url": "https://www.itl.nist.gov/div898/handbook/",
@@ -151,12 +164,29 @@ def _edit_candidate(tmp_path, *, change_sources=False, add_citation=True):
             "locator": "Chapter 1",
             "supports": "统计结论必须写明适用条件",
         })
+        candidate_citation.setdefault("supports", "统计结论必须写明适用条件")
+        meta["citations"].append(candidate_citation)
     fm = yaml.safe_dump(meta, allow_unicode=True, sort_keys=True,
                         default_flow_style=False)
     candidate.write_text(
         f"---\n{fm}---\n{body}\n本轮依据外部证据补充了适用条件。\n",
         encoding="utf-8", newline="\n")
     return candidate
+
+
+def _two_page_request(tmp_path):
+    second_citation = {
+        "source": "Penn State Eberly College of Science",
+        "title": "Conditions for inference",
+        "url": "https://online.stat.psu.edu/stat200/lesson/4/4.2",
+        "accessed_on": "2026-08-02",
+        "locator": "Lesson 4.2",
+    }
+    pages = [
+        _request_page(PAGE_REL),
+        _request_page(PAGE_REL_2, citation=second_citation),
+    ]
+    return _request(tmp_path, pages=pages), second_citation
 
 
 def _ledger_counts(tmp_path):
@@ -387,6 +417,131 @@ def test_partial_commit_can_rollback_without_rechecking_expiry(tmp_path, monkeyp
         recover="rollback", lock_ttl_seconds=1800)
     assert rolled["phase"] == "rolled_back"
     assert page.read_bytes() == pre
+
+
+def test_two_page_candidate_is_atomic_and_partial_switch_replays_forward(
+        tmp_path, monkeypatch):
+    vault, _page = _adopted_workspace(tmp_path, page_rels=(PAGE_REL, PAGE_REL_2))
+    pre = {rel: (vault / rel).read_bytes() for rel in (PAGE_REL, PAGE_REL_2)}
+    log_pre = (vault / "log.md").read_bytes()
+    request, second_citation = _two_page_request(tmp_path)
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    _edit_candidate(tmp_path)
+    second = _edit_candidate(
+        tmp_path, page_rel=PAGE_REL_2, citation=second_citation)
+
+    valid_second = second.read_bytes()
+    _edit_candidate(
+        tmp_path, page_rel=PAGE_REL_2, citation=second_citation,
+        change_sources=True)
+    rejected = _run(_revise_args(request), tmp_path)
+    assert rejected.returncode != 0
+    assert "source_refs" in (rejected.stdout + rejected.stderr)
+    assert {rel: (vault / rel).read_bytes() for rel in pre} == pre
+    assert (vault / "log.md").read_bytes() == log_pre
+    second.write_bytes(valid_second)
+
+    candidate_check = _run(_revise_args(request), tmp_path)
+    assert candidate_check.returncode == 0, candidate_check.stdout + candidate_check.stderr
+    assert "candidate verified and ready to commit" in candidate_check.stdout
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import legacy_revision
+    original = legacy_revision._fault_point
+
+    def stop_after_first_page(point):
+        if any(point.endswith(f":{rel}") for rel in (PAGE_REL, PAGE_REL_2)):
+            raise RuntimeError("first page switched")
+
+    monkeypatch.setattr(legacy_revision, "_fault_point", stop_after_first_page)
+    with pytest.raises(RuntimeError, match="first page switched"):
+        legacy_revision.run(
+            workspace=tmp_path, source=SOURCE, request_path=request,
+            apply=True, lock_ttl_seconds=1800)
+
+    op = _operation_dir(tmp_path)
+    transition = json.loads((op / "transition.json").read_text(encoding="utf-8"))
+    page_entries = [entry for entry in transition["entries"]
+                    if entry["path"] in {PAGE_REL, PAGE_REL_2}]
+    assert {entry["path"] for entry in page_entries} == {PAGE_REL, PAGE_REL_2}
+    first_rel, second_rel = (entry["path"] for entry in page_entries)
+    assert (vault / first_rel).read_bytes() == (
+        op / "post" / "files" / first_rel).read_bytes()
+    assert (vault / second_rel).read_bytes() == (
+        op / "switch-pre" / "files" / second_rel).read_bytes()
+    assert (vault / "log.md").read_bytes() == log_pre
+
+    monkeypatch.setattr(legacy_revision, "_fault_point", original)
+    replay = legacy_revision.run(
+        workspace=tmp_path, source=SOURCE, request_path=request,
+        apply=True, lock_ttl_seconds=1800)
+    assert replay["phase"] == "completed"
+    for rel in (PAGE_REL, PAGE_REL_2):
+        assert (vault / rel).read_bytes() == (op / "post" / "files" / rel).read_bytes()
+    log_line = transition["log"]["line"]
+    assert (vault / "log.md").read_text(encoding="utf-8").count(log_line) == 1
+    assert legacy_revision.evidence_findings(tmp_path) == []
+    assert _ledger_counts(tmp_path) == (0, 0, 0)
+
+    before = _tree_state(tmp_path)
+    exact_replay = legacy_revision.run(
+        workspace=tmp_path, source=SOURCE, request_path=request,
+        apply=True, lock_ttl_seconds=1800)
+    assert exact_replay["phase"] == "completed"
+    assert _tree_state(tmp_path) == before
+
+
+def test_two_page_partial_switch_rolls_back_every_page_and_log(tmp_path, monkeypatch):
+    vault, _page = _adopted_workspace(tmp_path, page_rels=(PAGE_REL, PAGE_REL_2))
+    pre = {rel: (vault / rel).read_bytes() for rel in (PAGE_REL, PAGE_REL_2)}
+    log_pre = (vault / "log.md").read_bytes()
+    request, second_citation = _two_page_request(tmp_path)
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    _edit_candidate(tmp_path)
+    _edit_candidate(tmp_path, page_rel=PAGE_REL_2, citation=second_citation)
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import legacy_revision
+    original = legacy_revision._fault_point
+
+    def stop_after_first_page(point):
+        if any(point.endswith(f":{rel}") for rel in (PAGE_REL, PAGE_REL_2)):
+            raise RuntimeError("first page switched")
+
+    monkeypatch.setattr(legacy_revision, "_fault_point", stop_after_first_page)
+    with pytest.raises(RuntimeError, match="first page switched"):
+        legacy_revision.run(
+            workspace=tmp_path, source=SOURCE, request_path=request,
+            apply=True, lock_ttl_seconds=1800)
+    monkeypatch.setattr(legacy_revision, "_fault_point", original)
+
+    op = _operation_dir(tmp_path)
+    transition = json.loads((op / "transition.json").read_text(encoding="utf-8"))
+    page_entries = [entry for entry in transition["entries"]
+                    if entry["path"] in {PAGE_REL, PAGE_REL_2}]
+    first_rel, second_rel = (entry["path"] for entry in page_entries)
+    assert (vault / first_rel).read_bytes() == (
+        op / "post" / "files" / first_rel).read_bytes()
+    assert (vault / second_rel).read_bytes() == pre[second_rel]
+    expected = tmp_path / "expected-live.json"
+    expected.write_text("{}\n", encoding="utf-8", newline="\n")
+    rolled = legacy_revision.run(
+        workspace=tmp_path, source=SOURCE, request_path=request, apply=True,
+        recover="rollback", expect_live_manifest=expected, lock_ttl_seconds=1800)
+
+    assert rolled["phase"] == "rolled_back"
+    assert {rel: (vault / rel).read_bytes() for rel in pre} == pre
+    assert (vault / "log.md").read_bytes() == log_pre
+    events = [path.name for path in sorted((op / "events").glob("*.json"))]
+    assert events == [
+        "0001-prepared.json",
+        "0002-committing.json",
+        "0003-recovery_requested.json",
+        "0004-rollback_requested.json",
+        "0005-rolled_back.json",
+    ]
+    assert legacy_revision.evidence_findings(tmp_path) == []
+    assert _ledger_counts(tmp_path) == (0, 0, 0)
 
 
 def test_candidate_lint_failure_and_live_pre_drift_leave_live_untouched(tmp_path):
