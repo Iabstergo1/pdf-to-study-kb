@@ -590,6 +590,8 @@ operation id 是 canonical `{source_id, old_manifest_sha256, new_mapping_sha256}
 `citation_removals`；citation 至少含 `source/title/https url/accessed_on`，可带 `locator`，并用
 `supports` 明说支撑哪条结论。候选中的 citation 增删必须与请求完全一致，`source_refs` 以及
 `canonical_id/page_path/managed_by` 等身份字段不得变化，human 页无条件拒绝。
+签发时还会把每个 `citation_removals` SHA 与当前 live 页 citations 的规范哈希作子集校验；
+不存在的 SHA 会在创建 sidecar 前拒绝，并列出该页现有的 `source`/`url` 摘要。
 
 实现使用 `pipeline-workspace/legacy-revisions/<source>/<operation-id>/` sidecar，不在 live 页上边改边验。
 首次 `--apply` 在 vault 锁内冻结 canonical `authorization.json`、永久 `pre/files` 与可编辑

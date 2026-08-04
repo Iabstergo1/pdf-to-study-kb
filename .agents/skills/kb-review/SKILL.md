@@ -62,6 +62,8 @@ name each target, reason, expiry, and structured HTTPS evidence; the credential 
 page. Edit only the generated `candidate/files/` copies, never the live pages. `source_refs` and identity
 frontmatter stay unchanged; external support is added through the credentialed `citations`. The first
 `--apply` prepares the operation, and a later identical `--apply` commits only after full overlay lint.
+Before preparation, declared citation-removal SHA values must be a subset of the current live page
+citations; an unknown SHA fails closed before sidecar creation and reports the available source/URL summaries.
 If the operation is `committing`, recover that operation before any ordinary lint. Do not use
 `revise-adopted` for human-managed pages or as a substitute for a real book ingest.
 

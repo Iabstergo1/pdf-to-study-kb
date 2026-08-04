@@ -356,6 +356,21 @@ def _build_authorization(context: dict, request: dict, request_sha: str) -> tupl
             raise LegacyRevisionError(f"target must be pipeline-managed and published: {rel}")
         if request["source_id"] not in _sources(meta):
             raise LegacyRevisionError(f"target no longer cites adopted source {request['source_id']}: {rel}")
+        actual_citations = list(meta.get("citations") or [])
+        actual_citation_hashes = {
+            _citation_hash(citation): citation for citation in actual_citations}
+        requested_removal_hashes = {
+            removal["sha256"] for removal in item["citation_removals"]}
+        unknown_removal_hashes = sorted(requested_removal_hashes - actual_citation_hashes.keys())
+        if unknown_removal_hashes:
+            actual_details = "; ".join(
+                f"{citation_hash} (source={citation.get('source', '<missing>')!r}, "
+                f"url={citation.get('url', '<missing>')!r})"
+                for citation_hash, citation in sorted(actual_citation_hashes.items())
+            ) or "<none>"
+            raise LegacyRevisionError(
+                f"citation_removals are not present on current target: {rel}; "
+                f"unknown={unknown_removal_hashes}; actual citations: {actual_details}")
         if request["mode"] == "revert":
             prior_post = revert_op / "post" / "files" / rel
             prior_pre = revert_op / "pre" / "files" / rel

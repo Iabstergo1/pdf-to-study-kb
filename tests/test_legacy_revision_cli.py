@@ -68,12 +68,26 @@ def _write_page(path, *, managed_by="pipeline", status="published",
     path.write_text(f"---\n{fm}---\n{body}\n", encoding="utf-8", newline="\n")
 
 
-def _adopted_workspace(tmp_path, *, page_rels=(PAGE_REL,)):
+def _existing_citation(*, suffix="one"):
+    return {
+        "source": f"existing-source-{suffix}",
+        "title": f"Existing citation {suffix}",
+        "url": f"https://example.test/existing-{suffix}",
+    }
+
+
+def _citation_sha256(citation):
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import legacy_revision
+    return legacy_revision._citation_hash(citation)
+
+
+def _adopted_workspace(tmp_path, *, page_rels=(PAGE_REL,), citations=None):
     vault = tmp_path / "wiki"
     pages = []
     for rel in page_rels:
         page = vault / rel
-        _write_page(page, page_rel=rel)
+        _write_page(page, page_rel=rel, citations=citations)
         pages.append(page)
     archive = tmp_path / "legacy-baseline.zip"
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as zf:
@@ -262,6 +276,66 @@ def test_invalid_requests_fail_without_operation(tmp_path, mutator, needle):
     result = _run(_revise_args(request, apply=True), tmp_path)
     assert result.returncode != 0
     assert needle in (result.stdout + result.stderr).lower()
+    assert not (tmp_path / "pipeline-workspace" / "legacy-revisions").exists()
+
+
+def test_signing_rejects_unknown_citation_removal_with_actual_citation_details(tmp_path):
+    citation = _existing_citation()
+    _adopted_workspace(tmp_path, citations=[citation])
+    requested_sha = hashlib.sha256(b"not-on-target").hexdigest()
+    page = _request_page(PAGE_REL)
+    page["citation_removals"] = [{
+        "sha256": requested_sha,
+        "reason": "该引用不再支撑当前结论",
+    }]
+    request = _request(tmp_path, pages=[page])
+
+    result = _run(_revise_args(request, apply=True), tmp_path)
+
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert requested_sha in output
+    assert _citation_sha256(citation) in output
+    assert citation["source"] in output and citation["url"] in output
+    assert not (tmp_path / "pipeline-workspace" / "legacy-revisions").exists()
+
+
+def test_signing_accepts_citation_removal_subset_of_current_target(tmp_path):
+    first = _existing_citation(suffix="first")
+    second = _existing_citation(suffix="second")
+    _adopted_workspace(tmp_path, citations=[first, second])
+    page = _request_page(PAGE_REL)
+    page["citation_removals"] = [{
+        "sha256": _citation_sha256(first),
+        "reason": "该引用不再支撑当前结论",
+    }]
+    request = _request(tmp_path, pages=[page])
+
+    result = _run(_revise_args(request, apply=True), tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    authorization = json.loads(
+        (_operation_dir(tmp_path) / "authorization.json").read_text(encoding="utf-8"))
+    assert authorization["pages"][0]["citation_plan"]["remove_sha256"] == [
+        _citation_sha256(first)]
+
+
+def test_signing_rejects_citation_removal_when_current_target_has_none(tmp_path):
+    _adopted_workspace(tmp_path)
+    requested_sha = hashlib.sha256(b"not-on-target").hexdigest()
+    page = _request_page(PAGE_REL)
+    page["citation_removals"] = [{
+        "sha256": requested_sha,
+        "reason": "该引用不再支撑当前结论",
+    }]
+    request = _request(tmp_path, pages=[page])
+
+    result = _run(_revise_args(request, apply=True), tmp_path)
+
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert requested_sha in output
+    assert "actual citations: <none>" in output
     assert not (tmp_path / "pipeline-workspace" / "legacy-revisions").exists()
 
 
@@ -792,6 +866,36 @@ def test_exact_revert_only_before_later_live_drift(tmp_path):
     refused = _run(_revise_args(revert, apply=True), tmp_path)
     assert refused.returncode != 0
     assert "revert-not-applicable-after-live-drift" in (refused.stdout + refused.stderr)
+
+
+def test_revert_signing_rejects_unknown_citation_removal(tmp_path):
+    citation = _existing_citation()
+    _adopted_workspace(tmp_path, citations=[citation])
+    request = _request(tmp_path)
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    _edit_candidate(tmp_path)
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+
+    requested_sha = hashlib.sha256(b"not-on-target").hexdigest()
+    page = _request_page(PAGE_REL)
+    page["citation_removals"] = [{
+        "sha256": requested_sha,
+        "reason": "该引用不再支撑当前结论",
+    }]
+    revert = _request(
+        tmp_path,
+        mode="revert",
+        revert_operation=_operation_dir(tmp_path).name,
+        pages=[page],
+    )
+
+    result = _run(_revise_args(revert, apply=True), tmp_path)
+
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert requested_sha in output
+    assert _citation_sha256(citation) in output
+    assert citation["source"] in output and citation["url"] in output
 
 
 def test_stale_real_source_workorder_can_reopen_after_check_write_stage(tmp_path):
