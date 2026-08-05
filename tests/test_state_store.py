@@ -42,7 +42,6 @@ def test_init_db_is_idempotent(tmp_path):
     assert EXPECTED_TABLES <= _tables(db)
 
 
-import pytest
 
 
 def _running_run(db, source_id, stage):

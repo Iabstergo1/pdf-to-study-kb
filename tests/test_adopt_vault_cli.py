@@ -50,7 +50,7 @@ def _legacy_workspace(tmp_path):
     page = vault / "domains" / "sql" / "lessons" / "legacy-note.md"
     page.parent.mkdir(parents=True)
     page.write_text(
-        "---\nmanaged_by: pipeline\nsource: legacy-resume-wiki\nstatus: published\n"
+        "---\nmanaged_by: pipeline\nsource: demo-legacy-vault\nstatus: published\n"
         "type: lesson\n---\n"
         "这是一张已经存在于旧知识库中的数据分析面试笔记。它说明查询前应先确认数据粒度、"
         "过滤范围与时间窗口，再解释结果，并保留足够正文以通过现有的残次页检查。"
@@ -62,7 +62,7 @@ def _legacy_workspace(tmp_path):
 
 
 def _args(archive, *, apply=False, digest=None):
-    args = ["adopt-vault", "--source", "legacy-resume-wiki",
+    args = ["adopt-vault", "--source", "demo-legacy-vault",
             "--title", "数据分析求职 Wiki legacy baseline",
             "--domain", "data-analysis-interview",
             "--baseline-archive", str(archive),
@@ -181,7 +181,7 @@ def test_adopt_vault_rejects_symlinked_evidence_manifest(tmp_path):
     _vault, _page, archive = _legacy_workspace(root)
     assert _run(_args(archive, apply=True), root).returncode == 0
     manifest = (root / "pipeline-workspace" / "adoptions" /
-                "legacy-resume-wiki" / "manifest.json")
+                "demo-legacy-vault" / "manifest.json")
     outside = tmp_path / "outside-manifest.json"
     outside.write_bytes(manifest.read_bytes())
     manifest.unlink()
@@ -222,7 +222,7 @@ def test_adopt_vault_apply_writes_verified_evidence_state_and_derived(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert page.read_bytes() == original
-    evidence = tmp_path / "pipeline-workspace" / "adoptions" / "legacy-resume-wiki"
+    evidence = tmp_path / "pipeline-workspace" / "adoptions" / "demo-legacy-vault"
     manifest_path = evidence / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     entry = next(e for e in manifest["pages"]
@@ -232,11 +232,11 @@ def test_adopt_vault_apply_writes_verified_evidence_state_and_derived(tmp_path):
     assert copied.read_bytes() == original
     assert _sha(copied) == entry["sha256"]
 
-    source_page = vault / "sources" / "legacy-resume-wiki.md"
+    source_page = vault / "sources" / "demo-legacy-vault.md"
     text = source_page.read_text(encoding="utf-8")
     meta = yaml.safe_load(text.split("---\n", 2)[1])
     assert meta["format"] == "legacy-vault"
-    assert meta["source_id"] == "legacy-resume-wiki"
+    assert meta["source_id"] == "demo-legacy-vault"
     assert meta["status"] == "published"
     assert "没有 processing window、block 或 window read/write ledger" in text
 
@@ -244,12 +244,12 @@ def test_adopt_vault_apply_writes_verified_evidence_state_and_derived(tmp_path):
     con = sqlite3.connect(db)
     con.row_factory = sqlite3.Row
     try:
-        src = con.execute("SELECT * FROM sources WHERE source_id='legacy-resume-wiki'").fetchone()
+        src = con.execute("SELECT * FROM sources WHERE source_id='demo-legacy-vault'").fetchone()
         assert (src["current_stage"], src["current_status"], src["format"]) == \
                ("adopted", "published", "legacy-vault")
         for table in ("work_orders", "ingest_progress", "window_reads"):
             assert con.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE source_id='legacy-resume-wiki'").fetchone()[0] == 0
+                f"SELECT COUNT(*) FROM {table} WHERE source_id='demo-legacy-vault'").fetchone()[0] == 0
     finally:
         con.close()
 
@@ -266,14 +266,14 @@ def test_adopt_vault_derived_failure_leaves_state_unpublished_and_rerun_recovers
 
     failed = _run(_args(archive, apply=True), tmp_path)
     assert failed.returncode != 0
-    evidence = tmp_path / "pipeline-workspace" / "adoptions" / "legacy-resume-wiki"
+    evidence = tmp_path / "pipeline-workspace" / "adoptions" / "demo-legacy-vault"
     assert (evidence / "manifest.json").is_file()
-    assert (vault / "sources" / "legacy-resume-wiki.md").is_file()
+    assert (vault / "sources" / "demo-legacy-vault.md").is_file()
     db = tmp_path / "pipeline-workspace" / "state" / "study-kb.sqlite"
     con = sqlite3.connect(db)
     try:
         assert con.execute(
-            "SELECT COUNT(*) FROM sources WHERE source_id='legacy-resume-wiki'"
+            "SELECT COUNT(*) FROM sources WHERE source_id='demo-legacy-vault'"
         ).fetchone()[0] == 0
         assert con.execute("SELECT COUNT(*) FROM source_locks").fetchone()[0] == 0
     finally:
@@ -285,7 +285,7 @@ def test_adopt_vault_derived_failure_leaves_state_unpublished_and_rerun_recovers
     con = sqlite3.connect(db)
     try:
         assert con.execute(
-            "SELECT current_status FROM sources WHERE source_id='legacy-resume-wiki'"
+            "SELECT current_status FROM sources WHERE source_id='demo-legacy-vault'"
         ).fetchone()[0] == "published"
         assert con.execute("SELECT COUNT(*) FROM source_locks").fetchone()[0] == 0
     finally:
@@ -296,7 +296,7 @@ def test_adopt_vault_apply_is_byte_idempotent_and_live_drift_is_history_warning(
     _vault, page, archive = _legacy_workspace(tmp_path)
     first = _run(_args(archive, apply=True), tmp_path)
     assert first.returncode == 0, first.stdout + first.stderr
-    evidence = tmp_path / "pipeline-workspace" / "adoptions" / "legacy-resume-wiki"
+    evidence = tmp_path / "pipeline-workspace" / "adoptions" / "demo-legacy-vault"
     manifest = evidence / "manifest.json"
     manifest_bytes = manifest.read_bytes()
     manifest_mtime = manifest.stat().st_mtime_ns
@@ -313,10 +313,10 @@ def test_adopt_vault_apply_is_byte_idempotent_and_live_drift_is_history_warning(
     con = sqlite3.connect(db)
     try:
         assert con.execute(
-            "SELECT COUNT(*) FROM source_stage_runs WHERE source_id='legacy-resume-wiki'"
+            "SELECT COUNT(*) FROM source_stage_runs WHERE source_id='demo-legacy-vault'"
         ).fetchone()[0] == 1
         assert con.execute(
-            "SELECT COUNT(*) FROM artifacts WHERE source_id='legacy-resume-wiki'"
+            "SELECT COUNT(*) FROM artifacts WHERE source_id='demo-legacy-vault'"
         ).fetchone()[0] == 1
     finally:
         con.close()
@@ -348,7 +348,7 @@ def test_adopt_vault_appends_one_log_line_and_never_duplicates_it(tmp_path):
     assert first.returncode == 0, first.stdout + first.stderr
     lines = _log_lines(tmp_path, "adopt-vault")
     assert len(lines) == 1, lines
-    assert "legacy-resume-wiki" in lines[0] and "immutable baseline" in lines[0]
+    assert "demo-legacy-vault" in lines[0] and "immutable baseline" in lines[0]
     assert lines[0].startswith("## [")           # 与 ingest/lint/retract 同格式层级
     log_bytes, log_mtime = log.read_bytes(), log.stat().st_mtime_ns
 
@@ -371,7 +371,7 @@ def test_adopt_vault_appends_one_log_line_and_never_duplicates_it(tmp_path):
 
     # ③ state 已 published 时，证据/source 页的任何缺口都是 fail-closed 违规，
     #    根本不存在"带着已登记 state 再次进锁"的路径——所以 adopt-vault 结构上只会追加一次。
-    (tmp_path / "wiki" / "sources" / "legacy-resume-wiki.md").unlink()
+    (tmp_path / "wiki" / "sources" / "demo-legacy-vault.md").unlink()
     refused = _run(_args(archive, apply=True), tmp_path)
     assert refused.returncode == 2
     assert "source-page-missing-after-publish" in refused.stdout
@@ -403,7 +403,7 @@ def test_adopt_vault_archive_evidence_and_state_drift_fail_closed(tmp_path):
     # evidence copy drift
     vault, _page, archive = _legacy_workspace(tmp_path)
     assert _run(_args(archive, apply=True), tmp_path).returncode == 0
-    evidence = tmp_path / "pipeline-workspace" / "adoptions" / "legacy-resume-wiki"
+    evidence = tmp_path / "pipeline-workspace" / "adoptions" / "demo-legacy-vault"
     copied = evidence / "files" / "domains" / "sql" / "lessons" / "legacy-note.md"
     copied.write_bytes(copied.read_bytes() + b"tampered")
     before = _tree_bytes(tmp_path)
@@ -430,7 +430,7 @@ def test_adopt_vault_archive_evidence_and_state_drift_fail_closed(tmp_path):
     con = sqlite3.connect(db3)
     try:
         con.execute("UPDATE sources SET current_status='done' "
-                    "WHERE source_id='legacy-resume-wiki'")
+                    "WHERE source_id='demo-legacy-vault'")
         con.commit()
     finally:
         con.close()
@@ -463,7 +463,7 @@ def test_adopt_vault_revalidates_complete_page_set_after_lock(tmp_path, monkeypa
     monkeypatch.setattr(locks, "acquire", acquire_then_mutate)
     monkeypatch.setenv("STUDY_KB_ROOT", str(tmp_path))
     args = SimpleNamespace(
-        source="legacy-resume-wiki", title="数据分析求职 Wiki legacy baseline",
+        source="demo-legacy-vault", title="数据分析求职 Wiki legacy baseline",
         domain="data-analysis-interview", baseline_archive=str(archive),
         baseline_sha256=_sha(archive), apply=True)
     try:
@@ -473,7 +473,7 @@ def test_adopt_vault_revalidates_complete_page_set_after_lock(tmp_path, monkeypa
     else:
         raise AssertionError("post-lock page-set drift must fail closed")
     assert not (tmp_path / "pipeline-workspace" / "adoptions").exists()
-    assert not (vault / "sources" / "legacy-resume-wiki.md").exists()
+    assert not (vault / "sources" / "demo-legacy-vault.md").exists()
     db = tmp_path / "pipeline-workspace" / "state" / "study-kb.sqlite"
     con = sqlite3.connect(db)
     try:
@@ -498,7 +498,7 @@ def test_adopt_vault_reports_mermaid_legacy_debt_as_warning_and_can_apply(tmp_pa
     con = sqlite3.connect(db)
     try:
         assert con.execute(
-            "SELECT current_status FROM sources WHERE source_id='legacy-resume-wiki'"
+            "SELECT current_status FROM sources WHERE source_id='demo-legacy-vault'"
         ).fetchone()[0] == "published"
     finally:
         con.close()
@@ -515,7 +515,7 @@ def test_adopt_vault_reports_legacy_topic_coverage_as_warning(tmp_path):
         target.write_text(
             "---\n"
             f"canonical_id: concept.sql.legacy-{i}\ncanonical_name: Legacy {i}\n"
-            "domain: sql\nmanaged_by: pipeline\nsource_refs:\n- source: legacy-resume-wiki\n"
+            "domain: sql\nmanaged_by: pipeline\nsource_refs:\n- source: demo-legacy-vault\n"
             "status: published\ntype: concept\n---\n" + body,
             encoding="utf-8")
     _write_archive(archive, vault)

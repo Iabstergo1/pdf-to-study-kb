@@ -15,7 +15,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 PIPELINE = ROOT / "scripts" / "pipeline.py"
-SOURCE = "legacy-resume-wiki"
+SOURCE = "demo-legacy-vault"
 PAGE_REL = "domains/statistics/concepts/legacy-test.md"
 PAGE_REL_2 = "domains/statistics/concepts/legacy-test-two.md"
 
@@ -844,7 +844,7 @@ def test_orphan_log_anchor_is_hard_failure_in_both_lints(tmp_path):
     vault, _page = _adopted_workspace(tmp_path)
     log = vault / "log.md"
     with log.open("a", encoding="utf-8", newline="\n") as fh:
-        fh.write("\n## [2026-08-02] revise-adopted | legacy-resume-wiki | operation deadbeefdeadbeefdead post abcdef123456\n")
+        fh.write("\n## [2026-08-02] revise-adopted | demo-legacy-vault | operation deadbeefdeadbeefdead post abcdef123456\n")
     for args in (["vault-lint"], ["lint", "--source", SOURCE]):
         result = _run(args, tmp_path)
         assert result.returncode != 0
@@ -1195,6 +1195,68 @@ def test_url_exit3_no_url_vault_sources_page_passes(tmp_path):
     request = _request(tmp_path, pages=[page])
     result = _run(_revise_args(request, apply=True), tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _write_raw_request(tmp_path, removal_sha_literal):
+    """写原始 YAML 文本，让摘要的字面形态（有无引号）原样进入解析器。
+
+    走 yaml.safe_dump 的话字符串会被自动加引号，测不到"未加引号的纯数字被解析成整数"。
+    """
+    valid_until = (
+        datetime.now(timezone.utc) + timedelta(days=7)).isoformat(timespec="seconds")
+    text = (
+        "version: 1\n"
+        f"source_id: {SOURCE}\n"
+        f"valid_until: '{valid_until}'\n"
+        "mode: edit\n"
+        "pages:\n"
+        f"- path: {PAGE_REL}\n"
+        "  reason: raw-yaml digest shape\n"
+        "  evidence:\n"
+        "  - citation:\n"
+        "      source: Example documentation\n"
+        "      title: Example\n"
+        "      url: https://example.invalid/docs\n"
+        "      accessed_on: '2030-01-01'\n"
+        "    supports: Placeholder evidence for the digest-shape check.\n"
+        "  citation_removals:\n"
+        f"  - sha256: {removal_sha_literal}\n"
+        "    reason: raw-yaml digest shape\n")
+    path = tmp_path / "request-raw.yaml"
+    path.write_text(text, encoding="utf-8", newline="\n")
+    return path
+
+
+def test_removal_sha_parsed_as_int_reports_the_yaml_quoting_cause(tmp_path):
+    """未加引号的纯数字摘要被 YAML 解析成整数时，报错要指向 YAML 引号而不是摘要本身。
+
+    fail-closed 行为不变（仍然拒绝），改的只是可定位性：原文案说"格式非法或重复"，
+    会把作者引去检查摘要，而真正要改的是 YAML 里少了一对引号。
+    """
+    _adopted_workspace(tmp_path)
+    request = _write_raw_request(tmp_path, "0" * 64)
+
+    result = _run(_revise_args(request, apply=True), tmp_path)
+
+    assert result.returncode != 0
+    output = result.stdout + result.stderr
+    assert "invalid citation removal SHA-256" in output
+    assert "YAML parsed this value as int" in output
+    assert "quote the sha256 value" in output
+    assert not (tmp_path / "pipeline-workspace" / "legacy-revisions").exists()
+
+
+def test_removal_sha_malformed_string_reports_without_yaml_hint(tmp_path):
+    """字符串形态但格式非法时，不应给出 YAML 引号提示（那会误导）。"""
+    _adopted_workspace(tmp_path)
+    request = _write_raw_request(tmp_path, "'not-a-digest'")
+
+    result = _run(_revise_args(request, apply=True), tmp_path)
+
+    assert result.returncode != 0
+    output = result.stdout + result.stderr
+    assert "invalid citation removal SHA-256" in output
+    assert "YAML parsed this value as" not in output
 
 
 def test_url_exit4_non_source_page_in_sources_dir_is_not_registered(tmp_path):

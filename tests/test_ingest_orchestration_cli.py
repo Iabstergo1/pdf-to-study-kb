@@ -140,7 +140,7 @@ def test_window_done_rejects_existing_page_edited_before_check_write(tmp_path):
 
 def test_resolve_concept_snapshots_before_merging_existing_page(tmp_path):
     """resolve-concept 自己会改 frontmatter，不能把快照责任推给它之后的调用方。"""
-    db = _prep_source(tmp_path)
+    _prep_source(tmp_path)
     concept = tmp_path / "wiki" / "domains" / "misc" / "concepts" / "既有概念.md"
     concept.parent.mkdir(parents=True, exist_ok=True)
     original = (

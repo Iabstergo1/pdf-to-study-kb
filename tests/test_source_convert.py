@@ -569,8 +569,8 @@ def test_convert_mineru_report_scan_ocr_from_profile(tmp_path, monkeypatch):
     monkeypatch.setattr(_mb, "_run_mineru", _fake_run_mineru_minimal)
     src = tmp_path / "s.pdf"; src.write_text("x", encoding="utf-8")
     scanned = [{"text_len": 0, "image_count": 1} for _ in range(10)]
-    res = source_convert.convert(src, out_dir=tmp_path / "o1", fmt="pdf", backend="mineru",
-                                 profile_pages=scanned)
+    source_convert.convert(src, out_dir=tmp_path / "o1", fmt="pdf", backend="mineru",
+                           profile_pages=scanned)
     rep = json.loads((tmp_path / "o1" / "parse_report.json").read_text(encoding="utf-8"))
     assert rep["scan_suspected"] is True and rep["ocr_used"] is True
     born = [{"text_len": 800, "image_count": 0} for _ in range(10)]
@@ -652,7 +652,7 @@ def test_convert_writes_source_type_and_backend_reason_md(tmp_path):
     src = tmp_path / "n.md"
     src.write_text("# Title\n\nbody\n", encoding="utf-8")
     out_dir = tmp_path / "staging" / "n"
-    res = source_convert.convert(src, out_dir=out_dir, fmt="md")
+    source_convert.convert(src, out_dir=out_dir, fmt="md")
     import json
     rep = json.loads((out_dir / "parse_report.json").read_text(encoding="utf-8"))
     assert rep["source_type"] == "markdown"
@@ -677,7 +677,7 @@ def test_convert_writes_source_type_pdf(tmp_path):
     # 先 profile 出 pages 再传给 convert（与 pipeline 一致）
     pages = source_profile.profile_source(src, fmt="pdf")
     out_dir = tmp_path / "staging" / "tiny"
-    res = source_convert.convert(src, out_dir=out_dir, fmt="pdf", profile_pages=pages)
+    source_convert.convert(src, out_dir=out_dir, fmt="pdf", profile_pages=pages)
     import json
     rep = json.loads((out_dir / "parse_report.json").read_text(encoding="utf-8"))
     assert rep["source_type"] == "native_pdf"

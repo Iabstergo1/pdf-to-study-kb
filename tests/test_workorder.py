@@ -201,7 +201,6 @@ def test_pipeline_commit_unknown_when_not_a_git_repo(tmp_path, monkeypatch):
 
 
 def test_pipeline_commit_matches_head_and_dirty_flag(tmp_path):
-    import re
     import subprocess
     repo_meta = _load_repo_meta()
     repo = tmp_path / "repo"

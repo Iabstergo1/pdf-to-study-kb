@@ -243,7 +243,7 @@ def test_kb_save_check_write_authorizes_only_new_session_candidates(tmp_path):
                           "--path", "topics/未列入候选.md"], tmp_path)
     assert not_candidate.returncode != 0 and "candidate" in (not_candidate.stdout + not_candidate.stderr)
 
-    existing_sess = _mk_saved_session(tmp_path, "guard-existing", ["topics/既有主题.md"])
+    _mk_saved_session(tmp_path, "guard-existing", ["topics/既有主题.md"])
     mdpage.write_page(tmp_path / "wiki/topics/既有主题.md",
                       {"type": "topic", "status": "published", "managed_by": "pipeline",
                        "title": "既有主题", "source_refs": [{"source": "legacy"}]}, _TOPIC_BODY)
@@ -1009,7 +1009,7 @@ def test_failed_window_does_not_resurrect_old_write_set(tmp_path):
     # P1-2（Codex 2026-07-18 实跑绕行）：旧轮 write_set 含某页；新轮 show-window →
     # window-start → window-fail（不 window-done）→ 把同路径页置回 proposed → lint。
     # start 已清旧账 + lint 只认本轮 finished 行——旧 write_set 不得复活为本轮记账。
-    db = _ingest_ready(tmp_path)
+    _ingest_ready(tmp_path)
     vault = tmp_path / "wiki"
     mdpage.write_page(vault / "domains/misc/lessons/a.md",
                       {"type": "lesson", "status": "proposed", "managed_by": "pipeline",

@@ -302,7 +302,7 @@ def test_seed_overview_helper_idempotent(tmp_path):
 def test_retract_reseeds_exclusive_pipeline_overview(tmp_path):
     # 独占 pipeline overview：旧版进证据包 → 删除 → apply 后重建为 templates seed
     # （published/managed_by:pipeline、不含被撤 source_refs）。
-    db = _preprocessed(tmp_path, sid="gone")
+    _preprocessed(tmp_path, sid="gone")
     _publish_lesson(tmp_path, "gone", "domains/misc/lessons/gone.md")
     _set_overview(tmp_path, status="published", managed_by="pipeline",
                   source_refs=[{"source": "gone"}])
