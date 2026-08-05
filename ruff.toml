@@ -1,0 +1,21 @@
+# 起步只开"几乎一定是 bug"的规则集：E9（语法错误）与 F（pyflakes：未定义名、
+# 未使用的导入与变量）。风格类规则（行宽、import 排序、命名）留到代码本身清理过
+# 一轮之后再逐步打开——在一个从未过门禁的 29k 行代码库上一次性开满，只会得到一份
+# 没人会读完的报告，然后整个门禁被绕过。
+#
+# 用法（不要往共享 conda 环境装 ruff）：
+#     uvx ruff check .
+#     pipx run ruff check .
+#     或临时 venv：python -m venv .venv-lint && .venv-lint/bin/pip install ruff
+target-version = "py312"
+line-length = 100
+
+exclude = [
+    "books",
+    "tools",
+    "wiki",
+    "pipeline-workspace",
+]
+
+[lint]
+select = ["E9", "F"]

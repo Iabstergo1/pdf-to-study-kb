@@ -284,8 +284,20 @@ def _validate_request(path: Path, source: str) -> tuple[dict, bytes, str]:
             if not isinstance(removal, dict) or set(removal) != {"sha256", "reason"}:
                 raise LegacyRevisionError(f"invalid citation removal: {rel}")
             digest = str(removal["sha256"]).lower()
-            if not _SHA256.fullmatch(digest) or digest in removal_seen:
-                raise LegacyRevisionError(f"invalid/duplicate citation removal SHA-256: {rel}")
+            if digest in removal_seen:
+                raise LegacyRevisionError(
+                    f"duplicate citation removal SHA-256: {rel}: {digest}")
+            if not _SHA256.fullmatch(digest):
+                hint = ""
+                if not isinstance(removal["sha256"], str):
+                    # 未加引号的全数字摘要会被 YAML 解析成整数，前导零随之丢失，
+                    # 报"格式非法"会把作者引向摘要本身，而真正要改的是 YAML 引号。
+                    hint = (" — YAML parsed this value as "
+                            f"{type(removal['sha256']).__name__}, not a string; "
+                            "quote the sha256 value so an all-digit digest keeps "
+                            "its leading zeros")
+                raise LegacyRevisionError(
+                    f"invalid citation removal SHA-256: {rel}: {digest!r}{hint}")
             if not isinstance(removal["reason"], str) or not removal["reason"].strip():
                 raise LegacyRevisionError(f"citation removal reason must not be empty: {rel}")
             removal_seen.add(digest)

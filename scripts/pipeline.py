@@ -1931,7 +1931,6 @@ def _prepare_kb_save_write(rel_path, session_id):
 
 def _prepare_write(db, source_id, rel_path, *, session_id=None):
     """check-write 的单一实现：授权既有页时原子留下首份写前基线。"""
-    import state_store
     import ingest_guards
     import snapshots
     if source_id == "kb-save":

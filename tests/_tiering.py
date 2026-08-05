@@ -46,6 +46,7 @@ FILE_TIERS = {
     # ---- fast：纯函数 / 直接模块 ----
     "test_arbitration.py": ("fast",),
     "test_chaptering.py": ("fast",),
+    "test_check_publishable.py": ("fast",),
     "test_concept_store.py": ("fast",),
     "test_fidelity_probe.py": ("fast",),
     "test_graph_analysis.py": ("fast",),

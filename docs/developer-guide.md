@@ -909,6 +909,31 @@ python -m pytest tests --collect-only -q --basetemp=$bt   # 只看分层收集
 已删文件、tier 名非法、`fast` 与重 tier 组合——任一违规直接中止收集。这样日常层是显式白名单，
 新测试不可能静默掉出频繁反馈层（守卫判定本身由 `test_tiering_guard.py` 的 fast 单元测试覆盖）。
 
+### 7.1.1 发布前门禁：`scripts/check_publishable.py`
+
+这个仓库是拿来公开的，而用它的知识库是使用者的私有数据。两者混在一起最容易发生的事故，
+是开发机上的绝对路径、用户名或某个具体部署的目录布局被顺手写进代码、注释、文档或测试
+fixture，随仓库一起发布出去。lint 抓不到这类问题——它们语法完全合法。
+
+```powershell
+python scripts/check_publishable.py            # 全部 git 已跟踪文件
+python scripts/check_publishable.py --strict   # 把 warning 也算失败
+```
+
+两级判定，因为两类命中的置信度差得很远：
+
+- **error**（命中即失败）：路径里带用户名，如 `C:\Users\<name>\…`、`/home/<name>/`；
+- **warn**（列出但不失败）：只带盘符的绝对路径。`README` 与 `user-guide` 里的 `C:\books`、
+  测试里的 `C:/temp` 都是合法的通用占位；把它们判失败会得到一堆虚报，而虚报会让门禁被
+  整体绕过，比漏报更糟。发布前人工过一眼 warning 即可。
+
+确需在文档里保留示例路径时，在该行加行内标记 `publishable-allow`。豁免只能逐行显式声明，
+不提供目录级或模式级整体豁免——那会让门禁悄悄失效。
+
+**代码风格门禁**：`ruff.toml` 当前只开 `E9`（语法错误）与 `F`（pyflakes：未定义名、未使用
+的导入与变量），即"几乎一定是 bug"的规则。风格类规则留到代码本身清理过一轮再逐步打开。
+不要把 `ruff` 装进共享环境：用 `uvx ruff check .`、`pipx run ruff check .` 或一次性 venv。
+
 ### 7.2 重要测试 → 它保护的功能
 
 | 测试文件 | 保护的功能 |
