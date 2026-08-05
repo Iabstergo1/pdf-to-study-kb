@@ -2,6 +2,10 @@
 
 这道门禁的价值全在"报得准"上：虚报会让人整体绕过它，比漏报更糟。所以这里既测
 "该报的报出来"，也测"不该报的不要判失败"。
+
+本文件里的用户目录路径是**测试输入**，不是个人环境痕迹，因此逐行加了
+``publishable-allow``——门禁会扫到自己的测试文件，这正是行内豁免存在的理由。
+不带用户名的盘符路径只判 warn、不影响退出码，所以不标记。
 """
 import subprocess
 import sys
@@ -21,10 +25,10 @@ def _scan(tmp_path, name, text):
 
 
 @pytest.mark.parametrize("line", [
-    r'path = "C:\Users\alice\vault\notes.md"',
-    r"path = 'C:/Users/bob/vault/notes.md'",
-    "root = /home/carol/projects/kb",
-    "root = /Users/dave/projects/kb",
+    r'path = "C:\Users\alice\vault\notes.md"',  # publishable-allow
+    r"path = 'C:/Users/bob/vault/notes.md'",  # publishable-allow
+    "root = /home/carol/projects/kb",  # publishable-allow
+    "root = /Users/dave/projects/kb",  # publishable-allow
 ])
 def test_user_home_paths_are_errors(tmp_path, line):
     """带用户名的绝对路径几乎不可能是有意写的通用示例，判 error。"""
@@ -49,9 +53,13 @@ def test_generic_drive_paths_are_warnings_not_errors(tmp_path, line):
 
 
 def test_allow_marker_suppresses_the_line(tmp_path):
-    """确需保留示例时，用行内标记逐行豁免。"""
-    line = (r'example = "C:\Users\alice\vault"  # '
-            + check_publishable.ALLOW_MARKER + "\n")
+    """确需保留示例时，用行内标记逐行豁免。
+
+    被扫描的是写进 tmp 的那份文本，不是这里的源码行——源码行自己的标记只是为了
+    让门禁扫本文件时放行。
+    """
+    sample = r'example = "C:\Users\alice\vault"'  # publishable-allow
+    line = f"{sample}  # {check_publishable.ALLOW_MARKER}\n"
     errors, warnings = _scan(tmp_path, "sample.py", line)
     assert not errors
     assert not warnings
