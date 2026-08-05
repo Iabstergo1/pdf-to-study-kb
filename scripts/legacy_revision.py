@@ -247,8 +247,8 @@ def _validate_request(path: Path, source: str) -> tuple[dict, bytes, str]:
         if page.get("frontmatter_updates") is not None:
             clean_fu = _validate_frontmatter_updates(page["frontmatter_updates"], rel)
         evidence = page["evidence"]
-        if not isinstance(evidence, list) or not evidence:
-            raise LegacyRevisionError(f"page evidence must be a non-empty list: {rel}")
+        if not isinstance(evidence, list):
+            raise LegacyRevisionError(f"page evidence must be a list: {rel}")
         clean_evidence = []
         for item in evidence:
             if not isinstance(item, dict) or set(item) != {"citation", "supports"}:

@@ -83,6 +83,9 @@ The request schema also accepts two optional, audited fields:
   without applying, or applying without declaring, both fail closed;
 - evidence `citation.url` is optional when `citation.source` is a registered source_id
   (state `sources` table or `sources/<id>.md`); a URL, when present, must still be HTTPS.
+  `evidence` may be an empty list when the change is a pure citation removal or a body/meta
+  edit with no new citations; the page must still be genuinely edited (a byte-identical
+  candidate is rejected), and `reason` is the only justification record in that case.
 
 ## 7. Workflow
 

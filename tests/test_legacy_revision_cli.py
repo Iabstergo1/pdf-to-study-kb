@@ -1394,3 +1394,115 @@ def test_request_sha256_is_independent_of_declaration_order(tmp_path):
     _normal, _raw, declared_sha = legacy_revision._validate_request(
         _canonical_fixture("canonical-unsorted.yaml"), CANONICAL_REQUEST_SOURCE)
     assert presorted_sha == declared_sha
+
+
+# ---------------------------------------------------------------------------
+# R-07：evidence 允许为空（纯删除页 + meta 页正文变更），no-op 守卫在候选层
+# ---------------------------------------------------------------------------
+
+
+def _request_page_evidence_empty(page_rel=PAGE_REL, *, removals=None):
+    page = _request_page(page_rel)
+    page["evidence"] = []
+    if removals:
+        page["citation_removals"] = removals
+    return page
+
+
+def _empty_evidence_candidate(tmp_path, *, drop_sources=(), body_suffix=""):
+    """候选页：置 proposed，按 source 删 citation、可选追加正文，其余不动。"""
+    op = _operation_dir(tmp_path)
+    candidate = op / "candidate" / "files" / PAGE_REL
+    text = candidate.read_text(encoding="utf-8")
+    end = text.find("\n---\n", 4)
+    meta = yaml.safe_load(text[4:end + 1])
+    body = text[end + 5:]
+    meta["status"] = "proposed"
+    meta["citations"] = [c for c in meta.get("citations") or []
+                         if c.get("source") not in drop_sources]
+    fm = yaml.safe_dump(meta, allow_unicode=True, sort_keys=True,
+                        default_flow_style=False)
+    candidate.write_text(f"---\n{fm}---\n{body}{body_suffix}\n",
+                         encoding="utf-8", newline="\n")
+    return candidate
+
+
+def test_evidence_empty_pure_delete_passes(tmp_path):
+    """R-07 出口 1：evidence=[] + citation_removals 非空 → 通过（纯删除，不新增 citation）。"""
+    citation = _existing_citation()
+    _adopted_workspace(tmp_path, citations=[citation])
+    page = _request_page_evidence_empty(removals=[{
+        "sha256": _citation_sha256(citation),
+        "reason": "未登记名删除：无法定位到任何已登记来源",
+    }])
+    request = _request(tmp_path, pages=[page])
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    _empty_evidence_candidate(tmp_path, drop_sources=[citation["source"]])
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    assert _frontmatter(tmp_path)["citations"] == []
+
+
+def test_evidence_empty_meta_body_change_passes(tmp_path):
+    """R-07 出口 2：evidence=[] + removals=[] + 无 frontmatter_updates，但正文有改动 → 通过。"""
+    _adopted_workspace(tmp_path)
+    page = _request_page_evidence_empty()
+    request = _request(tmp_path, pages=[page])
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    _empty_evidence_candidate(tmp_path, body_suffix="（本轮新增证据分层说明）")
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    assert "证据分层说明" in (tmp_path / "wiki" / PAGE_REL).read_text(encoding="utf-8")
+    assert _frontmatter(tmp_path)["citations"] == []
+
+
+def _phase_of(op):
+    events = sorted((op / "events").glob("*.json"))
+    return json.loads(events[-1].read_text(encoding="utf-8"))["event"]
+
+
+def test_evidence_empty_noop_candidate_cannot_complete(tmp_path):
+    """R-07 出口 3：三者全空且候选逐字节等于 pre → operation 无法完成。
+
+    `_validate_candidates` 的 `candidate page was not edited` 守卫在本轮之前已存在；
+    实测其行为是「prepared; waiting for candidate edits」（exit 0、保持 prepared、
+    不指名页面），与任务书预期的硬拒不同——按任务书 §5 报告该差异、不改其语义。
+    本测试断言不变量：no-op 候选永远无法进入 completed，编辑后才能完成。
+    """
+    _adopted_workspace(tmp_path)
+    page = _request_page_evidence_empty()
+    request = _request(tmp_path, pages=[page])
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    first = _run(_revise_args(request, apply=True), tmp_path)
+    assert first.returncode == 0
+    assert "waiting for candidate edits" in first.stdout + first.stderr
+    second = _run(_revise_args(request, apply=True), tmp_path)
+    assert second.returncode == 0
+    assert "waiting for candidate edits" in second.stdout + second.stderr
+    assert _phase_of(_operation_dir(tmp_path)) == "prepared"
+    _empty_evidence_candidate(tmp_path, body_suffix="（本轮新增证据分层说明）")
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    assert _phase_of(_operation_dir(tmp_path)) == "completed"
+
+
+@pytest.mark.parametrize("bad_evidence", [None, "string", {"citation": []}])
+def test_evidence_not_a_list_rejected(tmp_path, bad_evidence):
+    """R-07 出口 4：evidence 不是 list（null/字符串/字典）→ 请求校验拒绝 must be a list。"""
+    _adopted_workspace(tmp_path)
+    page = _request_page(PAGE_REL)
+    page["evidence"] = bad_evidence
+    request = _request(tmp_path, pages=[page])
+    result = _run(_revise_args(request, apply=True), tmp_path)
+    assert result.returncode != 0
+    assert "must be a list" in (result.stdout + result.stderr)
+    assert not (tmp_path / "pipeline-workspace" / "legacy-revisions").exists()
+
+
+def test_evidence_empty_is_normalized_as_empty_list_not_missing(tmp_path):
+    """R-07 兼容性：空 evidence 是 [] 而不是缺字段——规范形里 evidence 键仍在且为 []。"""
+    _adopted_workspace(tmp_path)
+    page = _request_page_evidence_empty()
+    request = _request(tmp_path, pages=[page])
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import legacy_revision
+    normal, _raw, _sha = legacy_revision._validate_request(request, SOURCE)
+    assert "evidence" in normal["pages"][0]
+    assert normal["pages"][0]["evidence"] == []
