@@ -2592,6 +2592,19 @@ def cmd_revise_adopted(args):
     """修订 adopted legacy 页：默认只读；--apply 才创建、提交或恢复 sidecar operation。"""
     import legacy_revision
 
+    if args.emit_removal_sha:
+        if args.request:
+            raise SystemExit("--emit-removal-sha cannot be combined with --request")
+        try:
+            for entry in legacy_revision.emit_removal_sha(
+                    _workspace_root(), args.emit_removal_sha):
+                print(f"{entry['sha256']}  source={entry['source']!r}  "
+                      f"title={entry['title']!r}  url={entry['url']!r}")
+        except legacy_revision.LegacyRevisionError as exc:
+            raise SystemExit(str(exc))
+        return
+    if not args.request:
+        raise SystemExit("revise-adopted requires --request or --emit-removal-sha <page>")
     try:
         result = legacy_revision.run(
             workspace=_workspace_root(), source=args.source,
@@ -2866,9 +2879,13 @@ def main():
                      help="执行接管（默认仅扫描、核验并打印计划，零写入）")
     lrp = subparsers.add_parser(
         "revise-adopted",
-        help="修订 adopted legacy 页：sidecar 候选、完整 lint、可恢复切换（默认只读）")
+        help="修订 adopted legacy 页：sidecar 候选、完整 lint、可恢复切换（默认只读）；"
+             "--emit-removal-sha 只读导出 citation 哈希")
     lrp.add_argument("--source", required=True)
-    lrp.add_argument("--request", required=True, help="人工审阅的 revision-request.yaml")
+    lrp.add_argument("--request", required=False, help="人工审阅的 revision-request.yaml")
+    lrp.add_argument("--emit-removal-sha", dest="emit_removal_sha", default=None,
+                     help="只读导出指定页面每条 citation 的规范 SHA-256"
+                          "（无需 --request，零写入）")
     lrp.add_argument("--apply", action="store_true")
     lrp.add_argument("--abort", action="store_true",
                      help="终止 prepared operation（必须与 --apply 同用）")

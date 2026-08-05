@@ -937,3 +937,398 @@ def test_stale_real_source_workorder_can_reopen_after_check_write_stage(tmp_path
     allowed = _run(["check-write", "--source", "real-book", "--path", PAGE_REL], tmp_path)
     assert allowed.returncode == 0, allowed.stdout + allowed.stderr
     assert f"ALLOW {PAGE_REL}" in allowed.stdout
+
+
+# ---------------------------------------------------------------------------
+# 契约演进：受控 frontmatter_updates（任务 1 出口表 8 行）
+# ---------------------------------------------------------------------------
+
+
+def _frontmatter(tmp_path, page_rel=PAGE_REL):
+    page = tmp_path / "wiki" / page_rel
+    raw = page.read_text(encoding="utf-8")
+    end = raw.find("\n---", 3)
+    return yaml.safe_load(raw[3:end])
+
+
+def _fu_request(tmp_path, *, remove_aliases, page_rel=PAGE_REL):
+    page = _request_page(page_rel)
+    page["frontmatter_updates"] = {"aliases": {"remove": remove_aliases}}
+    return _request(tmp_path, pages=[page])
+
+
+def _alias_edit_candidate(tmp_path, *, remove=(), add=(), drop_sources=(),
+                          page_rel=PAGE_REL):
+    """候选页：置 proposed、改 aliases（remove/add）、按 source 删 citation、追加 evidence citation。"""
+    op = _operation_dir(tmp_path)
+    candidate = op / "candidate" / "files" / page_rel
+    text = candidate.read_text(encoding="utf-8")
+    end = text.find("\n---\n", 4)
+    meta = yaml.safe_load(text[4:end + 1])
+    body = text[end + 5:]
+    meta["status"] = "proposed"
+    meta["aliases"] = [a for a in meta.get("aliases") or [] if a not in remove]
+    meta["aliases"] = meta["aliases"] + list(add)
+    meta["citations"] = [c for c in meta.get("citations") or []
+                         if c.get("source") not in drop_sources]
+    meta.setdefault("citations", []).append({
+        "source": "NIST/SEMATECH e-Handbook",
+        "title": "Engineering Statistics Handbook",
+        "url": "https://www.itl.nist.gov/div898/handbook/",
+        "accessed_on": "2026-08-02",
+        "locator": "Chapter 1",
+        "supports": "统计结论必须写明适用条件",
+    })
+    fm = yaml.safe_dump(meta, allow_unicode=True, sort_keys=True,
+                        default_flow_style=False)
+    candidate.write_text(f"---\n{fm}---\n{body}\n", encoding="utf-8", newline="\n")
+    return candidate
+
+
+def test_fu_exit1_undeclared_unchanged_candidate_passes(tmp_path):
+    """出口 1：未声明、候选未改（今天的行为）→ pass。"""
+    _adopted_workspace(tmp_path)
+    request = _request(tmp_path)
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    _edit_candidate(tmp_path)
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+
+
+def test_fu_exit2_undeclared_alias_change_rejected(tmp_path):
+    """出口 2：未声明、候选改了 → reject immutable frontmatter changed (aliases)。"""
+    _adopted_workspace(tmp_path)
+    request = _request(tmp_path)
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    _alias_edit_candidate(tmp_path, remove=["Legacy test"])
+    result = _run(_revise_args(request, apply=True), tmp_path)
+    assert result.returncode != 0
+    assert "immutable frontmatter changed (aliases)" in (result.stdout + result.stderr)
+
+
+def test_fu_exit3_declared_and_applied_passes(tmp_path):
+    """出口 3：声明了、候选按声明改 → pass，authorization 记录期望态/原始态。"""
+    _adopted_workspace(tmp_path)
+    request = _fu_request(tmp_path, remove_aliases=["Legacy test"])
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    _alias_edit_candidate(tmp_path, remove=["Legacy test"])
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    meta = _frontmatter(tmp_path)
+    assert "Legacy test" not in meta["aliases"]
+    auth = json.loads((_operation_dir(tmp_path) / "authorization.json")
+                      .read_text(encoding="utf-8"))
+    page_auth = auth["pages"][0]
+    assert page_auth["frontmatter_updates"] == {"aliases": {"remove": ["Legacy test"]}}
+    assert "Legacy test" in page_auth["immutable_frontmatter_pre"]["aliases"]
+    assert "Legacy test" not in page_auth["immutable_frontmatter"]["aliases"]
+
+
+def test_fu_exit4_declared_but_not_applied_rejected(tmp_path):
+    """出口 4：声明了、候选没改 → reject（声明未兑现）。"""
+    _adopted_workspace(tmp_path)
+    request = _fu_request(tmp_path, remove_aliases=["Legacy test"])
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    _alias_edit_candidate(tmp_path, remove=[])
+    result = _run(_revise_args(request, apply=True), tmp_path)
+    assert result.returncode != 0
+    assert "declared frontmatter update not applied" in (result.stdout + result.stderr)
+
+
+def test_fu_exit5_declared_but_wrong_value_rejected(tmp_path):
+    """出口 5：声明了、候选改成了别的值 → reject。"""
+    _adopted_workspace(tmp_path)
+    request = _fu_request(tmp_path, remove_aliases=["Legacy test"])
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    _alias_edit_candidate(tmp_path, add=["Wrong Alias"])
+    result = _run(_revise_args(request, apply=True), tmp_path)
+    assert result.returncode != 0
+    assert "immutable frontmatter changed (aliases)" in (result.stdout + result.stderr)
+
+
+@pytest.mark.parametrize(("fu", "needle"), [
+    ({"status": {"remove": ["x"]}}, "immutable frontmatter"),
+    ({"canonical_id": {"remove": ["x"]}}, "only supports aliases"),
+])
+def test_fu_exit6_non_immutable_or_unsupported_key_rejected(tmp_path, fu, needle):
+    """出口 6：声明的键不属于 _IMMUTABLE_FRONTMATTER（或暂不支持）→ 请求校验阶段 reject。"""
+    _adopted_workspace(tmp_path)
+    page = _request_page(PAGE_REL)
+    page["frontmatter_updates"] = fu
+    request = _request(tmp_path, pages=[page])
+    result = _run(_revise_args(request, apply=True), tmp_path)
+    assert result.returncode != 0
+    assert needle in (result.stdout + result.stderr)
+    assert not (tmp_path / "pipeline-workspace" / "legacy-revisions").exists()
+
+
+def test_fu_exit7_remove_absent_alias_rejected(tmp_path):
+    """出口 7：remove 一个页面上不存在的别名 → 签名阶段 reject（避免无声空操作）。"""
+    _adopted_workspace(tmp_path)
+    request = _fu_request(tmp_path, remove_aliases=["No Such Alias"])
+    result = _run(_revise_args(request, apply=True), tmp_path)
+    assert result.returncode != 0
+    assert "removes absent alias" in (result.stdout + result.stderr)
+    assert not (tmp_path / "pipeline-workspace" / "legacy-revisions").exists()
+
+
+def test_fu_exit8_revert_restores_pre_state_aliases(tmp_path):
+    """出口 8：mode: revert → 回滚恢复 pre 态 aliases（并恢复 citations）。"""
+    citation = {
+        "source": "NIST/SEMATECH e-Handbook",
+        "title": "Engineering Statistics Handbook",
+        "url": "https://www.itl.nist.gov/div898/handbook/",
+        "accessed_on": "2026-08-02",
+        "locator": "Chapter 1",
+    }
+    removed = {
+        "source": "existing-source-one",
+        "title": "Existing citation one",
+        "url": "https://example.test/existing-one",
+        "accessed_on": "2026-08-02",
+        "supports": "legacy 引用，回滚后原样恢复",
+    }
+    _adopted_workspace(tmp_path, citations=[removed])
+    page_req = _request_page(PAGE_REL, citation=citation)
+    page_req["frontmatter_updates"] = {"aliases": {"remove": ["Legacy test"]}}
+    page_req["citation_removals"] = [{
+        "sha256": _citation_sha256(removed), "reason": "旧引用不再支撑当前结论",
+    }]
+    request = _request(tmp_path, pages=[page_req])
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    _alias_edit_candidate(tmp_path, remove=["Legacy test"],
+                          drop_sources=["existing-source-one"])
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    assert "Legacy test" not in _frontmatter(tmp_path)["aliases"]
+    completed_id = _operation_dir(tmp_path).name
+
+    revert_page = {
+        "path": PAGE_REL,
+        "reason": "回滚原 operation，恢复 pre 态 aliases 与 citations",
+        "evidence": [{
+            "citation": {k: v for k, v in removed.items() if k != "supports"},
+            "supports": removed["supports"],
+        }],
+        "citation_removals": [{
+            "sha256": _citation_sha256(
+                {**citation, "supports": "统计结论必须写明适用条件"}),
+            "reason": "回滚原新增",
+        }],
+    }
+    revert = _request(tmp_path, mode="revert", revert_operation=completed_id,
+                      pages=[revert_page])
+    assert _run(_revise_args(revert, apply=True), tmp_path).returncode == 0
+    assert _run(_revise_args(revert, apply=True), tmp_path).returncode == 0
+    meta = _frontmatter(tmp_path)
+    assert "Legacy test" in meta["aliases"]
+    assert [c["source"] for c in meta["citations"]] == ["existing-source-one"]
+
+
+def test_fu_revert_request_must_not_declare_updates(tmp_path):
+    """回滚请求不得声明 frontmatter_updates（恢复是自动的，声明会 fail-closed）。"""
+    _adopted_workspace(tmp_path)
+    request = _fu_request(tmp_path, remove_aliases=["Legacy test"])
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    _alias_edit_candidate(tmp_path, remove=["Legacy test"])
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    completed_id = _operation_dir(tmp_path).name
+    revert_page = _request_page(PAGE_REL)
+    revert_page["frontmatter_updates"] = {"aliases": {"remove": ["Legacy test"]}}
+    revert = _request(tmp_path, mode="revert", revert_operation=completed_id,
+                      pages=[revert_page])
+    result = _run(_revise_args(revert, apply=True), tmp_path)
+    assert result.returncode != 0
+    assert "revert request must not declare frontmatter_updates" in \
+        (result.stdout + result.stderr)
+
+
+# ---------------------------------------------------------------------------
+# 契约演进：citation.url 对已登记来源放宽（任务 2 出口表 4 行）
+# ---------------------------------------------------------------------------
+
+
+def _no_url_page_request(source, *, title="Legacy source record"):
+    page = _request_page(PAGE_REL)
+    page["evidence"] = [{
+        "citation": {"source": source, "title": title, "accessed_on": "2026-08-02"},
+        "supports": "本地摄取的来源本身没有 URL",
+    }]
+    return page
+
+
+def test_url_exit1_https_url_passes(tmp_path):
+    """出口 1：有 url + https → pass（今天的行为）。"""
+    _adopted_workspace(tmp_path)
+    request = _request(tmp_path)
+    assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+
+
+def test_url_exit2_non_https_rejected(tmp_path):
+    """出口 2：有 url + 非 https → reject（今天的行为）。"""
+    _adopted_workspace(tmp_path)
+    page = _request_page(PAGE_REL)
+    page["evidence"][0]["citation"]["url"] = "http://example.test/not-https"
+    request = _request(tmp_path, pages=[page])
+    result = _run(_revise_args(request, apply=True), tmp_path)
+    assert result.returncode != 0
+    assert "https" in (result.stdout + result.stderr)
+
+
+def test_url_exit3_no_url_registered_db_source_passes(tmp_path):
+    """出口 3：无 url + source 是状态库已登记 source_id → pass。"""
+    _adopted_workspace(tmp_path)
+    page = _no_url_page_request(SOURCE)
+    request = _request(tmp_path, pages=[page])
+    result = _run(_revise_args(request, apply=True), tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_url_exit3_no_url_vault_sources_page_passes(tmp_path):
+    """出口 3：无 url + source 是 vault sources/<id>.md（legacy-markdown-bundle）→ pass。"""
+    _adopted_workspace(tmp_path)
+    sources = tmp_path / "wiki" / "sources"
+    sources.mkdir(parents=True, exist_ok=True)
+    (sources / "ab_testing_markdown_course_cn.md").write_text(
+        "---\ntype: source\nsource_id: ab_testing_markdown_course_cn\n"
+        "format: legacy-markdown-bundle\nprovenance_status: legacy-unverified\n"
+        "---\n课程资料导航。\n", encoding="utf-8")
+    page = _no_url_page_request("ab_testing_markdown_course_cn",
+                                title="AB测试从0到1完整实战路线")
+    request = _request(tmp_path, pages=[page])
+    result = _run(_revise_args(request, apply=True), tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_url_exit4_non_source_page_in_sources_dir_is_not_registered(tmp_path):
+    """sources/ 下的非来源页不算已登记来源。
+
+    登记与否按 frontmatter 的 ``type: source`` 判定，不按文件名。否则 sources/ 里放一张
+    README 之类的普通页，就能让任意 source 名通过"无 url"这条路径。
+    """
+    _adopted_workspace(tmp_path)
+    sources = tmp_path / "wiki" / "sources"
+    sources.mkdir(parents=True, exist_ok=True)
+    (sources / "reading-notes.md").write_text(
+        "---\ntype: concept\ncanonical_id: concept.demo.reading-notes\n"
+        "---\n这不是一张来源页。\n", encoding="utf-8")
+
+    page = _no_url_page_request("reading-notes")
+    request = _request(tmp_path, pages=[page])
+    result = _run(_revise_args(request, apply=True), tmp_path)
+
+    assert result.returncode != 0
+    assert "registered source_id" in (result.stdout + result.stderr)
+    assert not (tmp_path / "pipeline-workspace" / "legacy-revisions").exists()
+
+
+def test_url_exit4_no_url_unregistered_source_rejected(tmp_path):
+    """出口 4：无 url + source 未登记 → reject，错误信息列出已登记 source_id。"""
+    _adopted_workspace(tmp_path)
+    page = _no_url_page_request("not-a-registered-source")
+    request = _request(tmp_path, pages=[page])
+    result = _run(_revise_args(request, apply=True), tmp_path)
+    assert result.returncode != 0
+    output = result.stdout + result.stderr
+    assert "registered source_id" in output
+    assert SOURCE in output
+    assert "not-a-registered-source" in output
+    assert not (tmp_path / "pipeline-workspace" / "legacy-revisions").exists()
+
+
+# ---------------------------------------------------------------------------
+# B-05 选项 2：--emit-removal-sha 只读导出（任务 5）
+# ---------------------------------------------------------------------------
+
+
+def test_emit_removal_sha_readonly_and_hashes(tmp_path):
+    first = _existing_citation(suffix="first")
+    second = _existing_citation(suffix="second")
+    _adopted_workspace(tmp_path, citations=[first, second])
+    before = _tree_state(tmp_path)
+    result = _run(["revise-adopted", "--source", SOURCE,
+                   "--emit-removal-sha", PAGE_REL], tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    assert _citation_sha256(first) in output
+    assert _citation_sha256(second) in output
+    assert first["source"] in output and second["source"] in output
+    assert _tree_state(tmp_path) == before
+    assert not (tmp_path / "pipeline-workspace" / "legacy-revisions").exists()
+
+
+def test_emit_removal_sha_conflicts_with_request(tmp_path):
+    _adopted_workspace(tmp_path)
+    request = _request(tmp_path)
+    result = _run(["revise-adopted", "--source", SOURCE,
+                   "--emit-removal-sha", PAGE_REL, "--request", str(request)], tmp_path)
+    assert result.returncode != 0
+    assert "cannot be combined" in (result.stdout + result.stderr)
+
+
+# ---------------------------------------------------------------------------
+# request_sha256 的规范形式（golden fixtures）
+#
+# request_sha256 是每个已签发 operation 唯一可独立复算的锚：它写进
+# authorization.json，审计者据此证明"这个 operation 确实由那份请求授权"。
+# 规范化过程一旦漂移，所有历史 operation 都会变得无法复算。
+#
+# 下面的摘要把规范形式钉死。改动 _validate_request 的规范化逻辑（键排序、strip、
+# 大小写归一、可选字段的缺省表示、json.dumps 参数）都会让这些断言失败——那是预期
+# 行为，不要直接更新摘要，先确认这次改动是否真的要求所有历史 authorization 重新签发。
+#
+# fixtures 是合成内容。真实部署的请求不进本仓库：其页面路径、修订理由与内容摘要属于
+# 使用者的私有知识库，不应随开源代码分发。要验证某个具体部署的历史 operation 是否
+# 仍可复算，在该部署本地跑并把结果记进该部署自己的报告。
+# ---------------------------------------------------------------------------
+
+
+CANONICAL_REQUEST_SOURCE = "demo-legacy-vault"
+
+CANONICAL_REQUEST_GOLDEN = [
+    # 最小请求：单页、单条 evidence、无 citation_removals、无可选 locator
+    ("canonical-minimal.yaml",
+     "19449225349f5584561ea052634d10c82bb93099cff5991b47638d18bfb77ab6"),
+    # 乱序输入：页按路径倒序、removals 按摘要倒序、citation 键乱序
+    ("canonical-unsorted.yaml",
+     "1512088bae1b1f15bb011725753f0452f9992dc8e5478732ec15dde131150db0"),
+    # 非 ASCII + 前后空白：ensure_ascii=False 与 strip 行为
+    ("canonical-unicode-whitespace.yaml",
+     "ab8ece1e3e41da741acbce339d8a158bbe25cb89adb66603c45fd3a3e94d1bce"),
+]
+
+
+def _canonical_fixture(name):
+    return ROOT / "tests" / "fixtures" / "request-yamls" / name
+
+
+@pytest.mark.parametrize(("name", "golden_sha"), CANONICAL_REQUEST_GOLDEN)
+def test_request_sha256_canonical_form_is_pinned(name, golden_sha):
+    """规范形式不得漂移：新增可选 schema 字段时，缺省该字段的请求必须产生同一摘要。"""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import legacy_revision
+    _normal, _raw, request_sha = legacy_revision._validate_request(
+        _canonical_fixture(name), CANONICAL_REQUEST_SOURCE)
+    assert request_sha == golden_sha
+
+
+def test_request_sha256_is_independent_of_declaration_order(tmp_path):
+    """规范化吸收顺序：把乱序请求手工排好序后，摘要必须不变。
+
+    单看 golden 摘要无法区分"排序正确"与"排序被整体改错、golden 跟着更新了"，
+    所以这里直接断言性质本身。
+    """
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import legacy_revision
+    data = yaml.safe_load(
+        _canonical_fixture("canonical-unsorted.yaml").read_text(encoding="utf-8"))
+    data["pages"] = sorted(data["pages"], key=lambda page: page["path"])
+    for page in data["pages"]:
+        page["citation_removals"] = sorted(
+            page["citation_removals"], key=lambda removal: removal["sha256"])
+    presorted = tmp_path / "presorted.yaml"
+    presorted.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    _normal, _raw, presorted_sha = legacy_revision._validate_request(
+        presorted, CANONICAL_REQUEST_SOURCE)
+    _normal, _raw, declared_sha = legacy_revision._validate_request(
+        _canonical_fixture("canonical-unsorted.yaml"), CANONICAL_REQUEST_SOURCE)
+    assert presorted_sha == declared_sha

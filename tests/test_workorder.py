@@ -166,3 +166,71 @@ def test_workorder_backend_read_from_parse_report(tmp_path):
     wo = workorder.build_workorder(vault, source_id="wp", domain="game-theory",
                                    staging_dir=staging)
     assert wo["source"]["backend"] == "pymupdf"
+
+
+# --- B-01：pipeline_commit 元数据（workorder.yaml + repo_meta，零迁移）---
+
+
+def _load_repo_meta():
+    return _load("repo_meta")
+
+
+def test_pipeline_commit_unknown_when_git_unavailable(tmp_path, monkeypatch):
+    """git 不可用（异常）→ unknown，不 fail。"""
+    repo_meta = _load_repo_meta()
+
+    def boom(*_args, **_kwargs):
+        raise OSError("git unavailable")
+
+    monkeypatch.setattr(repo_meta.subprocess, "run", boom)
+    assert repo_meta.pipeline_commit(repo_root=tmp_path) == "unknown"
+
+
+def test_pipeline_commit_unknown_when_not_a_git_repo(tmp_path, monkeypatch):
+    """不在 git 仓库内（git rev-parse 非零）→ unknown，不 fail。"""
+    repo_meta = _load_repo_meta()
+
+    class _FakeRun:
+        returncode = 128
+        stdout = ""
+        stderr = "fatal: not a git repository"
+
+    monkeypatch.setattr(repo_meta.subprocess, "run",
+                        lambda *_a, **_k: _FakeRun())
+    assert repo_meta.pipeline_commit(repo_root=tmp_path) == "unknown"
+
+
+def test_pipeline_commit_matches_head_and_dirty_flag(tmp_path):
+    import re
+    import subprocess
+    repo_meta = _load_repo_meta()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.test"],
+                   cwd=repo, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=repo,
+                   capture_output=True)
+    (repo / "a.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "c"], cwd=repo, capture_output=True,
+                   check=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                          capture_output=True, text=True).stdout.strip()
+    assert repo_meta.pipeline_commit(repo_root=repo) == head
+    (repo / "a.txt").write_text("y", encoding="utf-8")
+    assert repo_meta.pipeline_commit(repo_root=repo) == f"{head}-dirty"
+
+
+def test_write_workorder_records_pipeline_commit(tmp_path):
+    import re
+    vault = _vault_with_concepts(tmp_path)
+    staging = tmp_path / "staging" / "wp"
+    staging.mkdir(parents=True)
+    wo = workorder.build_workorder(vault, source_id="wp", domain="game-theory",
+                                   staging_dir=staging)
+    path = workorder.write_workorder(staging, wo)
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert re.fullmatch(r"[0-9a-f]{40}(-dirty)?|unknown",
+                        loaded["pipeline_commit"]), loaded["pipeline_commit"]
+    assert "pipeline_commit" not in wo        # build 保持纯函数，写入时才记录

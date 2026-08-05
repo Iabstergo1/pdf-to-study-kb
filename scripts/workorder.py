@@ -115,7 +115,11 @@ def build_workorder(vault, *, source_id: str, domain: str, staging_dir) -> dict:
 
 
 def write_workorder(staging_dir, wo: dict) -> Path:
+    """落盘 workorder.yaml；写入时记录 pipeline_commit（B-01，可选字段，缺失视为 unknown）。"""
+    import repo_meta
+    out = dict(wo)
+    out["pipeline_commit"] = repo_meta.pipeline_commit()
     path = Path(staging_dir) / "workorder.yaml"
-    path.write_text(yaml.safe_dump(wo, allow_unicode=True, sort_keys=True,
+    path.write_text(yaml.safe_dump(out, allow_unicode=True, sort_keys=True,
                                    default_flow_style=False), encoding="utf-8")
     return path

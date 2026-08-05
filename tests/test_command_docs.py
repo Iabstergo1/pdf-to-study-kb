@@ -187,3 +187,12 @@ def test_resume_ingest_codex_automation_uses_supported_writable_flags():
     # Shipped default = least-privilege workspace-write; bypass is the escape hatch.
     assert "defaults to `--sandbox workspace-write`" in readme
     # 真跑 pwsh + .cmd shim 的烟测拆在 test_resume_ingest_smoke.py（tier=cli）。
+
+
+def test_developer_guide_documents_parse_report_division_and_pipeline_commit():
+    """B-03 选项 1 + B-01：开发指南写明 mineru_status 分工、双审权威指针与 pipeline_commit 零迁移。"""
+    text = (ROOT / "docs/developer-guide.md").read_text(encoding="utf-8")
+    for must in ("mineru_status", "reconciliation.json", "dual_audit_authority",
+                 "pipeline_commit", "unknown", "ARTIFACT_VERSION",
+                 "source-convert 阶段是否选用 MinerU"):
+        assert must in text, f"developer-guide 缺 {must!r}"

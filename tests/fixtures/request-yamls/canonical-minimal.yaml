@@ -1,0 +1,19 @@
+# Canonicalisation golden fixture: smallest valid request.
+# Covers: single page, single evidence entry, no citation_removals, no optional
+# `locator` key. Content is synthetic — these fixtures exist to pin the canonical
+# form of the request schema, not to describe any real vault.
+version: 1
+source_id: demo-legacy-vault
+valid_until: '2030-01-01T00:00:00+00:00'
+mode: edit
+pages:
+- path: domains/demo/concepts/alpha.md
+  reason: Pin the canonical form for a request with no removals.
+  evidence:
+  - citation:
+      source: Example documentation
+      title: Alpha reference
+      url: https://example.invalid/docs/alpha
+      accessed_on: '2030-01-01'
+    supports: Alpha behaves as documented in the referenced page.
+  citation_removals: []

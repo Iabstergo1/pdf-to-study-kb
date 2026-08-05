@@ -67,6 +67,23 @@ citations; an unknown SHA fails closed before sidecar creation and reports the a
 If the operation is `committing`, recover that operation before any ordinary lint. Do not use
 `revise-adopted` for human-managed pages or as a substitute for a real book ingest.
 
+To build the removal list mechanically instead of hand-writing digests, run the read-only exporter
+(zero writes, no `--request` needed):
+
+```text
+python scripts/pipeline.py revise-adopted --source <legacy_source> --emit-removal-sha <page>
+```
+
+It prints every citation on the page as `sha256  source=...  title=...  url=...`.
+The request schema also accepts two optional, audited fields:
+
+- page-level `frontmatter_updates.aliases.remove: [...]` declares a controlled change of an immutable
+  frontmatter key (currently only `aliases`). The authorization records both the expected post-update
+  identity and the pre-update identity; the candidate must match the declared update — declaring
+  without applying, or applying without declaring, both fail closed;
+- evidence `citation.url` is optional when `citation.source` is a registered source_id
+  (state `sources` table or `sources/<id>.md`); a URL, when present, must still be HTTPS.
+
 ## 7. Workflow
 
 | Sub-unit | Input | Output | Acceptance | Persisted | Failure stop |

@@ -206,3 +206,30 @@ def test_write_reconciliation_roundtrip(tmp_path):
     assert len(sha) == 64
     loaded = json.loads(p.read_text(encoding="utf-8"))
     assert loaded["generated_by"] == "source-audit" and loaded["dual_audited"] is True
+
+
+# --- 契约演进：parse_report 指针 + pipeline_commit（B-03 选项 2 / B-01，零迁移）---
+
+
+def test_parse_report_dual_audit_authority_pointer():
+    """B-03 选项 2：parse_report 带指向 reconciliation.json 的双审权威指针。"""
+    ra = sa.RoutingAdvice(recommended_backend="pymupdf",
+                          structured_reparse_recommended=False)
+    rep = sa.build_parse_report("pymupdf", input_hash="h", routing_advice=ra)
+    assert rep["dual_audit_authority"] == "reconciliation.json"
+
+
+def test_write_parse_report_records_pipeline_commit(tmp_path):
+    """B-01：parse_report 落盘时记录 pipeline_commit（可选字段；缺失视为 unknown，零迁移）。"""
+    import json
+    import re
+    ra = sa.RoutingAdvice(recommended_backend="markdown",
+                          structured_reparse_recommended=False)
+    rep = sa.build_parse_report("markdown", input_hash="h", routing_advice=ra)
+    p = tmp_path / "parse_report.json"
+    sa.write_parse_report(p, rep)
+    loaded = json.loads(p.read_text(encoding="utf-8"))
+    assert re.fullmatch(r"[0-9a-f]{40}(-dirty)?|unknown",
+                        loaded["pipeline_commit"]), loaded["pipeline_commit"]
+    assert sa.ARTIFACT_VERSION == "6"          # 约束 B：不提版本、不迁移
+    assert loaded["artifact_version"] == sa.ARTIFACT_VERSION

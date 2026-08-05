@@ -103,6 +103,7 @@ def build_parse_report(selected_backend: str, *, input_hash: str,
         "routing_advice": ra,
         "mineru_status": "not_checked",
         "dual_audit_required": bool(dual_audit_required),
+        "dual_audit_authority": "reconciliation.json",
         "warnings": list(warnings or []),
     }
     report.update(extra)
@@ -110,7 +111,11 @@ def build_parse_report(selected_backend: str, *, input_hash: str,
 
 
 def write_parse_report(path, report: dict) -> str:
-    text = json.dumps(report, ensure_ascii=False, indent=2)
+    """落盘 parse_report.json；写入时记录 pipeline_commit（B-01，可选字段，缺失视为 unknown）。"""
+    import repo_meta
+    out = dict(report)
+    out["pipeline_commit"] = repo_meta.pipeline_commit()
+    text = json.dumps(out, ensure_ascii=False, indent=2)
     Path(path).write_text(text, encoding="utf-8")
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 

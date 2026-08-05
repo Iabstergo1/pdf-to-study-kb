@@ -1,0 +1,48 @@
+# Canonicalisation golden fixture: ordering must not leak into the digest.
+# Pages are listed in reverse path order, citation_removals in reverse sha256
+# order, and citation mapping keys in a shuffled order. The canonical form sorts
+# all three, so this fixture and a hand-sorted copy must hash identically.
+# Content is synthetic.
+version: 1
+source_id: demo-legacy-vault
+valid_until: '2030-01-01T00:00:00+00:00'
+mode: edit
+pages:
+- path: domains/demo/concepts/gamma.md
+  reason: Listed first but sorts last.
+  evidence:
+  - citation:
+      url: https://example.invalid/docs/gamma
+      accessed_on: '2030-01-01'
+      source: Example documentation
+      title: Gamma reference
+      locator: Section 3
+    supports: Gamma is covered by the referenced section.
+  citation_removals:
+  - sha256: 'ffee0011223344556677889900aabbccddeeff00112233445566778899aabbcc'
+    reason: Highest digest, declared first.
+  - sha256: '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
+    reason: Lowest digest, declared last.
+- path: domains/demo/concepts/beta.md
+  reason: Middle page, carries a citation without the optional locator key.
+  evidence:
+  - citation:
+      source: Example documentation
+      title: Beta reference
+      url: https://example.invalid/docs/beta
+      accessed_on: '2030-01-01'
+    supports: Beta is covered by the referenced page.
+  citation_removals: []
+- path: domains/demo/concepts/alpha.md
+  reason: Listed last but sorts first.
+  evidence:
+  - citation:
+      source: Example documentation
+      title: Alpha reference
+      url: https://example.invalid/docs/alpha
+      accessed_on: '2030-01-01'
+      locator: Section 1
+    supports: Alpha is covered by the referenced section.
+  citation_removals:
+  - sha256: '8899aabbccddeeff00112233445566778899aabbccddeeff0011223344556677'
+    reason: Single removal on the first page.

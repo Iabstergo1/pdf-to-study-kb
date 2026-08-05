@@ -1,0 +1,23 @@
+# Canonicalisation golden fixture: non-ASCII text and surrounding whitespace.
+# Covers: CJK in reason/supports (the canonical JSON is written with
+# ensure_ascii=False, so a switch to ensure_ascii=True would change the digest),
+# and leading/trailing whitespace that the canonical form strips.
+# Content is synthetic.
+version: 1
+source_id: demo-legacy-vault
+valid_until: '2030-01-01T00:00:00+00:00'
+mode: edit
+pages:
+- path: domains/demo/concepts/delta.md
+  reason: '  非 ASCII 与前后空白：规范化必须 strip 并保持 UTF-8 原样输出。  '
+  evidence:
+  - citation:
+      source: Example documentation
+      title: Delta reference
+      url: https://example.invalid/docs/delta
+      accessed_on: '2030-01-01'
+      locator: 第 4 节
+    supports: '   参考页说明了 delta 的边界条件；本行前后的空白应被 strip 掉。   '
+  citation_removals:
+  - sha256: ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789
+    reason: '  大写摘要必须被规范化为小写。  '

@@ -752,7 +752,7 @@ stage/artifact SHA 并恢复 published。`next` 会把崩溃残留显示为 `res
 | `source.md` | `source-convert` | 主顺读文本（PyMuPDF 含 `<!-- page N -->` 标记）。**预处理绝不重写它** | ingest LLM（show-window） | 稳定产物 |
 | `blocks.jsonl` | `source-convert` | `SourceBlock`：`block_id,type,text,page,char_start,char_end,text_level,heading_path,asset_path,risk_flags[],source_ref(p{NNNN}#{bid}),chapter_id,element_id` | windowing/preflight | 稳定产物（`ARTIFACT_VERSION=6`） |
 | `chapters.json` | `source-convert` | `{index,chapter_id,title,level,page_start,page_end}` | windowing（chapter_title）、ingest（全书图 + 内容路由判断输入） | 稳定产物（导航脊柱） |
-| `parse_report.json` | `source-convert` | `selected_backend,source_type,backend_reason,dual_audit_required,routing_advice,mineru_status,page_count,...counts,low_confidence_pages` | audit/preflight/workorder/lint | 建议性报告 |
+| `parse_report.json` | `source-convert` | `selected_backend,source_type,backend_reason,dual_audit_required,dual_audit_authority,routing_advice,mineru_status,page_count,...counts,low_confidence_pages,pipeline_commit` | audit/preflight/workorder/lint | 建议性报告 |
 | `assets/p{NNNN}.png` | `source-convert` / `arbitration-apply`（PyMuPDF 难页/仲裁补图）；MinerU 图片 | 整页 PNG（zoom=3）或 MinerU 抠图 | ingest 读图（route B）；同步进 `wiki/assets/` | 用户可见输出 |
 | `reconciliation.json` | `source-audit` | `primary_backend,review_backend,review_status,dual_audited,production_accepted,degraded,disagreements[],pages_cross_checked[],missing_evidence[]` | `check_dual_audit` | 稳定产物（审计证据） |
 | `evidence.json` | `source-audit` | `pages{},initial_needs_vision,reviewer_structural,candidates[],soft_risk_pages[],risk_flags_by_page,final_hard_pages` | 仲裁/`check_evidence_bundle` | 中间产物 |
@@ -760,9 +760,27 @@ stage/artifact SHA 并恢复 published。`next` 会把崩溃残留显示为 `res
 | `arbitration/decisions.json` | **agent 写**（skill 流） | `decisions[]`：`{page,decision(render/ignore/needs_human),reason}` | apply/windows 闸门/closure | 中间产物（唯一非 CLI 写的预处理文件） |
 | `arbitration/audit.jsonl` | apply/resolve | append-only 裁决审计 | 人工核查 | 审计 |
 | `windows.jsonl` | `windows` | 见 §4.6 字段 | ingest（show-window）/preflight | 稳定产物（`WINDOWING_VERSION=5`） |
-| `workorder.yaml` | `workorder` | `write_scope[],registry{hash},concept_pages_snapshot[],other_pages_snapshot[],source{...}` | ingest-start/check-write | 稳定产物（事务契约） |
+| `workorder.yaml` | `workorder` | `write_scope[],registry{hash},concept_pages_snapshot[],other_pages_snapshot[],source{...},pipeline_commit` | ingest-start/check-write | 稳定产物（事务契约） |
 | `preflight_eval.json` | `preflight-eval` | `{checks[],summary{ok,warn,fail}}` | CI / 人工 | 建议性报告 |
 | `digest.md` | **ingest skill（LLM）写** | 顶部含 `## RESUME` 块（完成后改名 `## DONE`）+ 一张「路由表」（内容路由，advisory；"弱化"行禁裸"跳过"须附理由）+ `[routing-deviation]` / `[window-skip]` 标记 + 跨窗滚动摘要 | 续跑定位（恢复三读=chapters.json+RESUME+write-pages.md）；`kb-postmortem` 读取偏离标记 | 外部记忆（非 CLI 产物） |
+
+**字段分工（B-03 裁决：不改名，文档+指针）：**
+
+- `parse_report.mineru_status` 指 **source-convert 阶段是否选用 MinerU 作为转换后端**
+  （`not_checked` / `used` / 失败值），与"双审做没做"是两个阶段的不同问题；
+- 双审结论的权威是 `source-audit` 产出的 `reconciliation.json`
+  （`dual_audited` / `degraded` / `review_status` / `production_accepted`）；
+  `parse_report.dual_audit_authority` 固定指向同目录的 `reconciliation.json`，
+  审计者看 parse_report 时按该指针找双审权威，不得只看 `mineru_status` 下结论；
+  因此 `mineru_status=not_checked` 与 `dual_audited=True` 并列**不矛盾**（PDF 双审由
+  PyMuPDF primary + MinerU reviewer 完成，与 source-convert 是否选 MinerU 无关）。
+
+**`pipeline_commit`（B-01，零迁移）：**
+
+`workorder.yaml` 与 `parse_report.json` 落盘时记录产出它的代码版本（`git rev-parse HEAD`）；
+工作树不干净 → `<commit>-dirty`；不在 git 仓库内 → `unknown`，不 fail。
+既存 artifact 缺该字段 → 视为 `unknown`，**不迁移、不提升 `ARTIFACT_VERSION`**——
+`ARTIFACT_VERSION` 同时是 converted 阶段缓存键的组成部分，提升会让三本已摄取书缓存全部失效并触发重转。
 
 ### 5.3 Vault 产物（`wiki/`，用户可见输出）
 

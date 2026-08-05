@@ -54,6 +54,13 @@ _DERIVED = (
     "propositions.generated.md",
 )
 _EXCLUDED_TOP = {".obsidian", "Review-Queue", "_meta", "assets"}
+_PAGE_REQUIRED_KEYS = {"path", "reason", "evidence", "citation_removals"}
+_PAGE_OPTIONAL_KEYS = {"frontmatter_updates"}
+_AUTHORIZATION_PAGE_KEYS = {
+    "citation_plan", "evidence", "immutable_frontmatter",
+    "immutable_frontmatter_sha256", "path", "pre_sha256", "pre_size", "reason",
+}
+_AUTHORIZATION_PAGE_OPTIONAL_KEYS = {"frontmatter_updates", "immutable_frontmatter_pre"}
 
 
 class LegacyRevisionError(evidence_fs.EvidenceBoundaryError):
@@ -144,6 +151,46 @@ def _citation_from_evidence(entry: dict) -> dict:
     return citation
 
 
+def _validate_frontmatter_updates(fu, rel: str) -> dict:
+    """校验 page 级受控 frontmatter 声明（解锁 S-05 的受控 aliases 变更）。
+
+    声明的键必须属于 _IMMUTABLE_FRONTMATTER；当前只定义 aliases.remove 语义。
+    缺省时请求规范化字典不出现该键（约束 A：request_sha256 向后兼容）。
+    """
+    if not isinstance(fu, dict) or not fu:
+        raise LegacyRevisionError(
+            f"frontmatter_updates must be a non-empty mapping: {rel}")
+    unknown = sorted(set(fu) - set(_IMMUTABLE_FRONTMATTER))
+    if unknown:
+        raise LegacyRevisionError(
+            f"frontmatter_updates keys must belong to immutable frontmatter: "
+            f"{', '.join(unknown)}: {rel}")
+    if set(fu) != {"aliases"}:
+        raise LegacyRevisionError(
+            f"frontmatter_updates only supports aliases for now: {rel}")
+    aliases = fu["aliases"]
+    if not isinstance(aliases, dict) or set(aliases) != {"remove"}:
+        raise LegacyRevisionError(
+            f"frontmatter_updates.aliases must declare remove: {rel}")
+    removes = aliases["remove"]
+    if not isinstance(removes, list) or not removes:
+        raise LegacyRevisionError(
+            f"frontmatter_updates.aliases.remove must be a non-empty list: {rel}")
+    if any(not isinstance(a, str) or not a.strip() for a in removes):
+        raise LegacyRevisionError(
+            f"frontmatter_updates.aliases.remove entries must be non-empty strings: {rel}")
+    seen = set()
+    clean_removes = []
+    for alias in removes:
+        alias = alias.strip()
+        if alias in seen:
+            raise LegacyRevisionError(
+                f"duplicate alias in frontmatter_updates.aliases.remove: {alias}: {rel}")
+        seen.add(alias)
+        clean_removes.append(alias)
+    return {"aliases": {"remove": clean_removes}}
+
+
 def _validate_request(path: Path, source: str) -> tuple[dict, bytes, str]:
     if not _SOURCE_ID.fullmatch(source):
         raise LegacyRevisionError("invalid source id")
@@ -179,9 +226,16 @@ def _validate_request(path: Path, source: str) -> tuple[dict, bytes, str]:
     normal_pages = []
     seen = set()
     for page in pages:
-        if not isinstance(page, dict) or set(page) != {
-                "path", "reason", "evidence", "citation_removals"}:
-            raise LegacyRevisionError("each request page must contain path/reason/evidence/citation_removals")
+        if not isinstance(page, dict):
+            raise LegacyRevisionError("each request page must be a mapping")
+        missing_page = sorted(_PAGE_REQUIRED_KEYS - set(page))
+        unknown_page = sorted(set(page) - _PAGE_REQUIRED_KEYS - _PAGE_OPTIONAL_KEYS)
+        if missing_page or unknown_page:
+            raise LegacyRevisionError(
+                "each request page must contain path/reason/evidence/citation_removals"
+                " (optional: frontmatter_updates)"
+                + (f"; missing: {', '.join(missing_page)}" if missing_page else "")
+                + (f"; unknown: {', '.join(unknown_page)}" if unknown_page else ""))
         rel = _safe_rel(page["path"])
         if rel in seen:
             raise LegacyRevisionError(f"duplicate request page path: {rel}")
@@ -189,6 +243,9 @@ def _validate_request(path: Path, source: str) -> tuple[dict, bytes, str]:
         reason = page["reason"]
         if not isinstance(reason, str) or not reason.strip():
             raise LegacyRevisionError(f"page reason must not be empty: {rel}")
+        clean_fu = None
+        if page.get("frontmatter_updates") is not None:
+            clean_fu = _validate_frontmatter_updates(page["frontmatter_updates"], rel)
         evidence = page["evidence"]
         if not isinstance(evidence, list) or not evidence:
             raise LegacyRevisionError(f"page evidence must be a non-empty list: {rel}")
@@ -199,14 +256,17 @@ def _validate_request(path: Path, source: str) -> tuple[dict, bytes, str]:
             citation = item["citation"]
             if not isinstance(citation, dict):
                 raise LegacyRevisionError(f"citation must be a mapping: {rel}")
-            required = {"source", "title", "url", "accessed_on"}
-            if not required.issubset(citation) or set(citation) - (required | {"locator"}):
+            required = {"source", "title", "accessed_on"}
+            if not required.issubset(citation) or set(citation) - (required | {"url", "locator"}):
                 raise LegacyRevisionError(f"citation fields invalid: {rel}")
             if any(not isinstance(citation[k], str) or not citation[k].strip()
                    for k in required):
                 raise LegacyRevisionError(f"citation fields must not be empty: {rel}")
-            if not citation["url"].startswith("https://"):
-                raise LegacyRevisionError(f"citation URL must use https: {rel}")
+            if "url" in citation:
+                if not isinstance(citation["url"], str) or not citation["url"].strip():
+                    raise LegacyRevisionError(f"citation url must not be empty: {rel}")
+                if not citation["url"].startswith("https://"):
+                    raise LegacyRevisionError(f"citation URL must use https: {rel}")
             try:
                 date.fromisoformat(citation["accessed_on"])
             except ValueError as exc:
@@ -230,10 +290,13 @@ def _validate_request(path: Path, source: str) -> tuple[dict, bytes, str]:
                 raise LegacyRevisionError(f"citation removal reason must not be empty: {rel}")
             removal_seen.add(digest)
             clean_removals.append({"sha256": digest, "reason": removal["reason"].strip()})
-        normal_pages.append({
+        clean_page = {
             "path": rel, "reason": reason.strip(), "evidence": clean_evidence,
             "citation_removals": sorted(clean_removals, key=lambda x: x["sha256"]),
-        })
+        }
+        if clean_fu is not None:
+            clean_page["frontmatter_updates"] = clean_fu
+        normal_pages.append(clean_page)
     normal = {"version": CONTRACT_VERSION, "source_id": source,
               "valid_until": valid_until, "mode": mode,
               "pages": sorted(normal_pages, key=lambda x: x["path"])}
@@ -260,6 +323,54 @@ def _frontmatter_identity(meta: dict) -> dict:
     return {key: meta.get(key) for key in _IMMUTABLE_FRONTMATTER}
 
 
+def _registered_source_ids(context) -> set[str]:
+    """已登记来源：状态库 sources 表 ∪ vault 里的来源页。
+
+    两处都要看，因为它们记录的是不同的登记方式：走完整 ingest 的来源进状态库；
+    只以 vault 内一张来源页登记的（本地资料包、跨库复用等）不进状态库，但对
+    "这条 citation 指向的是不是本库真实存在的来源"而言同样有效。
+
+    来源页按 frontmatter 判定（``type: source``），不按文件名——``sources/`` 下允许放
+    非来源页，用文件名会把它们静默当成合法 source_id。
+    """
+    ids = set()
+    try:
+        import state_store
+        for row in state_store.status_rows(context["db"]):
+            ids.add(row["source_id"])
+    except Exception as exc:
+        raise LegacyRevisionError(f"cannot read registered sources: {exc}") from exc
+    sources_dir = context["vault"] / "sources"
+    if sources_dir.is_dir():
+        for page in sorted(sources_dir.glob("*.md")):
+            try:
+                meta, _body = mdpage.read_page(page)
+            except Exception:
+                continue
+            if meta.get("type") != "source":
+                continue
+            source_id = meta.get("source_id") or page.stem
+            if isinstance(source_id, str) and _SOURCE_ID.fullmatch(source_id):
+                ids.add(source_id)
+    return ids
+
+
+def _assert_registered_no_url_sources(context, item: dict, rel: str) -> None:
+    """任务 2 语义校验：无 url 的 evidence citation，其 source 必须是已登记 source_id。
+
+    结构校验（url 可选 + https 前缀）在 _validate_request；本函数在 _build_authorization
+    执行，因为那里才有 workspace 上下文（状态库 + vault sources 目录）。
+    """
+    missing = [ev["citation"]["source"] for ev in item["evidence"]
+               if "url" not in ev["citation"]]
+    if not missing:
+        return
+    registered = _registered_source_ids(context)
+    for source in missing:
+        if source not in registered:
+            raise LegacyRevisionError(
+                f"citation without url must name a registered source_id; "
+                f"got {source!r}; registered: {sorted(registered)}: {rel}")
 def _adoption_context(workspace: Path, source: str,
                       allowed_lock_holder: str | None = None,
                       lock_ttl_seconds: int = 1800) -> dict:
@@ -339,6 +450,9 @@ def _build_authorization(context: dict, request: dict, request_sha: str) -> tupl
         prior_paths = {p["path"] for p in prior["authorization"]["pages"]}
         if prior_paths != {p["path"] for p in request["pages"]}:
             raise LegacyRevisionError("revert page set must equal the completed operation page set")
+        prior_pages = {p["path"]: p for p in prior["authorization"]["pages"]}
+    else:
+        prior_pages = None
     pages = []
     initial_candidates = {}
     for item in request["pages"]:
@@ -384,7 +498,34 @@ def _build_authorization(context: dict, request: dict, request_sha: str) -> tupl
             initial_candidates[rel] = f"---\n{fm}---\n{old_body}".encode("utf-8")
         else:
             initial_candidates[rel] = raw
-        pages.append({
+        pre_identity = _frontmatter_identity(meta)
+        fu = item.get("frontmatter_updates")
+        expected_identity = pre_identity
+        page_immutable_pre = None
+        page_fu = None
+        if request["mode"] == "revert":
+            if fu is not None:
+                raise LegacyRevisionError(
+                    f"revert request must not declare frontmatter_updates: {rel}")
+            prior_page = (prior_pages or {}).get(rel)
+            if prior_page and prior_page.get("frontmatter_updates"):
+                # 回滚撤销先前的受控声明：期望态 = 先前 pre 快照的 identity（恢复 pre 态 aliases）
+                expected_identity = _frontmatter_identity(old_meta)
+                page_immutable_pre = pre_identity
+                page_fu = prior_page["frontmatter_updates"]
+        elif fu is not None:
+            aliases = list(pre_identity.get("aliases") or [])
+            for alias in fu["aliases"]["remove"]:
+                if alias not in aliases:
+                    raise LegacyRevisionError(
+                        f"frontmatter_updates removes absent alias {alias!r}: {rel}")
+            expected_identity = dict(pre_identity)
+            expected_identity["aliases"] = [
+                a for a in aliases if a not in set(fu["aliases"]["remove"])]
+            page_immutable_pre = pre_identity
+            page_fu = fu
+        _assert_registered_no_url_sources(context, item, rel)
+        page_entry = {
             "path": rel,
             "pre_sha256": _sha_bytes(raw),
             "pre_size": len(raw),
@@ -395,10 +536,15 @@ def _build_authorization(context: dict, request: dict, request_sha: str) -> tupl
                 "remove_sha256": [x["sha256"] for x in item["citation_removals"]],
                 "removals": item["citation_removals"],
             },
-            "immutable_frontmatter": _frontmatter_identity(meta),
+            "immutable_frontmatter": expected_identity,
             "immutable_frontmatter_sha256": _sha_bytes(
-                _json_bytes(_frontmatter_identity(meta))),
-        })
+                _json_bytes(expected_identity)),
+        }
+        if page_immutable_pre is not None:
+            page_entry["immutable_frontmatter_pre"] = page_immutable_pre
+        if page_fu is not None:
+            page_entry["frontmatter_updates"] = page_fu
+        pages.append(page_entry)
     identity = {
         "contract_version": CONTRACT_VERSION,
         "source_id": request["source_id"],
@@ -587,9 +733,15 @@ def _validate_candidates(op: Path, authorization: dict) -> tuple[dict[str, bytes
         if meta.get("status") != "proposed":
             raise LegacyRevisionError(f"candidate status must be proposed: {rel}")
         identity = _frontmatter_identity(meta)
-        if identity != page["immutable_frontmatter"]:
+        expected_identity = page["immutable_frontmatter"]
+        if identity != expected_identity:
+            declared = page.get("frontmatter_updates")
+            pre_identity = page.get("immutable_frontmatter_pre")
+            if declared is not None and pre_identity is not None and identity == pre_identity:
+                raise LegacyRevisionError(
+                    f"declared frontmatter update not applied: {rel}")
             changed = [key for key in _IMMUTABLE_FRONTMATTER
-                       if identity.get(key) != page["immutable_frontmatter"].get(key)]
+                       if identity.get(key) != expected_identity.get(key)]
             raise LegacyRevisionError(f"immutable frontmatter changed ({', '.join(changed)}): {rel}")
         pre_meta, _ = mdpage.read_page(op / "pre" / "files" / rel)
         old = list(pre_meta.get("citations") or [])
@@ -888,14 +1040,18 @@ def _verify_authorization(op: Path, workspace: Path) -> tuple[dict, bytes]:
         raise LegacyRevisionError(f"edit authorization unexpectedly names revert operation: {op}")
     if not isinstance(auth["pages"], list) or not auth["pages"]:
         raise LegacyRevisionError(f"authorization pages invalid: {op}")
-    page_keys = {
-        "citation_plan", "evidence", "immutable_frontmatter",
-        "immutable_frontmatter_sha256", "path", "pre_sha256", "pre_size", "reason",
-    }
     paths = []
     for page in auth["pages"]:
-        if not isinstance(page, dict) or set(page) != page_keys:
+        if (not isinstance(page, dict)
+                or set(page) not in (_AUTHORIZATION_PAGE_KEYS,
+                                     _AUTHORIZATION_PAGE_KEYS | _AUTHORIZATION_PAGE_OPTIONAL_KEYS)):
             raise LegacyRevisionError(f"authorization page schema drift: {op}")
+        if page.get("frontmatter_updates") is not None and not isinstance(
+                page["frontmatter_updates"], dict):
+            raise LegacyRevisionError(f"authorization frontmatter_updates schema drift: {op}")
+        if page.get("immutable_frontmatter_pre") is not None and not isinstance(
+                page["immutable_frontmatter_pre"], dict):
+            raise LegacyRevisionError(f"authorization immutable_frontmatter_pre schema drift: {op}")
         rel = _safe_rel(page["path"])
         if (not _SHA256.fullmatch(str(page["pre_sha256"]))
                 or not isinstance(page["pre_size"], int) or page["pre_size"] < 0
@@ -915,6 +1071,29 @@ def _verify_authorization(op: Path, workspace: Path) -> tuple[dict, bytes]:
         raise LegacyRevisionError(f"authorization adoption manifest identity drift: {op}")
     return auth, raw
 
+
+def emit_removal_sha(workspace, page_rel: str) -> list[dict]:
+    """只读导出目标页每条 citation 的规范 SHA-256 与可读摘要（供请求作者机械复制）。
+
+    零写入：不建 operation、不动 live、不需要授权。哈希口径与 _citation_hash 一致
+    （canonical JSON：ensure_ascii=False, indent=2, sort_keys=True + 换行）。
+    """
+    vault = Path(workspace) / "wiki"
+    rel = _safe_rel(page_rel)
+    path = vault / rel
+    if not path.is_file() or path.is_symlink() or evidence_fs.resolved_inside(path, vault) is None:
+        raise LegacyRevisionError(f"page missing or redirected: {rel}")
+    meta, _body = mdpage.read_page(path)
+    out = []
+    for citation in meta.get("citations") or []:
+        out.append({
+            "sha256": _citation_hash(citation),
+            "source": citation.get("source"),
+            "title": citation.get("title"),
+            "url": citation.get("url"),
+            "sections": citation.get("sections"),
+        })
+    return out
 
 def _verify_transition(op: Path, auth: dict) -> tuple[dict, bytes, dict[str, bytes],
                                                        dict[str, bytes]]:
