@@ -331,6 +331,56 @@ def _sources(meta: dict) -> set[str]:
     return out
 
 
+_CONTENT_EXCLUDED_TOP = {
+    ".obsidian", "Review-Queue", "_meta", "assets", "concepts", "graph", "sources",
+}
+
+
+def _content_page_paths(vault: Path) -> list[str]:
+    """内容页遍历（口径与 review-coverage 一致：R-08 评审清单 174 页）。
+
+    排除顶层 Review-Queue/_meta/concepts/graph/sources/.obsidian/assets、
+    *.generated.* 与顶层 log.md；overview.md 计入（归属可算、修订面仍由 _safe_rel 排除）。
+    """
+    out = []
+    for path in vault.rglob("*.md"):
+        rel = path.relative_to(vault).as_posix()
+        if rel == "log.md" or rel.endswith(".generated.md"):
+            continue
+        if rel.split("/", 1)[0] in _CONTENT_EXCLUDED_TOP:
+            continue
+        out.append(rel)
+    return sorted(out)
+
+
+def _owned_pages(vault: Path, source: str) -> list[str]:
+    """射程判据（R-08）：页属于来源 ⟺ 该页 source_refs 含该 source_id。
+
+    source_refs 在 _IMMUTABLE_FRONTMATTER 里、frontmatter_updates 只支持
+    aliases.remove，因此没有任何流水线路径能经一次修订扩大未来射程（测试钉死）。
+    """
+    owned = []
+    for rel in _content_page_paths(vault):
+        try:
+            meta, _body = mdpage.read_page(vault / rel)
+        except (OSError, UnicodeError, yaml.YAMLError):
+            continue
+        if source in _sources(meta):
+            owned.append(rel)
+    return sorted(owned)
+
+
+def _scope_digest(vault: Path, source: str) -> str:
+    """scope digest：该来源当前拥有的全部页按 (path, pre_sha256) 排序的规范形哈希。
+
+    页集合一变（增删页或任一拥有页内容变化）即变；采纳来源不用它（identity 保持
+    adoption_manifest_sha256 逐字节不变）。
+    """
+    entries = [(rel, _sha_bytes((vault / rel).read_bytes()))
+               for rel in _owned_pages(vault, source)]
+    return _sha_bytes(_json_bytes(entries))
+
+
 def _frontmatter_identity(meta: dict) -> dict:
     return {key: meta.get(key) for key in _IMMUTABLE_FRONTMATTER}
 
@@ -383,6 +433,156 @@ def _assert_registered_no_url_sources(context, item: dict, rel: str) -> None:
             raise LegacyRevisionError(
                 f"citation without url must name a registered source_id; "
                 f"got {source!r}; registered: {sorted(registered)}: {rel}")
+
+
+def _artifact_anchor(workspace: Path, source: str, snapshot: dict, *,
+                     kind: str, expected_kind: str) -> None:
+    """非采纳来源的「产出页定义」防篡改锚：产出 artifact 字节必须与账本 sha 一致。"""
+    artifacts = snapshot.get("artifacts") or []
+    rows = [a for a in artifacts if a["kind"] == expected_kind]
+    if len(rows) != 1:
+        raise LegacyRevisionError(
+            f"source {source} {expected_kind} artifact missing or duplicated (count={len(rows)})")
+    path = Path(rows[0]["path"])
+    if not path.is_file() or _sha_bytes(path.read_bytes()) != rows[0]["sha256"]:
+        raise LegacyRevisionError(
+            f"source {source} {expected_kind} artifact identity drift "
+            f"(ledger sha={rows[0]['sha256'][:12]}…, file mismatch): {kind}")
+
+
+def _window_statuses(db: Path, source: str) -> list[str]:
+    con = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        return [str(row[0]) for row in con.execute(
+            "SELECT status FROM ingest_progress WHERE source_id=? ORDER BY id",
+            (source,)).fetchall()]
+    finally:
+        con.close()
+
+
+def _ingest_context(workspace: Path, source: str, snapshot: dict) -> dict:
+    """摄取来源（format=pdf）的「已完成、可安全修订」判定（R-08 Q1，实测三源形态）。"""
+    workspace = Path(workspace).resolve()
+    vault = workspace / "wiki"
+    db = workspace / "pipeline-workspace" / "state" / "study-kb.sqlite"
+    src = snapshot["source"]
+    stages = snapshot.get("stages") or []
+    ledgers = snapshot.get("ledgers") or {}
+    actual_source = (src["domain"], src["format"], src["current_stage"],
+                     src["current_status"])
+    if actual_source != (src["domain"], "pdf", "lint", "published"):
+        raise LegacyRevisionError(
+            f"source {source} is not in settled ingest state: expected "
+            f"(domain, pdf, lint, published), actual {actual_source}")
+    last = stages[-1] if stages else None
+    if not last or (last["stage"], last["status"]) != ("lint", "done"):
+        raise LegacyRevisionError(
+            f"source {source} ingest not settled: last stage run is {last!r}, "
+            f"expected ('lint', 'done')")
+    if last.get("input_hash") != last.get("output_hash"):
+        raise LegacyRevisionError(
+            f"source {source} lint stage hashes diverge: input={last.get('input_hash')} "
+            f"output={last.get('output_hash')}")
+    _artifact_anchor(workspace, source, snapshot, kind="ingest",
+                     expected_kind="workorder")
+    if ledgers.get("work_orders") != 1:
+        raise LegacyRevisionError(
+            f"source {source} work_orders count {ledgers.get('work_orders')} != 1 "
+            f"(completed work order expected)")
+    statuses = _window_statuses(db, source)
+    in_progress = sorted({s for s in statuses if s in ("running", "failed")})
+    if in_progress:
+        raise LegacyRevisionError(
+            f"source {source} has in-progress ingest windows: {in_progress}")
+    if not statuses:
+        raise LegacyRevisionError(
+            f"source {source} has no ingest windows (ingest incomplete)")
+    if ledgers.get("window_reads") != len(statuses):
+        raise LegacyRevisionError(
+            f"source {source} window_reads {ledgers.get('window_reads')} != windows "
+            f"{len(statuses)}")
+    return {"workspace": workspace, "vault": vault, "db": db,
+            "snapshot": snapshot, "source": source}
+
+
+def _reuse_context(workspace: Path, source: str, snapshot: dict) -> dict:
+    """复用来源（format=external-vault-reuse）的「已完成、可安全修订」判定。"""
+    workspace = Path(workspace).resolve()
+    vault = workspace / "wiki"
+    db = workspace / "pipeline-workspace" / "state" / "study-kb.sqlite"
+    src = snapshot["source"]
+    stages = snapshot.get("stages") or []
+    ledgers = snapshot.get("ledgers") or {}
+    actual_source = (src["domain"], src["format"], src["current_stage"],
+                     src["current_status"])
+    if actual_source != (src["domain"], "external-vault-reuse", "reused", "published"):
+        raise LegacyRevisionError(
+            f"source {source} is not in settled reuse state: expected "
+            f"(domain, external-vault-reuse, reused, published), actual {actual_source}")
+    last = stages[-1] if stages else None
+    if not last or (last["stage"], last["status"]) != ("reused", "done"):
+        raise LegacyRevisionError(
+            f"source {source} reuse not settled: last stage run is {last!r}, "
+            f"expected ('reused', 'done')")
+    if last.get("input_hash") != last.get("output_hash"):
+        raise LegacyRevisionError(
+            f"source {source} reuse stage hashes diverge: input={last.get('input_hash')} "
+            f"output={last.get('output_hash')}")
+    _artifact_anchor(workspace, source, snapshot, kind="reuse",
+                     expected_kind="reuse_evidence")
+    if any(ledgers.values()):
+        raise LegacyRevisionError(
+            f"source {source} reuse ingest ledgers must remain zero: {ledgers}")
+    return {"workspace": workspace, "vault": vault, "db": db,
+            "snapshot": snapshot, "source": source}
+
+
+def _revision_context(workspace: Path, source: str, *,
+                      allowed_lock_holder: str | None = None,
+                      lock_ttl_seconds: int = 1800) -> dict:
+    """按来源种类的修订准入（R-08）。采纳路径保留今天全部断言与报错；其余按种类。"""
+    workspace = Path(workspace).resolve()
+    vault = workspace / "wiki"
+    db = workspace / "pipeline-workspace" / "state" / "study-kb.sqlite"
+    if not vault.is_dir() or not db.is_file():
+        raise LegacyRevisionError("wiki vault or state database is missing")
+    evidence_dir = workspace / "pipeline-workspace" / "adoptions" / source
+    if (evidence_dir / "manifest.json").is_file():
+        context = _adoption_context(workspace, source,
+                                    allowed_lock_holder=allowed_lock_holder,
+                                    lock_ttl_seconds=lock_ttl_seconds)
+        kind = "adoption"
+    else:
+        snapshot = vault_adoption._state_snapshot(db, source)
+        if snapshot and snapshot.get("schema_missing"):
+            raise LegacyRevisionError(
+                f"source {source} state schema incomplete: "
+                f"{', '.join(snapshot['schema_missing'])}")
+        evidence_fs.reject_lock(snapshot, lock_ttl_seconds, allowed_lock_holder,
+                                command="revise-adopted", error=LegacyRevisionError)
+        if not snapshot or not snapshot.get("source"):
+            raise LegacyRevisionError(f"source not registered in state: {source}")
+        fmt = snapshot["source"].get("format")
+        if fmt == "pdf":
+            context = _ingest_context(workspace, source, snapshot)
+            kind = "ingest"
+        elif fmt == "external-vault-reuse":
+            context = _reuse_context(workspace, source, snapshot)
+            kind = "reuse"
+        else:
+            raise LegacyRevisionError(
+                f"source {source} format {fmt!r} has no revision admission path")
+    context["kind"] = kind
+    if kind == "adoption":
+        # 采纳来源射程保持 manifest 成员判定（今天行为逐字节不变；实证
+        # manifest["pages"] == source_refs 归属 128/128，两者当前等价）。
+        context["scope_paths"] = [entry["path"] for entry in context["manifest"]["pages"]]
+    else:
+        context["scope_paths"] = _owned_pages(context["vault"], source)
+    context["scope_digest"] = _scope_digest(context["vault"], source)
+    return context
+
+
 def _adoption_context(workspace: Path, source: str,
                       allowed_lock_holder: str | None = None,
                       lock_ttl_seconds: int = 1800) -> dict:
@@ -451,7 +651,7 @@ def _citation_hash(value) -> str:
 
 def _build_authorization(context: dict, request: dict, request_sha: str) -> tuple[dict, dict]:
     vault = context["vault"]
-    manifest_paths = {entry["path"] for entry in context["manifest"]["pages"]}
+    scope_paths = set(context["scope_paths"])
     revert_op = None
     if request["mode"] == "revert":
         revert_id = request["revert_operation"]
@@ -469,8 +669,12 @@ def _build_authorization(context: dict, request: dict, request_sha: str) -> tupl
     initial_candidates = {}
     for item in request["pages"]:
         rel = item["path"]
-        if rel not in manifest_paths:
-            raise LegacyRevisionError(f"target is not in adoption manifest: {rel}")
+        if rel not in scope_paths:
+            if context.get("kind") == "adoption":
+                raise LegacyRevisionError(f"target is not in adoption manifest: {rel}")
+            raise LegacyRevisionError(
+                f"target is not owned by source {request['source_id']} "
+                f"(source_refs lacks {request['source_id']}): {rel}")
         path = vault / rel
         if not path.is_file() or path.is_symlink() or evidence_fs.resolved_inside(path, vault) is None:
             raise LegacyRevisionError(f"target is missing or redirected: {rel}")
@@ -560,13 +764,16 @@ def _build_authorization(context: dict, request: dict, request_sha: str) -> tupl
     identity = {
         "contract_version": CONTRACT_VERSION,
         "source_id": request["source_id"],
-        "adoption_manifest_sha256": context["manifest_sha256"],
         "request_sha256": request_sha,
         "valid_until": request["valid_until"],
         "mode": request["mode"],
         "revert_operation": request.get("revert_operation"),
         "pages": pages,
     }
+    if context["kind"] == "adoption":
+        identity["adoption_manifest_sha256"] = context["manifest_sha256"]
+    else:
+        identity["scope_digest"] = context["scope_digest"]
     operation_id = _sha_bytes(_json_bytes(identity))[:20]
     authorization = dict(identity)
     authorization["operation_id"] = operation_id
@@ -1030,9 +1237,15 @@ def _find_request_operation(root: Path, request_sha: str) -> Path | None:
 
 def _verify_authorization(op: Path, workspace: Path) -> tuple[dict, bytes]:
     auth, raw = _load_canonical_json(op / "authorization.json", "authorization")
+    if "adoption_manifest_sha256" in auth:
+        anchor = "adoption_manifest_sha256"
+    elif "scope_digest" in auth:
+        anchor = "scope_digest"
+    else:
+        raise LegacyRevisionError(f"authorization schema drift: {op}")
     expected_keys = {
-        "adoption_manifest_sha256", "contract_version", "mode", "operation_id",
-        "pages", "request_sha256", "revert_operation", "source_id", "valid_until",
+        anchor, "contract_version", "mode", "operation_id", "pages",
+        "request_sha256", "revert_operation", "source_id", "valid_until",
     }
     if not isinstance(auth, dict) or set(auth) != expected_keys:
         raise LegacyRevisionError(f"authorization schema drift: {op}")
@@ -1041,7 +1254,7 @@ def _verify_authorization(op: Path, workspace: Path) -> tuple[dict, bytes]:
             or auth["source_id"] != op.parent.name
             or auth["mode"] not in {"edit", "revert"}
             or not _SHA256.fullmatch(str(auth["request_sha256"]))
-            or not _SHA256.fullmatch(str(auth["adoption_manifest_sha256"]))):
+            or not _SHA256.fullmatch(str(auth[anchor]))):
         raise LegacyRevisionError(f"authorization identity drift: {op}")
     _parse_datetime(auth["valid_until"])
     if auth["mode"] == "revert":
@@ -1076,11 +1289,40 @@ def _verify_authorization(op: Path, workspace: Path) -> tuple[dict, bytes]:
     identity = {key: auth[key] for key in expected_keys if key != "operation_id"}
     if _sha_bytes(_json_bytes(identity))[:20] != op.name:
         raise LegacyRevisionError(f"authorization operation id is not derived from its identity: {op}")
-    manifest_path = (Path(workspace) / "pipeline-workspace" / "adoptions" /
-                     auth["source_id"] / "manifest.json")
-    _manifest, manifest_raw = _load_canonical_json(manifest_path, "adoption manifest")
-    if _sha_bytes(manifest_raw) != auth["adoption_manifest_sha256"]:
-        raise LegacyRevisionError(f"authorization adoption manifest identity drift: {op}")
+    if anchor == "adoption_manifest_sha256":
+        manifest_path = (Path(workspace) / "pipeline-workspace" / "adoptions" /
+                         auth["source_id"] / "manifest.json")
+        _manifest, manifest_raw = _load_canonical_json(manifest_path, "adoption manifest")
+        if _sha_bytes(manifest_raw) != auth["adoption_manifest_sha256"]:
+            raise LegacyRevisionError(f"authorization adoption manifest identity drift: {op}")
+    else:
+        # 非采纳来源的「页集合定义」锚 = 产出页 artifact（workorder / reuse_evidence）
+        # 字节与账本一致；scope_digest 本身已由 operation_id 派生校验覆盖。
+        db = Path(workspace) / "pipeline-workspace" / "state" / "study-kb.sqlite"
+        con = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            src = con.execute(
+                "SELECT format FROM sources WHERE source_id=?",
+                (auth["source_id"],)).fetchone()
+            fmt = str(src[0]) if src else None
+            expected_kind = {"pdf": "workorder",
+                             "external-vault-reuse": "reuse_evidence"}.get(fmt)
+            if expected_kind is None:
+                raise LegacyRevisionError(
+                    f"authorization definition anchor kind unknown: {op}")
+            rows = con.execute(
+                "SELECT path,sha256 FROM artifacts WHERE source_id=? AND kind=? "
+                "ORDER BY id", (auth["source_id"], expected_kind)).fetchall()
+        finally:
+            con.close()
+        if len(rows) != 1:
+            raise LegacyRevisionError(
+                f"authorization {expected_kind} definition anchor drift: {op}")
+        artifact_path = Path(rows[0][0])
+        if (not artifact_path.is_file()
+                or _sha_bytes(artifact_path.read_bytes()) != rows[0][1]):
+            raise LegacyRevisionError(
+                f"authorization {expected_kind} definition anchor identity drift: {op}")
     return auth, raw
 
 
@@ -1284,7 +1526,7 @@ def evidence_findings(workspace: Path) -> list[dict]:
 def _locked_run(*, workspace: Path, source: str, request: dict, request_sha: str,
                 request_path: Path, apply: bool, abort: bool, recover: str | None,
                 expect_live_manifest: Path | None, lock_ttl_seconds: int) -> dict:
-    context = _adoption_context(workspace, source, lock_ttl_seconds=lock_ttl_seconds)
+    context = _revision_context(workspace, source, lock_ttl_seconds=lock_ttl_seconds)
     root = _operation_root(workspace, source)
     op = _find_request_operation(root, request_sha)
     hard_findings = [finding for finding in evidence_findings(workspace)
@@ -1349,7 +1591,7 @@ def _locked_run(*, workspace: Path, source: str, request: dict, request_sha: str
         raise LegacyRevisionError(
             f"active vault lock held by {current['holder'] if current else 'unknown'}")
     try:
-        context = _adoption_context(workspace, source, allowed_lock_holder=holder,
+        context = _revision_context(workspace, source, allowed_lock_holder=holder,
                                     lock_ttl_seconds=lock_ttl_seconds)
         if phase == "none":
             _assert_not_expired(authorization["valid_until"])
