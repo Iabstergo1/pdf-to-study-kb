@@ -2627,6 +2627,100 @@ def cmd_revise_adopted(args):
         print(f"[OK] revise-adopted {result['message']}")
 
 
+def review_content_pages(workspace) -> list[str]:
+    """内容页遍历（与证据强度普查同一口径，见 evidence-strength-census-2026-08-05.md）：
+    基础排除复用 legacy_revision._EXCLUDED_TOP（口径收敛到一处，不手抄第二份清单），
+    追加内容页专属排除（sources/concepts/graph）与 log.md、*.generated.*。
+    注意 graph_model.collect_graph_pages 的口径不同（它包含 sources 与固定 _DERIVED 名单），
+    不要混用；本函数是台账覆盖率的唯一口径。"""
+    import legacy_revision
+    vault = Path(workspace) / "wiki"
+    exclude_top = legacy_revision._EXCLUDED_TOP | {"sources", "concepts", "graph"}
+    out = []
+    if not vault.is_dir():
+        return out
+    for f in sorted(vault.rglob("*.md")):
+        rel = f.relative_to(vault).as_posix()
+        if rel.split("/", 1)[0] in exclude_top:
+            continue
+        if f.name == "log.md" or "generated" in f.name:
+            continue
+        out.append(rel)
+    return out
+
+
+def _review_domain_counts(pages) -> dict:
+    counts = {}
+    for rel in pages:
+        parts = rel.split("/")
+        key = "/".join(parts[:-1]) if len(parts) > 1 else rel
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def cmd_review_coverage(args):
+    """内容审查台账覆盖率（只读）。未登记不判失败——作用是把"还剩多少"随时可查，
+    不是当门禁逼人把台账填满。error 仅两类：台账指向不存在的页/报告。"""
+    import yaml
+    workspace = _workspace_root()
+    pages = review_content_pages(workspace)
+    ledger_path = workspace / "wiki" / "Review-Queue" / "content-review-ledger.yaml"
+    if not ledger_path.is_file():
+        print(f"内容页 {len(pages)}   台账未建立   未登记 {len(pages)}   覆盖率 0.0%")
+        print("未登记页（按域）:")
+        for key, n in sorted(_review_domain_counts(pages).items()):
+            print(f"  {key}   {n}")
+        return 0
+    try:
+        ledger = yaml.safe_load(ledger_path.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        print(f"[FAIL] 台账不可读: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    entries = ledger.get("pages") if isinstance(ledger, dict) else None
+    if not isinstance(entries, dict):
+        print("[FAIL] 台账 pages 字段必须是映射", file=sys.stderr)
+        raise SystemExit(1)
+    valid = set(pages)
+    registered = set()
+    findings_open = set()
+    errors = []
+    for rel, evs in sorted(entries.items()):
+        if rel not in valid:
+            errors.append(f"台账条目指向不存在的页: {rel}")
+            continue
+        registered.add(rel)
+        if not isinstance(evs, list):
+            continue
+        last_outcome = None
+        for ev in evs:
+            if not isinstance(ev, dict):
+                continue
+            if ev.get("outcome") in {"no-findings", "findings-open", "findings-reworked"}:
+                last_outcome = ev.get("outcome")
+            report = ev.get("report")
+            if isinstance(report, str) and report:
+                if not (workspace / "pipeline-workspace" / "reports" / report).is_file():
+                    errors.append(f"台账 report 指向不存在的报告: {rel}: {report}")
+        if last_outcome == "findings-open":
+            findings_open.add(rel)
+    unregistered = [p for p in pages if p not in registered]
+    coverage = len(registered) / len(pages) if pages else 0.0
+    print(f"内容页 {len(pages)}   已登记 {len(registered)}   未登记 {len(unregistered)}   "
+          f"覆盖率 {coverage * 100:.1f}%")
+    print(f"  findings-open 的页: {len(findings_open)}")
+    print("未登记页（按域）:")
+    for key, n in sorted(_review_domain_counts(unregistered).items()):
+        print(f"  {key}   {n}")
+    for err in errors:
+        print(f"[FAIL] {err}", file=sys.stderr)
+    if errors:
+        print(f"\n[FAIL] review-coverage: {len(errors)} 条台账条目指向不存在的页/报告",
+              file=sys.stderr)
+        raise SystemExit(1)
+    print("[OK] review-coverage: 0 errors（未登记不判失败，覆盖率供参考）")
+    return 0
+
+
 def cmd_ingest_stats(args):
     """只读代理指标（零 LLM，不改任何行）：窗口/阶段耗时/重跑/lint 失败/页数估算/违规分布。
     诚实口径：token/费用拿不到就不伪造；耗时与页数的口径见输出 note。"""
@@ -2892,6 +2986,9 @@ def main():
                      help="恢复 committing operation（必须与 --apply 同用）")
     lrp.add_argument("--expect-live-manifest",
                      help="冲突恢复时的 JSON：vault 相对路径到当前 SHA-256")
+    subparsers.add_parser(
+        "review-coverage",
+        help="内容审查台账覆盖率（只读；未登记不判失败）")
     rsp = subparsers.add_parser(
         "reuse-source", help="复用只读 published vault 的来源（默认 dry-run；--apply 登记专用终态）")
     rsp.add_argument("--source", required=True, help="目标 vault 的 source_id")
@@ -3061,6 +3158,7 @@ def main():
         'init-vault': cmd_init_vault,
         'adopt-vault': cmd_adopt_vault,
         'revise-adopted': cmd_revise_adopted,
+        'review-coverage': cmd_review_coverage,
         'reuse-source': cmd_reuse_source,
         'reseal-source': cmd_reseal_source,
         'apply-obsidian-style': cmd_apply_obsidian_style,

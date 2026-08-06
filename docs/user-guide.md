@@ -318,7 +318,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 ### 5.3 底层 CLI 操作（高级排障 / 手动重跑）
 
 > 所有 skill 背后都是 `python scripts/pipeline.py <command>`。下面按生命周期分组，标注**必填/可选参数**。
-> 共 **50 个**子命令（完整实现映射见开发文档 §3；含 `adopt-vault` 既有库基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用、`reseal-source` v1→v2 证据重封、`vault-lint` 全库渲染安全健康门禁、`lint --source kb-save --session <run_id>` 会话发布路径与 `retract-source` 证据先行撤库）。
+> 共 **51 个**子命令（完整实现映射见开发文档 §3；含 `adopt-vault` 既有库基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用、`reseal-source` v1→v2 证据重封、`vault-lint` 全库渲染安全健康门禁、`lint --source kb-save --session <run_id>` 会话发布路径与 `retract-source` 证据先行撤库）。
 
 **状态与维护：**
 

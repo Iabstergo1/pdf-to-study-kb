@@ -3,7 +3,7 @@
 > 本文面向开发者，描述本仓库的架构、模块职责、数据契约、命令层与测试。
 > 所有结论以**源码为准**。
 > 面向使用者的操作说明见 [用户使用说明](user-guide.md)。
-> 版本锚点：当前工作树（2026-08-02 增量核对）；**50 个 CLI 子命令**（含 `adopt-vault` 基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用与 `reseal-source` 证据重封）/ 11 个技能。测试数量以 `pytest --collect-only -q` 为准——本轮两次证明精确计数写进文档当场就腐烂，故不再保留任何快照。
+> 版本锚点：当前工作树（2026-08-02 增量核对）；**51 个 CLI 子命令**（含 `adopt-vault` 基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用与 `reseal-source` 证据重封）/ 11 个技能。测试数量以 `pytest --collect-only -q` 为准——本轮两次证明精确计数写进文档当场就腐烂，故不再保留任何快照。
 > 2026-07-11 六阶段重构后的新机制（§7 已更新，其余章节以源码为准）：统一 callout 解析器
 > `page_rules.parse_callouts`（唯一语法入口，错误不吞节点）、渲染安全唯一实现 + **vault preflight
 > 事务隔离**（published 旧伤阻断 promote 但不回滚当前批）、`vault-lint` 全库健康门禁、归属≠记账
@@ -30,7 +30,7 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 
 | 入口 | 文件 | 说明 |
 |------|------|------|
-| 唯一 CLI 入口 | `scripts/pipeline.py` → `main()` | argparse 分发 **50 个**子命令（见 §3；含 `adopt-vault` / `revise-adopted` / `reuse-source` / `reseal-source` 四条确定性旁路/维护路径）。 |
+| 唯一 CLI 入口 | `scripts/pipeline.py` → `main()` | argparse 分发 **51 个**子命令（见 §3；含 `adopt-vault` / `revise-adopted` / `reuse-source` / `reseal-source` 四条确定性旁路/维护路径）。 |
 | LLM 编排入口 | `.claude/skills/ingest/SKILL.md`（+ `references/*`） | 端到端入库 skill；常规 ingest 是唯一 LLM 写库步骤，legacy-vault 接管分支为零 LLM。 |
 | 无人值守续跑 | `scripts/resume-ingest.ps1` | OS 调度触发的有界续跑脚本（PowerShell）。 |
 | 可选后端安装 | `scripts/install_mineru.py` → `main()` | 按机型自动安装 MinerU + 匹配 CUDA torch。 |
@@ -40,7 +40,7 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 
 | 模块 | 职责 | 关键符号 |
 |------|------|----------|
-| `pipeline.py` | CLI 分发 + 各阶段编排（每个 `cmd_*` 一个子命令，共 50 个） | `main()`、`cmd_*` 函数族、`_workspace_root()`、`_vault_dir()`、`_staging_dir()` |
+| `pipeline.py` | CLI 分发 + 各阶段编排（每个 `cmd_*` 一个子命令，共 51 个） | `main()`、`cmd_*` 函数族、`_workspace_root()`、`_vault_dir()`、`_staging_dir()` |
 | `state_store.py` | 单一业务 SQLite 状态机（**8 张表**）+ 原子阶段 API + 轮次 token | `STAGES`、`NEXT`、`start_stage/complete_stage/fail_stage`、`should_run_stage`、`adopt_source`、`reuse_source`、`reopen_source`、`reset_source`、`RESETTABLE_TARGETS`、`resolve_review_proposals`、`source_stats`、`*_window`、`round_anchor`、`window_reads_in_round`、`export_source_rows`、`purge_source_ledgers` |
 | `vault_adoption.py` | 既有 vault 的只读接管计划、ZIP/页面集合核验、不可变逐页证据、canonical source 页与历史基线/接管后 live drift 分层 | `AdoptionError`、`build_plan`、`write_evidence`、`write_source_page` |
 | `legacy_revision.py` | adopted legacy 页的请求校验、授权/pre/candidate/post sidecar、全 vault overlay lint、哈希链事件与可恢复切换；普通 lint/vault-lint 共用证据核验 | `LegacyRevisionError`、`run`、`evidence_findings`、`CONTRACT_VERSION` |
@@ -207,7 +207,7 @@ pdf-to-study-kb/
 ├── .gitattributes
 │
 ├── scripts/                     # ⭐ 全部业务逻辑（零 LLM）
-│   ├── pipeline.py              # 唯一 CLI 入口（50 子命令）
+│   ├── pipeline.py              # 唯一 CLI 入口（51 子命令）
 │   ├── state_store.py           # 状态机 SQLite（8 张表：sources/source_stage_runs/artifacts/
 │   │                            #   work_orders/source_locks/review_proposals/ingest_progress/
 │   │                            #   window_reads）
