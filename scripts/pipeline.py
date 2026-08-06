@@ -2629,12 +2629,13 @@ def cmd_revise_adopted(args):
 
 def review_content_pages(workspace) -> list[str]:
     """内容页遍历（与证据强度普查同一口径，见 evidence-strength-census-2026-08-05.md）：
-    wiki/ 下排除 Review-Queue/sources/concepts/graph/_meta/assets/.obsidian 与 *.generated.*。
+    基础排除复用 legacy_revision._EXCLUDED_TOP（口径收敛到一处，不手抄第二份清单），
+    追加内容页专属排除（sources/concepts/graph）与 log.md、*.generated.*。
     注意 graph_model.collect_graph_pages 的口径不同（它包含 sources 与固定 _DERIVED 名单），
     不要混用；本函数是台账覆盖率的唯一口径。"""
+    import legacy_revision
     vault = Path(workspace) / "wiki"
-    exclude_top = {"Review-Queue", "sources", "concepts", "graph",
-                   "_meta", "assets", ".obsidian"}
+    exclude_top = legacy_revision._EXCLUDED_TOP | {"sources", "concepts", "graph"}
     out = []
     if not vault.is_dir():
         return out
@@ -2642,7 +2643,7 @@ def review_content_pages(workspace) -> list[str]:
         rel = f.relative_to(vault).as_posix()
         if rel.split("/", 1)[0] in exclude_top:
             continue
-        if "generated" in f.name:
+        if f.name == "log.md" or "generated" in f.name:
             continue
         out.append(rel)
     return out
@@ -2690,15 +2691,18 @@ def cmd_review_coverage(args):
         registered.add(rel)
         if not isinstance(evs, list):
             continue
+        last_outcome = None
         for ev in evs:
             if not isinstance(ev, dict):
                 continue
-            if ev.get("outcome") == "findings-open":
-                findings_open.add(rel)
+            if ev.get("outcome") in {"no-findings", "findings-open", "findings-reworked"}:
+                last_outcome = ev.get("outcome")
             report = ev.get("report")
             if isinstance(report, str) and report:
                 if not (workspace / "pipeline-workspace" / "reports" / report).is_file():
                     errors.append(f"台账 report 指向不存在的报告: {rel}: {report}")
+        if last_outcome == "findings-open":
+            findings_open.add(rel)
     unregistered = [p for p in pages if p not in registered]
     coverage = len(registered) / len(pages) if pages else 0.0
     print(f"内容页 {len(pages)}   已登记 {len(registered)}   未登记 {len(unregistered)}   "

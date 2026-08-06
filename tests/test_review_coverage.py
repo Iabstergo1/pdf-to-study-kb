@@ -27,7 +27,7 @@ def _make_vault(tmp_path):
         page.write_text("---\ntype: concept\nstatus: published\n---\n正文\n",
                         encoding="utf-8")
     for rel in ("Review-Queue/x.md", "sources/y.md", "concepts/_registry.yaml",
-                "graph/g.md", "index.generated.md"):
+                "graph/g.md", "index.generated.md", "log.md"):
         page = wiki / rel
         page.parent.mkdir(parents=True, exist_ok=True)
         page.write_text("x", encoding="utf-8")
@@ -51,7 +51,7 @@ def _write_report(tmp_path, rel):
 
 
 def test_content_page_count_excludes_dirs_and_generated(tmp_path):
-    """内容页口径：排除 Review-Queue/sources/concepts/graph 与 *.generated.*。"""
+    """内容页口径：排除 Review-Queue/sources/concepts/graph、log.md 与 *.generated.*。"""
     _make_vault(tmp_path)
     result = _run(["review-coverage"], tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -114,3 +114,22 @@ def test_unregistered_is_not_failure(tmp_path):
     assert result.returncode == 0
     assert "未登记 4" in result.stdout
     assert "[FAIL]" not in result.stdout + result.stderr
+
+
+def test_findings_open_counts_only_latest_entry(tmp_path):
+    """findings-open 语义：只算该页最新一条 entry 为 findings-open 的页（复审后关闭的不算）。"""
+    _make_vault(tmp_path)
+    _write_report(tmp_path, "kb-qa/r1.md")
+    _write_report(tmp_path, "kb-qa/r2.md")
+    _write_ledger(tmp_path, {
+        "topics/t.md": [
+            {"date": "2026-08-03", "report": "kb-qa/r1.md", "outcome": "findings-open"},
+            {"date": "2026-08-05", "report": "kb-qa/r2.md", "outcome": "findings-reworked"},
+        ],
+        "overview.md": [
+            {"date": "2026-08-03", "report": "kb-qa/r1.md", "outcome": "findings-open"},
+        ],
+    })
+    result = _run(["review-coverage"], tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "findings-open 的页: 1" in result.stdout
