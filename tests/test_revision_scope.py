@@ -397,3 +397,44 @@ def test_ingest_authorization_uses_scope_digest_anchor(tmp_path):
     assert "scope_digest" in authorization
     assert "adoption_manifest_sha256" not in authorization
     assert authorization["scope_digest"] == context["scope_digest"]
+
+
+def test_switch_ledgers_adoption_requires_zero(tmp_path):
+    """R-08 补正：采纳来源切换期三台账必须全零（今天行为不变）。"""
+    _adoption_workspace(tmp_path)
+    context = legacy_revision._revision_context(tmp_path, ADOPT)
+    assert context["kind"] == "adoption"
+    legacy_revision._verify_switch_ledgers(
+        context, {"source_id": ADOPT})
+    db = tmp_path / "pipeline-workspace" / "state" / "study-kb.sqlite"
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO work_orders(source_id,path,registry_hash,write_scope_json,"
+        "created_at,round) VALUES (?,?,?,?,?,?)",
+        (ADOPT, "x.yaml", None, "{}", "2026-08-07T00:00:00+00:00", 1))
+    con.commit()
+    con.close()
+    with pytest.raises(legacy_revision.LegacyRevisionError) as excinfo:
+        legacy_revision._verify_switch_ledgers(
+            context, {"source_id": ADOPT})
+    assert "ingest ledger changed during switch" in str(excinfo.value)
+
+
+def test_switch_ledgers_ingest_settled_shape(tmp_path):
+    """R-08 补正：摄取来源切换期要求落定形态（work_orders=1、窗口全 finished）。"""
+    _ingest_workspace(tmp_path)
+    context = legacy_revision._revision_context(tmp_path, INGEST)
+    assert context["kind"] == "ingest"
+    legacy_revision._verify_switch_ledgers(
+        context, {"source_id": INGEST})
+    db = tmp_path / "pipeline-workspace" / "state" / "study-kb.sqlite"
+    con = sqlite3.connect(db)
+    con.execute(
+        "UPDATE ingest_progress SET status='running' WHERE source_id=? "
+        "AND window_id=?", (INGEST, "w0000"))
+    con.commit()
+    con.close()
+    with pytest.raises(legacy_revision.LegacyRevisionError) as excinfo:
+        legacy_revision._verify_switch_ledgers(
+            context, {"source_id": INGEST})
+    assert "windows changed during switch" in str(excinfo.value)

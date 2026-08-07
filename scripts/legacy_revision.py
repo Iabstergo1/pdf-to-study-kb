@@ -1171,24 +1171,57 @@ def _forward(op: Path, authorization: dict, context: dict, *,
     derived = wiki_gate.derived_violations(vault)
     if derived:
         raise LegacyRevisionError(f"post switch derived verification failed: {derived[0]}")
-    con = sqlite3.connect(context["db"].resolve().as_uri() + "?mode=ro", uri=True)
-    try:
-        for table in ("work_orders", "ingest_progress", "window_reads"):
-            count = con.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE source_id=?",
-                (authorization["source_id"],),
-            ).fetchone()[0]
-            if count:
-                raise LegacyRevisionError(
-                    f"adopted source ingest ledger changed during switch: {table}={count}")
-    finally:
-        con.close()
+    _verify_switch_ledgers(context, authorization)
     _write_event(op, "completed", {
         "log_line": transition["log"]["line"],
         "log_line_sha256": transition["log"]["line_sha256"],
         "post_manifest_sha256": transition["post_manifest_sha256"],
     })
     _fault_point("completed")
+
+
+def _verify_switch_ledgers(context: dict, authorization: dict) -> None:
+    """切换期的来源台账复核（按来源种类，R-08 补正）。
+
+    采纳/复用：三个 ingest 台账必须全零（采纳今天的行为逐字节不变）；
+    摄取：work_orders 恒为 1、无 running/failed 窗口、window_reads 与窗口数一致——
+    即操作期间台账仍保持「已完成、可安全修订」的落定形态（操作持 vault 锁，
+    台账变化只能来自锁外改库，检测到即拒）。
+    """
+    source = authorization["source_id"]
+    con = sqlite3.connect(context["db"].resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        counts = {}
+        for table in ("work_orders", "ingest_progress", "window_reads"):
+            counts[table] = con.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE source_id=?",
+                (source,)).fetchone()[0]
+        kind = context.get("kind")
+        if kind in ("adoption", "reuse"):
+            bad = {t: c for t, c in counts.items() if c}
+            if bad:
+                raise LegacyRevisionError(
+                    f"{kind} source ingest ledger changed during switch: {bad}")
+        elif kind == "ingest":
+            if counts["work_orders"] != 1:
+                raise LegacyRevisionError(
+                    f"ingest source work_orders changed during switch: "
+                    f"{counts['work_orders']}")
+            statuses = [str(r[0]) for r in con.execute(
+                "SELECT status FROM ingest_progress WHERE source_id=? ORDER BY id",
+                (source,)).fetchall()]
+            in_progress = sorted({s for s in statuses if s in ("running", "failed")})
+            if in_progress:
+                raise LegacyRevisionError(
+                    f"ingest source windows changed during switch: {in_progress}")
+            if counts["window_reads"] != len(statuses):
+                raise LegacyRevisionError(
+                    f"ingest source window_reads changed during switch: "
+                    f"{counts['window_reads']} != {len(statuses)}")
+        else:
+            raise LegacyRevisionError(f"unknown revision kind during switch: {kind}")
+    finally:
+        con.close()
 
 
 def _rollback(op: Path, authorization: dict, context: dict,
