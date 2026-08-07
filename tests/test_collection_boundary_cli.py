@@ -96,9 +96,15 @@ def _fingerprint(root: Path):
     import hashlib
     if not root.exists():
         return None
+    # scratch 目录（sanctioned 可写区 / 缓存）不属于「源码与测试资产」，排除出指纹：
+    # tmp/ 是 _sandbox.py 白名单指定的测试可写区，.pytest_cache/ 与 __pycache__/ 是缓存，
+    # 把它们纳入会让守卫监视套件自己被授权污染的目录（见 §4 flake）。
+    scratch_tops = {"tmp", ".pytest_cache", "__pycache__"}
     h = hashlib.sha256()
     for f in sorted(root.rglob("*")):
         if f.is_file():
+            if f.relative_to(root).parts[0] in scratch_tops:
+                continue
             st = f.stat()
             h.update(f.relative_to(root).as_posix().encode("utf-8"))
             h.update(hashlib.sha256(f.read_bytes()).digest())
