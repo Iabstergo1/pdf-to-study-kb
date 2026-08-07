@@ -27,24 +27,74 @@ def _tracked_markdown() -> list:
     return [ROOT / line for line in out.splitlines() if line.strip()]
 
 
+#: 声明命令表的三份文档。README 必须在内——见 test_docs_command_count_matches_cli 的注释。
+_COMMAND_DOCS = ("README.md", "docs/user-guide.md", "docs/developer-guide.md")
+
+
+def _documented_commands(text: str) -> set:
+    """文档表格里出现过的子命令名。
+
+    判据：表格行内任一反引号片段的**首个 token**。三份文档的列序不同
+    （developer-guide §3 把命令放在第二列，且写成 `cmd --a --b` 的完整签名），
+    所以不能锚在行首，只能按 token 认。
+    """
+    import re
+    out = set()
+    for line in text.splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        for span in re.findall(r"`([^`]+)`", line):
+            head = span.strip().split()
+            if head:
+                out.add(head[0])
+    return out
+
+
 def test_docs_command_count_matches_cli():
     # 文档守卫（复审教训：README/指南的命令数与 CLI 真值脱节无人发现）：
-    # ① 两份指南里**每一处**"N 个子命令"声明都必须等于 argparse 真值（防某处更新、他处残留旧数）；
-    # ② vault-lint 与 kb-save 会话发布路径必须在 CLI 命令表里有正式条目（表行），不只是正文提一句。
+    # ① **三份**文档里每一处"N 个子命令"声明都必须等于 argparse 真值。
+    #    README 曾不在射程，2026-08-08 复审实证代价：`375b640` 只改了两份指南，
+    #    README 的两处仍停在 50 而守卫全绿放行——教训写在注释里、射程却没跟上。
+    # ② 计数对得上 ≠ 每条命令都有条目。同一轮里 `review-coverage` 把计数顶到 51，
+    #    却在三份文档里一个表行都没有，**计数断言反而掩盖了漏登记**。故加 ③。
+    # ③ argparse 的每一条子命令在三份文档的命令表里都必须有条目。这条才是真正防漏登记的，
+    #    计数断言只是它的弱影子。
+    # ④ 计数正则的 `个` 必须可选：README 的目录树里写的是"（51 子命令）"，没有"个"。
     import re
-    n = len(_cli_subcommands())
-    for rel in ["docs/user-guide.md", "docs/developer-guide.md"]:
+    cmds = _cli_subcommands()
+    n = len(cmds)
+    for rel in _COMMAND_DOCS:
         text = (ROOT / rel).read_text(encoding="utf-8")
-        claims = [int(m) for m in re.findall(r"(\d+)\s*个\**\s*(?:CLI\s*)?子命令", text)]
+        claims = [int(m) for m in re.findall(r"(\d+)\s*个?\**\s*(?:CLI\s*)?子命令", text)]
         assert claims, f"{rel} 未声明子命令数"
         assert all(c == n for c in claims), f"{rel} 声称的子命令数 {claims} ≠ CLI 真值 {n}"
-        table_rows = [ln for ln in text.splitlines() if ln.lstrip().startswith("|")]
-        assert any("vault-lint" in ln for ln in table_rows), f"{rel} 的命令表缺 vault-lint 条目"
-        assert any("revise-adopted" in ln for ln in table_rows), \
-            f"{rel} 的命令表缺 revise-adopted 条目"
+        undocumented = [c for c in cmds if c not in _documented_commands(text)]
+        assert not undocumented, f"{rel} 的命令表缺条目：{undocumented}"
+    for rel in ["docs/user-guide.md", "docs/developer-guide.md"]:
+        text = (ROOT / rel).read_text(encoding="utf-8")
         assert "--session" in text and "kb-save" in text, f"{rel} 缺 kb-save 会话发布路径说明"
         for must in ("写入授权", "source_refs", "committing", "generation lineage"):
             assert must in text, f"{rel} 缺 adopted revision 边界：{must}"
+
+
+def test_developer_guide_documents_the_current_revision_contract():
+    """§4.2.4 必须描述**现行**修订契约，不是它被推翻前的那一版。
+
+    复审实证（2026-08-08）：该节整节停在旧契约——"非空 evidence"、"必填 https url"、
+    "身份字段一律不可变"——而三条都已被 R-07（`10ea858`）与契约演进（`d16a0cc`）推翻，
+    两棵 skill 树都同步了，唯独作为开发者契约权威的开发指南没同步，于是它在**说反话**。
+    正面钉死现行说法，反面钉死旧说法不得复活。
+    """
+    text = (ROOT / "docs/developer-guide.md").read_text(encoding="utf-8")
+    for must in ("`evidence` 可以是空列表",          # R-07
+                 "`citation.url` 是可选的",           # 已登记来源可省 url
+                 "frontmatter_updates.aliases.remove",  # 身份字段唯一受控出口
+                 "--emit-removal-sha",                # 只读导出入口
+                 "external-vault-reuse",              # R-08 准入已不限采纳来源
+                 "_verify_switch_ledgers"):           # 切换期台账按种类分派
+        assert must in text, f"developer-guide 缺现行修订契约要点 {must!r}"
+    for stale in ("非空 `evidence`", "https url"):
+        assert stale not in text, f"developer-guide 复活了已被推翻的旧契约措辞 {stale!r}"
 
 
 def test_docs_no_hardcoded_test_counts():

@@ -303,7 +303,7 @@ pdf-to-study-kb/
 | 列出各源下一步动作 | `next` | `cmd_next` → `state_store.next_actions` | state db | 终端打印 | 无 | `test_pipeline_status.py` | 准确 |
 | 建 vault 脚手架 | `init-vault` | `cmd_init_vault` | `templates/overview.md` | `wiki/` 目录 + overview/log/purpose + `.obsidian/{graph,app}.json` | 写盘（幂等不覆盖） | `test_vault_init_cli.py` | 准确 |
 | 接管既有 vault 基线 | `adopt-vault --source --title --domain --baseline-archive --baseline-sha256 [--apply]` | `cmd_adopt_vault` → `vault_adoption.build_plan/write_evidence/write_source_page` + 派生重建 + `state_store.adopt_source` | 已有 `wiki/` + 接管前 ZIP 及预期 SHA-256 | 默认只打印逐页计划；apply 在锁内落不可变证据/canonical source 页，派生层全成功后登记 `legacy-vault` 的 `adopted/published` | 首次 legacy 内容债 warning-only，安全/ZIP/证据/source/state/台账完整性 hard-block；精确重跑 byte no-op，登记后 live drift 只 warning、历史证据不变；`work_orders/ingest_progress/window_reads=0` | `test_adopt_vault_cli.py` | 准确 |
-| 修订 adopted legacy 页 | `revise-adopted --source --request [--apply] [--abort] [--recover forward\|rollback --expect-live-manifest <json>]` | `cmd_revise_adopted` → `legacy_revision.run`；`cmd_lint`/`cmd_vault_lint` → `legacy_revision.evidence_findings` | v1 request YAML + 完整 adoption evidence + `adopted/published` source | 默认只读计划；首次 apply 写 authorization/pre/candidate/prepared，候选编辑后再次 apply 在 overlay 完整 lint 并冻结 transition/switch-pre/post，再以事件链切换 live | 主 SQLite schema/source/stage/artifact 与三类 ingest ledger 不变；source_refs/身份 frontmatter 不可变；committing 可前滚/回滚，证据或孤儿日志锚点损坏 fail-closed，completed live drift warning-only | `test_legacy_revision_cli.py` | 准确 |
+| 修订已发布页 | `revise-adopted --source {--request <yaml> \| --emit-removal-sha <page>} [--apply] [--abort] [--recover forward\|rollback --expect-live-manifest <json>]` | `cmd_revise_adopted` → `legacy_revision.run` / `legacy_revision.emit_removal_sha`；`cmd_lint`/`cmd_vault_lint` → `legacy_revision.evidence_findings` | v1 request YAML + 该来源的完整证据 + 落定终态（采纳 `adopted/published` / 摄取 `lint/published` / 复用 `reused/published`） | 默认只读计划；首次 apply 写 authorization/pre/candidate/prepared，候选编辑后再次 apply 在 overlay 完整 lint 并冻结 transition/switch-pre/post，再以事件链切换 live。`--emit-removal-sha` 是独立的只读分支：导出该页每条 citation 的规范 SHA-256，零写入、不建 operation、无需 `--request` | 主 SQLite schema/source/stage/artifact 不变；`source_refs` 与身份 frontmatter 不可变（唯一例外是 `frontmatter_updates.aliases.remove` 的受控声明）；切换期台账复核按来源种类分派（采纳/复用要求三类 ingest 台账全零，摄取要求 `work_orders=1` + 无 running/failed 窗 + `window_reads` 等于窗口数）；committing 可前滚/回滚，证据或孤儿日志锚点损坏 fail-closed，completed live drift warning-only | `test_legacy_revision_cli.py`、`test_revision_scope.py` | 准确 |
 | 复用 published vault 来源 | `reuse-source --source --title --domain --path --sha256 --origin-root --origin-source --mapping [--apply]` | `cmd_reuse_source` → `source_reuse.build_plan/write_evidence/write_source_page` + 派生重建 + `state_store.reuse_source` | 只读 origin root + PDF/SHA + mapping v1/v2 + 已完成 merge/source_refs 的目标页 | 默认 byte-zero-write；apply 在目标锁内冻结 origin state/source 页与全部 concept/topic 页、mapping（v1/v2）与首次 concept+topic target snapshot，派生成功后登记 `external-vault-reuse` 的 `reused/published` | mapping 覆盖集 == origin 概念集（故各恰好一次）；v2 的 topic 维度只校验引用存在性与不重复，不要求全覆盖；两维的零映射目标都不得获该来源归因；精确重跑 no-op，target live drift warning-only，origin/mapping/evidence/source/state drift fail-closed；三台账为 0 | `test_reuse_source_cli.py` | 准确 |
 | 重封 reuse v1→v2 topic 证据 | `reseal-source --source --mapping --from-manifest-sha256 [--apply]` | `cmd_reseal_source` → `source_reuse.build_reseal_plan/prepare_reseal_archive/archive_reseal_old_evidence/activate_reseal_evidence/replace_reseal_source_page` + 派生重建 + `state_store.begin_reuse_reseal/complete_reuse_reseal` | 完整现役 v1 evidence + 新 v2 mapping；metadata/PDF/origin 从旧 manifest 导出 | 默认 byte-zero-write；apply 以确定性 operation 暂存新证据、running 中间态替换 active evidence/source、归档 v1、重建派生，最后原子更新 state hash 并 republish | 仅 topic 维度可新增；concept targets/计数/target_pages 也固定；每个持久化边界崩溃均以前滚恢复，精确重跑 no-op；损坏旧证据不准借 reseal 覆盖 | `test_reuse_source_cli.py` | 准确 |
 | 回收 stale 锁 | `unlock [--ttl 1800]` | `cmd_unlock` → `locks.break_stale` | state db | 释放锁 | 删锁行（活锁拒绝） | `test_locks.py` | 准确 |
@@ -377,6 +377,7 @@ pdf-to-study-kb/
 | 命令 | 实现函数 | 作用 | 测试 |
 |---|---|---|---|
 | `ingest-stats --source [--json]` | `cmd_ingest_stats` → `state_store.source_stats` + vault 归属扫描 | 只读代理指标：`pages_estimate` 仍是窗口账本估算，**不得当成交付总页数**；`page_inventory` 才是精确交付清单，它合并当前账本、来源台账与 vault 中 `source_refs` 指向本源的 published/proposed 页，reopen 后不会漏掉本轮未改的旧页。另含窗口成败/阶段重跑/`lint_failures`/`proposals_by_kind`。窗口耗时是**最后一次尝试**；token/费用拿不到不伪造 | `test_ops_metrics_cli.py` |
+| `review-coverage` | `cmd_review_coverage` → `pipeline.review_content_pages` + `wiki/Review-Queue/content-review-ledger.yaml` | **可选的运营辅助，不是流水线阶段**：只读统计内容页的人工审查覆盖率与最新一条 entry 仍为 `findings-open` 的页。未登记的页只按域列出、**不判失败**（它不是门禁）；仅台账条目指向不存在的页或报告时非零退出。内容页口径 = 排除顶层 `.obsidian/Review-Queue/_meta/assets/sources/concepts/graph` 与 `log.md`、文件名含 `generated` 的页 | `test_review_coverage.py` |
 | `proposals-resolve --id/--signature [--source] [--all-matching] [--apply]` | `cmd_proposals_resolve` → `state_store.resolve_review_proposals` | 失败信号退场：`--id`（可重复）精确选行，或 `--signature` 按 kind 批量（批量落库须显式 `--all-matching`，防误伤同类未修复的行）；只把 `status='open'` 的行改成 `'resolved'`；`--apply` 成功后自动重跑一次 `_refresh_skill_backlog` 让已修复簇立即退场 | `test_ops_metrics_cli.py` |
 | `reset-source --source --to {registered,profiled,converted,windowed,workorder_ready} [--apply]` | `cmd_reset_source` → `state_store.reset_source` | forward-only 状态机的确定性回退出口：只删 `source_stage_runs` 中回退目标之后阶段的行（这是 `should_run_stage` 的缓存来源，不删则同 `input_hash` 永远 `[skip]`）+ 插一条 `stage='reset'` 审计行；**不动** `ingest_progress`/`artifacts`/`work_orders`/`review_proposals`/staging 文件；拒绝 `running` 状态或持锁的 source；回退目标限定在预处理段（`RESETTABLE_TARGETS`），ingest 段请用既有的 `reopen` | `test_doctor_cli.py` |
 | `window-done ... --writes-file <path.json>` | `cmd_window_done`（新增分支） | 从 UTF-8 文件读 JSON 数组写入 `write_set_json`，绕开 Windows `conda run` 吞双引号导致 `--writes '[...]'` 变成非法 JSON 的老坑；与 `--writes` 显式互斥（同给报错，不静默优先） | `test_doctor_cli.py` |
@@ -581,25 +582,72 @@ operation id 是 canonical `{source_id, old_manifest_sha256, new_mapping_sha256}
 
 **已知但不在本路径解决的缺口**：`retract-source` 尚不支持 `adopted/published` 或 `reused/published` 旁路终态。不得把 reseal 当退役；也不要对这两类来源调用现行撤库命令，需另立证据退役设计。
 
-### 4.2.4 adopted legacy 页受控修订（`revise-adopted`）
+### 4.2.4 已发布页的受控修订（`revise-adopted`）
 
 `adopt-vault` 冻结的是接管事实，不创建普通 ingest 的 workorder/window 台账；因此 adopted legacy 页
-不能伪装成某本书的 ingest 来获得写权限。`revise-adopted` 提供一条独立合同：**写入授权允许某些已接管
-页面接受一次有证据的修订，但不声称这些页面因此拥有新的书源**。请求 v1 固定
-`source_id/valid_until/mode/pages`，每页必须给 `reason`、非空 `evidence` 与
-`citation_removals`；citation 至少含 `source/title/https url/accessed_on`，可带 `locator`，并用
-`supports` 明说支撑哪条结论。候选中的 citation 增删必须与请求完全一致，`source_refs` 以及
-`canonical_id/page_path/managed_by` 等身份字段不得变化，human 页无条件拒绝。
+不能伪装成某本书的 ingest 来获得写权限。`revise-adopted` 提供一条独立合同：**写入授权允许某些已发布
+页面接受一次有证据的修订，但不声称这些页面因此拥有新的书源**。
+
+**准入按来源种类分派（`_revision_context`）。** 命令名保留 `revise-adopted` 是为了向后兼容，射程
+已不限于采纳来源——只把「已完成、可安全修订」这一条件按种类具体化：
+
+| 来源种类 | 判定入口 | 落定终态要求 | 射程（哪些页可改） | identity 锚 |
+|---|---|---|---|---|
+| 采纳 legacy vault | `adoptions/<src>/manifest.json` 存在 | `adopted/published` + 完整 adoption evidence | `manifest["pages"]` 成员 | `adoption_manifest_sha256`（复验时重读 `manifest.json` 逐字节比对） |
+| 普通摄取（`format=pdf`） | `_ingest_context` | `lint/published`、末条 stage run 为 `('lint','done')` 且 input/output hash 一致、`work_orders=1`、无 running/failed 窗、`window_reads` 等于窗口数 | `source_refs` 含该 `source_id` 的内容页（`_owned_pages`） | `scope_digest`（签发期记录的归属页 `(path, sha)` 规范哈希）；live 复验锚是 `workorder` artifact 字节与账本 sha 一致 |
+| 跨库复用（`format=external-vault-reuse`） | `_reuse_context` | `reused/published`、末条 stage run 为 `('reused','done')`、三类 ingest 台账全零 | 同上 | 同上，artifact 换成 `reuse_evidence` |
+
+其余 format 一律「无修订通道」拒绝。**采纳路径今天的行为逐字节不变**（identity 里不出现
+`scope_digest`，仍只带 `adoption_manifest_sha256`）。
+
+**请求 v1 契约。** 固定 `source_id/valid_until/mode/pages`；每页必填 `path/reason/evidence/citation_removals`，
+可选 `frontmatter_updates`。三条容易记反的边界：
+
+- **`evidence` 可以是空列表。** 纯删 citation、或只改正文/元数据而不新增外部依据时，硬性要求非空
+  只会逼人编一条 citation 让它过门——这正是核心约束⑦（门禁不得在没有正当编辑的场景下制造内容）
+  要避免的。`evidence` 为空时 `reason` 就是唯一的理由记录。候选仍必须**真的被改过**：字节不变的
+  候选停在 prepared/waiting，不会推进。
+- **`citation.url` 是可选的。** 必填字段是 `source/title/accessed_on`（可带 `locator`）。省略 `url`
+  时，`citation.source` 必须是本库**已登记的 source_id**（状态库 `sources` 表 ∪ vault 里
+  `type: source` 的来源页）；带 `url` 时仍必须 `https://` 前缀。**注意这条校验的射程**：它证明
+  "这条 citation 指向的来源在本库真实存在"，**不证明** citation 的内容属实——签发期能机械验的只有前者。
+- **`frontmatter_updates` 是身份字段唯一的受控出口。** `source_refs`、`canonical_id`、`page_path`、
+  `managed_by`、`aliases` 等都在 `_IMMUTABLE_FRONTMATTER` 里默认不可变；**当前唯一定义了语义的是
+  `frontmatter_updates.aliases.remove`**，其余键一律拒。授权同时记录改后的期望 identity 与改前的
+  `immutable_frontmatter_pre`，**声明了不改**与**改了不声明**都 fail-closed。
+  `source_refs` 不在可声明范围，所以没有任何流水线路径能经一次修订扩大该来源未来的射程。
+
+候选中的 citation 增删必须与请求完全一致，human 页无条件拒绝。
 签发时还会把每个 `citation_removals` SHA 与当前 live 页 citations 的规范哈希作子集校验；
 不存在的 SHA 会在创建 sidecar 前拒绝，并列出该页现有的 `source`/`url` 摘要。
+手写摘要极易出错（未加引号的全数字摘要会被 YAML 解析成整数并丢掉前导零，报错信息会明说这一点），
+所以提供只读导出入口，零写入、不建 operation、无需 `--request`：
+
+```powershell
+python scripts/pipeline.py revise-adopted --source <src> --emit-removal-sha <页的 vault 相对路径>
+```
+
+它按 `sha256  source=...  title=...  url=...` 逐条打印该页 citation，供请求作者机械复制。
 
 实现使用 `pipeline-workspace/legacy-revisions/<source>/<operation-id>/` sidecar，不在 live 页上边改边验。
 首次 `--apply` 在 vault 锁内冻结 canonical `authorization.json`、永久 `pre/files` 与可编辑
 `candidate/files`，live 零变化；编辑 candidate 后再次 `--apply` 建完整 overlay vault，运行页面 lint、
 全库 render-safety、promotion 以及 registry/index/graph/HTML/quiz/propositions 重算。全部成功才冻结
 `transition.json`、`switch-pre` 与 `post`，写 `committing` 事件，再 compare-and-replace live 文件并追加
-唯一 `log.md` 锚点，最后写 `completed`。主 SQLite 不增表/列，adopted source/state/artifact 与
-`work_orders/ingest_progress/window_reads=0` 全程不变。
+唯一 `log.md` 锚点，最后写 `completed`。主 SQLite 不增表/列，来源 source/state/artifact 全程不变。
+
+切换期还会复核该来源的 ingest 台账，**判据按来源种类分派**（`_verify_switch_ledgers`）——
+操作全程持 vault 锁，台账变化只可能来自锁外改库，检测到即拒：
+
+- 采纳 / 复用：`work_orders`、`ingest_progress`、`window_reads` 三张表**必须全零**（采纳今天的行为逐字节不变）；
+- 普通摄取：`work_orders` 恒为 1、无 `running`/`failed` 窗、`window_reads` 与窗口数一致——即操作期间
+  仍保持准入时那个「已完成、可安全修订」的落定形态。
+
+> **已知口径限制**：`scope_digest` 只在**签发期**计算并写进 identity（因此参与 `operation_id` 派生），
+> 恢复/提交路径不会重算后比对。也就是说它记录的是"签发那一刻该来源拥有哪些页、内容如何"，
+> 不构成 prepare→commit 之间归属页集合变化的运行期检测。运行期真正被复验的锚是
+> `workorder` / `reuse_evidence` artifact 的字节与账本 sha 一致（采纳路径则是 `manifest.json` 逐字节比对）。
+> 目标页本身另有 per-page `pre_sha256` 与完整 overlay lint 兜底。
 
 事件是 canonical JSON 追加链（`prepared → committing → completed`，另有 abort/recovery/rollback
 分支），每项冻结前一事件 SHA。`legacy_revision.evidence_findings` 是唯一核验实现，由命令自身、普通

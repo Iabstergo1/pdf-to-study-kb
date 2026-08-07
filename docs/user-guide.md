@@ -379,6 +379,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | `check-session` | query-session 目录契约检查；run_id 仅限单层目录名，saved 模式严格核对 canonical candidate 与 new-only 授权一一对应 | `--id <run_id>` | `--saved` |
 | `skill-mine` / `skill-gate` / `skill-stage` / `skill-adopt` | skill 自进化四步 | gate/stage/adopt 需 `--candidate` | `--base HEAD` |
 | `ingest-stats` | 只读"体检单"：窗口/返工、窗口账本估算 `pages_estimate`，以及按 vault `source_refs` 重建的精确交付清单 `page_inventory`（报告总页数只认后者；不含 token/费用） | `--source` | `--json` |
+| `review-coverage` | 只读"审查进度表"（**可选的运营辅助，不是流水线的一步**）：还有多少内容页没人工审过、哪些页复审后仍留着未决问题。**没登记不算失败**，纯参考；只有台账本身写错（指向不存在的页或报告）才报错 | — | — |
 | `proposals-resolve` | **给已修复的错误销账**（不然 `skill-mine` 的 backlog 会越攒越脏）；**默认只列清单不改库**，看清楚了再加 `--apply` | `--id <行号>` 或 `--signature <类型>` | `--source`（配合 `--signature` 限定某源）`--all-matching`（批量落库必须加）`--apply` |
 | `reset-source` | **状态机"倒带键"**：某一步卡死重跑不了时，安全回退到更早的阶段。**默认只打印计划不改库**，确认后加 `--apply` | `--source --to {registered,profiled,converted,windowed,workorder_ready}` | `--apply` |
 | `retract-source` | **证据先行撤库**：把一本已入库的书连页带账本安全卸下。**默认只打印计划不改库**——加 `--apply` 才会先导出证据包（页字节 + SHA256 manifest + 全部账本行）并核验，再删该源独占页、清账本、重置状态、重建派生层；共享页与人工页只报告不删。**`overview.md` 首页永久保留**：若独占本源则旧版进证据包、删后从模板原样重建空白 seed，shared/human 则原样不动；撤库后你打开 vault 仍有入口（dry-run 会显示 overview 将 keep 还是 reseed） | `--source` | `--to {workorder_ready,registered}` `--apply` |

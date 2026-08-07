@@ -242,7 +242,7 @@ pdf-to-study-kb/
 ├── README.md                 # 本文件
 ├── requirements.txt          # 基础依赖 PyMuPDF + PyYAML + pytest（生产格式另需 MinerU，见末尾可选段）
 ├── scripts/
-│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（50 子命令，全部业务逻辑在此）
+│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（51 子命令，全部业务逻辑在此）
 │   ├── state_store.py / locks.py                # 业务 SQLite 状态机 / 单-ingest 并发锁
 │   ├── vault_adoption.py / legacy_revision.py / source_reuse.py
 │   │                                           # 既有 vault 接管 / adopted 页受控修订 / 跨库来源复用
@@ -291,7 +291,7 @@ pdf-to-study-kb/
 
 所有 skill 背后调用的都是 `python scripts/pipeline.py <command>`（零 LLM、可独立运行，**全部业务逻辑与安全守卫都在这里**）。日常对话无需手动输入；该接口面向**精细控制、问题排查、手动重跑某一阶段、无人值守脚本化**等高级场景。
 
-命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 50 个子命令（以 `python scripts/pipeline.py --help` 为准）：
+命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 51 个子命令（以 `python scripts/pipeline.py --help` 为准）：
 
 <details>
 <summary><b>展开：完整 CLI 命令参考</b></summary>
@@ -373,6 +373,7 @@ pdf-to-study-kb/
 | `promote-concept` | 机械提升一个概念为 shared | `--id concept.<domain>.<slug>` |
 | `check-session` | query-session 目录契约检查（Q1）；run_id 单层校验，saved 模式严格核对 canonical candidate 与 new-only 授权一一对应 | `--id <run_id> [--saved]` |
 | `ingest-stats` | 只读代理指标：窗口成败/阶段耗时与重跑/lint 失败/窗口账本估算 `pages_estimate` + 精确交付清单 `page_inventory`（报告总页数只认后者）/违规分布；不伪造 token/费用 | `--source [--json]` |
+| `review-coverage` | **可选的运营辅助，不是流水线阶段**：读 `wiki/Review-Queue/content-review-ledger.yaml`，统计内容页的人工审查覆盖率与仍 `findings-open` 的页。未登记的页只按域列出、**不判失败**（它不是门禁）；仅当台账条目指向不存在的页或报告时非零退出 | — |
 
 ### skill 自进化（零 LLM 命令；唯一 LLM 是人触发的 `skill-evolve` skill）
 
