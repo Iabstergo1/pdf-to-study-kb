@@ -52,7 +52,7 @@ def _legacy_workspace(tmp_path):
     page.write_text(
         "---\nmanaged_by: pipeline\nsource: demo-legacy-vault\nstatus: published\n"
         "type: lesson\n---\n"
-        "这是一张已经存在于旧知识库中的数据分析面试笔记。它说明查询前应先确认数据粒度、"
+        "这是一张已经存在于旧知识库中的 demo knowledge note。它说明查询前应先确认数据粒度、"
         "过滤范围与时间窗口，再解释结果，并保留足够正文以通过现有的残次页检查。"
         "这段内容属于接管前已有页面，不是本次命令从外部文档重新摄取或生成的内容。\n",
         encoding="utf-8")
@@ -63,8 +63,8 @@ def _legacy_workspace(tmp_path):
 
 def _args(archive, *, apply=False, digest=None):
     args = ["adopt-vault", "--source", "demo-legacy-vault",
-            "--title", "数据分析求职 Wiki legacy baseline",
-            "--domain", "data-analysis-interview",
+            "--title", "Demo Legacy Vault Baseline",
+            "--domain", "demo",
             "--baseline-archive", str(archive),
             "--baseline-sha256", digest or _sha(archive)]
     if apply:
@@ -463,8 +463,8 @@ def test_adopt_vault_revalidates_complete_page_set_after_lock(tmp_path, monkeypa
     monkeypatch.setattr(locks, "acquire", acquire_then_mutate)
     monkeypatch.setenv("STUDY_KB_ROOT", str(tmp_path))
     args = SimpleNamespace(
-        source="demo-legacy-vault", title="数据分析求职 Wiki legacy baseline",
-        domain="data-analysis-interview", baseline_archive=str(archive),
+        source="demo-legacy-vault", title="Demo Legacy Vault Baseline",
+        domain="demo", baseline_archive=str(archive),
         baseline_sha256=_sha(archive), apply=True)
     try:
         pipeline.cmd_adopt_vault(args)

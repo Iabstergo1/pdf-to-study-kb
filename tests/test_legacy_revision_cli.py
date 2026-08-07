@@ -95,7 +95,7 @@ def _adopted_workspace(tmp_path, *, page_rels=(PAGE_REL,), citations=None):
             zf.writestr(f"wiki/{rel}", page.read_bytes())
     result = _run([
         "adopt-vault", "--source", SOURCE,
-        "--title", "Legacy baseline", "--domain", "data-analysis-interview",
+        "--title", "Legacy baseline", "--domain", "demo",
         "--baseline-archive", str(archive), "--baseline-sha256", _sha(archive),
         "--apply",
     ], tmp_path)
@@ -1186,12 +1186,12 @@ def test_url_exit3_no_url_vault_sources_page_passes(tmp_path):
     _adopted_workspace(tmp_path)
     sources = tmp_path / "wiki" / "sources"
     sources.mkdir(parents=True, exist_ok=True)
-    (sources / "ab_testing_markdown_course_cn.md").write_text(
-        "---\ntype: source\nsource_id: ab_testing_markdown_course_cn\n"
+    (sources / "demo-markdown-course.md").write_text(
+        "---\ntype: source\nsource_id: demo-markdown-course\n"
         "format: legacy-markdown-bundle\nprovenance_status: legacy-unverified\n"
         "---\n课程资料导航。\n", encoding="utf-8")
-    page = _no_url_page_request("ab_testing_markdown_course_cn",
-                                title="AB测试从0到1完整实战路线")
+    page = _no_url_page_request("demo-markdown-course",
+                                title="Demo Markdown Course")
     request = _request(tmp_path, pages=[page])
     result = _run(_revise_args(request, apply=True), tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr

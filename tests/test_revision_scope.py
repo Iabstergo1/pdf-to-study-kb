@@ -195,7 +195,7 @@ def _adoption_workspace(tmp_path):
     manifest = {
         "baseline_archive": str(tmp_path / "legacy-baseline.zip"),
         "baseline_sha256": "0" * 64,
-        "domain": "data-analysis-interview",
+        "domain": "demo",
         "format": "legacy-vault",
         "pages": [{
             "path": "domains/demo/concepts/alpha.md",
@@ -212,7 +212,7 @@ def _adoption_workspace(tmp_path):
         encoding="utf-8", newline="\n")
     manifest_sha = _sha(manifest_path)
     _write_source_page(vault, src, manifest_sha=manifest_sha,
-                       domain="data-analysis-interview")
+                       domain="demo")
     db = tmp_path / "pipeline-workspace" / "state" / "study-kb.sqlite"
     state_store.init_db(db)
     con = sqlite3.connect(db)
@@ -220,7 +220,7 @@ def _adoption_workspace(tmp_path):
     con.execute(
         "INSERT INTO sources(source_id,domain,format,added_at,current_stage,current_status)"
         " VALUES (?,?,?,?,?,?)",
-        (src, "data-analysis-interview", "legacy-vault", now, "adopted", "published"))
+        (src, "demo", "legacy-vault", now, "adopted", "published"))
     con.execute(
         "INSERT INTO source_stage_runs(source_id,stage,status,started_at,input_hash,"
         "finished_at,output_hash) VALUES (?,?,?,?,?,?,?)",
