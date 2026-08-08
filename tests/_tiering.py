@@ -71,6 +71,7 @@ FILE_TIERS = {
     "test_retraction.py": ("fast",),
     "test_revision_scope.py": ("fast",),
     "test_sandbox_guard.py": ("fast",),
+    "test_overview_nav.py": ("fast",),
     "test_vault_traversal_scopes.py": ("fast",),
     "test_snapshots.py": ("fast",),
     "test_source_artifacts.py": ("fast",),

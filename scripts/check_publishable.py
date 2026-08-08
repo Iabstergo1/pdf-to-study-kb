@@ -173,6 +173,11 @@ def scan(repo_root: Path) -> tuple[list[Finding], list[Finding]]:
     errors: list[Finding] = []
     warnings: list[Finding] = []
     for name in tracked_files(repo_root):
+        # 基线文件不扫自己：它是"已接受命中"的登记册，正文按设计就是那些命中文本。
+        # 一旦它被 git 跟踪就会进入射程，把自己的每一行变成新的 warning——自指。
+        # 实证：2026-08-08 基线随 7872d2a 提交后，自举测试当场变红（11 new warnings）。
+        if name.replace("\\", "/") == BASELINE_REL:
+            continue
         if _should_scan(repo_root, name):
             file_errors, file_warnings = scan_file(repo_root, name)
             errors.extend(file_errors)

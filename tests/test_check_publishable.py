@@ -109,6 +109,25 @@ def test_missing_baseline_is_not_an_error(tmp_path):
     assert check_publishable.load_baseline(tmp_path) == set()
 
 
+def test_baseline_file_does_not_scan_itself(tmp_path, monkeypatch):
+    """基线登记册不得进入自己的射程——否则每记一条就多一条新 warning（自指）。
+
+    实证：基线随 7872d2a 提交、由未跟踪变为已跟踪后，`git ls-files` 把它纳入扫描，
+    自举测试当场报 11 new warnings。之前跑全量时它还未被跟踪，所以这个缺陷是**提交动作
+    本身触发**的——测得早不等于测得到。
+    """
+    baseline = tmp_path / check_publishable.BASELINE_REL
+    baseline.parent.mkdir(parents=True, exist_ok=True)
+    baseline.write_text("docs/x.md\tC:\\books\\\n", encoding="utf-8")  # publishable-allow
+    (tmp_path / "clean.py").write_text("x = 1\n", encoding="utf-8")
+
+    monkeypatch.setattr(check_publishable, "tracked_files",
+                        lambda root: [check_publishable.BASELINE_REL, "clean.py"])
+    errors, warnings = check_publishable.scan(tmp_path)
+    assert errors == [] and warnings == [], (
+        [str(f) for f in errors + warnings])
+
+
 def test_repository_baseline_covers_current_warnings():
     """本仓库稳态必须是 0 errors / 0 **新增** warning。
 

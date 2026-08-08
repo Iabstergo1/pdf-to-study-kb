@@ -2731,6 +2731,73 @@ def cmd_review_coverage(args):
     return 0
 
 
+#: overview.md 里由 CLI 维护的来源索引块。块外的正文一律不碰。
+_OVERVIEW_BLOCK_START = "<!-- sources-index:start（本块由 sync-overview-sources 维护，勿手改） -->"
+_OVERVIEW_BLOCK_END = "<!-- sources-index:end -->"
+
+
+def _overview_sources_block(vault) -> str:
+    """按 source_id 排序的来源台账索引块（确定性，零 LLM）。"""
+    import wiki_gate
+    rows = []
+    for page in wiki_gate.scan_source_pages(vault):
+        sid = str(page["meta"].get("source_id") or "")
+        if not sid:
+            continue
+        title = str(page["meta"].get("title") or sid)
+        rows.append((sid, f"[[sources/{sid}|{title}]]"))
+    body = "、".join(link for _sid, link in sorted(rows))
+    return (f"{_OVERVIEW_BLOCK_START}\n\n"
+            f"全部来源台账（每页记录该来源的落库范围与证据）：{body}。\n\n"
+            f"{_OVERVIEW_BLOCK_END}")
+
+
+def cmd_sync_overview_sources(args):
+    """把 overview.md 里缺失的来源台账入口机械补齐（**默认 dry-run**）。
+
+    存在的理由：`overview-source-unlinked` 是 fail-closed 门禁，门禁必须配一条正当的
+    补救通道，否则就是"要求编辑却不给编辑通道"（核心约束⑦）。而 overview.md 的写入通道
+    极窄——`revise-adopted` 的 `_safe_rel` 显式拒它、`kb-save` 是 new-page-only，
+    只有 ingest 的 write_scope 含它。本命令补上"任何时候都能维护"这一格。
+
+    只改 `<!-- sources-index -->` 标记块内部，**块外正文一字不动**；块不存在时追加到文末，
+    由人后续折进正文即可。幂等：内容不变则 byte no-op。
+    """
+    import wiki_gate
+    vault = _vault_dir()
+    ov = vault / "overview.md"
+    if not ov.is_file():
+        raise SystemExit(f"overview.md 不存在：{ov}（先跑 init-vault）")
+    missing = wiki_gate.overview_unlinked_sources(vault)
+    if not missing:
+        print("[OK] sync-overview-sources: overview.md 已链全部来源台账，无需改动")
+        return 0
+    print(f"缺入口的来源（{len(missing)}）：")
+    for sid in missing:
+        print(f"  {sid}")
+    text = ov.read_text(encoding="utf-8")
+    block = _overview_sources_block(vault)
+    if _OVERVIEW_BLOCK_START in text and _OVERVIEW_BLOCK_END in text:
+        head, _, rest = text.partition(_OVERVIEW_BLOCK_START)
+        _, _, tail = rest.partition(_OVERVIEW_BLOCK_END)
+        new_text = head + block + tail
+        where = "重写既有 sources-index 块"
+    else:
+        new_text = text.rstrip("\n") + "\n\n" + block + "\n"
+        where = "在文末追加 sources-index 块（可后续折进正文）"
+    if not args.apply:
+        print(f"\n[DRY-RUN] 将{where}；加 --apply 落盘。"
+              f"\n注意：overview.md 是 published 页，--apply 直接改盘并不经两阶段发布——"
+              f"本块是确定性派生内容（只含指向既有来源页的链接），与 rebuild-* 同类。")
+        return 0
+    if new_text == text:
+        print("[OK] sync-overview-sources: byte no-op")
+        return 0
+    ov.write_text(new_text, encoding="utf-8", newline="\n")
+    print(f"[OK] sync-overview-sources: 已{where} -> {ov}")
+    return 0
+
+
 def cmd_ingest_stats(args):
     """只读代理指标（零 LLM，不改任何行）：窗口/阶段耗时/重跑/lint 失败/页数估算/违规分布。
     诚实口径：token/费用拿不到就不伪造；耗时与页数的口径见输出 note。"""
@@ -2999,6 +3066,12 @@ def main():
     subparsers.add_parser(
         "review-coverage",
         help="内容审查台账覆盖率（只读；未登记不判失败）")
+    sov = subparsers.add_parser(
+        "sync-overview-sources",
+        help="把 overview.md 缺失的来源台账入口机械补齐（默认 dry-run；"
+             "overview-source-unlinked 门禁的补救通道）")
+    sov.add_argument("--apply", action="store_true",
+                     help="落盘（缺省只打印计划，零写入）")
     rsp = subparsers.add_parser(
         "reuse-source", help="复用只读 published vault 的来源（默认 dry-run；--apply 登记专用终态）")
     rsp.add_argument("--source", required=True, help="目标 vault 的 source_id")
@@ -3169,6 +3242,7 @@ def main():
         'adopt-vault': cmd_adopt_vault,
         'revise-adopted': cmd_revise_adopted,
         'review-coverage': cmd_review_coverage,
+        'sync-overview-sources': cmd_sync_overview_sources,
         'reuse-source': cmd_reuse_source,
         'reseal-source': cmd_reseal_source,
         'apply-obsidian-style': cmd_apply_obsidian_style,

@@ -3,7 +3,7 @@
 > 本文面向开发者，描述本仓库的架构、模块职责、数据契约、命令层与测试。
 > 所有结论以**源码为准**。
 > 面向使用者的操作说明见 [用户使用说明](user-guide.md)。
-> 版本锚点：当前工作树（2026-08-02 增量核对）；**51 个 CLI 子命令**（含 `adopt-vault` 基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用与 `reseal-source` 证据重封）/ 11 个技能。测试数量以 `pytest --collect-only -q` 为准——本轮两次证明精确计数写进文档当场就腐烂，故不再保留任何快照。
+> 版本锚点：当前工作树（2026-08-02 增量核对）；**52 个 CLI 子命令**（含 `adopt-vault` 基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用与 `reseal-source` 证据重封）/ 11 个技能。测试数量以 `pytest --collect-only -q` 为准——本轮两次证明精确计数写进文档当场就腐烂，故不再保留任何快照。
 > 2026-07-11 六阶段重构后的新机制（§7 已更新，其余章节以源码为准）：统一 callout 解析器
 > `page_rules.parse_callouts`（唯一语法入口，错误不吞节点）、渲染安全唯一实现 + **vault preflight
 > 事务隔离**（published 旧伤阻断 promote 但不回滚当前批）、`vault-lint` 全库健康门禁、归属≠记账
@@ -30,7 +30,7 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 
 | 入口 | 文件 | 说明 |
 |------|------|------|
-| 唯一 CLI 入口 | `scripts/pipeline.py` → `main()` | argparse 分发 **51 个**子命令（见 §3；含 `adopt-vault` / `revise-adopted` / `reuse-source` / `reseal-source` 四条确定性旁路/维护路径）。 |
+| 唯一 CLI 入口 | `scripts/pipeline.py` → `main()` | argparse 分发 **52 个**子命令（见 §3；含 `adopt-vault` / `revise-adopted` / `reuse-source` / `reseal-source` 四条确定性旁路/维护路径）。 |
 | LLM 编排入口 | `.claude/skills/ingest/SKILL.md`（+ `references/*`） | 端到端入库 skill；常规 ingest 是唯一 LLM 写库步骤，legacy-vault 接管分支为零 LLM。 |
 | 无人值守续跑 | `scripts/resume-ingest.ps1` | OS 调度触发的有界续跑脚本（PowerShell）。 |
 | 可选后端安装 | `scripts/install_mineru.py` → `main()` | 按机型自动安装 MinerU + 匹配 CUDA torch。 |
@@ -207,7 +207,7 @@ pdf-to-study-kb/
 ├── .gitattributes
 │
 ├── scripts/                     # ⭐ 全部业务逻辑（零 LLM）
-│   ├── pipeline.py              # 唯一 CLI 入口（51 子命令）
+│   ├── pipeline.py              # 唯一 CLI 入口（52 子命令）
 │   ├── state_store.py           # 状态机 SQLite（8 张表：sources/source_stage_runs/artifacts/
 │   │                            #   work_orders/source_locks/review_proposals/ingest_progress/
 │   │                            #   window_reads）
@@ -377,6 +377,7 @@ pdf-to-study-kb/
 | 命令 | 实现函数 | 作用 | 测试 |
 |---|---|---|---|
 | `ingest-stats --source [--json]` | `cmd_ingest_stats` → `state_store.source_stats` + vault 归属扫描 | 只读代理指标：`pages_estimate` 仍是窗口账本估算，**不得当成交付总页数**；`page_inventory` 才是精确交付清单，它合并当前账本、来源台账与 vault 中 `source_refs` 指向本源的 published/proposed 页，reopen 后不会漏掉本轮未改的旧页。另含窗口成败/阶段重跑/`lint_failures`/`proposals_by_kind`。窗口耗时是**最后一次尝试**；token/费用拿不到不伪造 | `test_ops_metrics_cli.py` |
+| `sync-overview-sources [--apply]` | `cmd_sync_overview_sources` → `wiki_gate.overview_unlinked_sources` + `_overview_sources_block` | `overview-source-unlinked` 门禁的**补救通道**（门禁必须配正当修复路径，否则犯核心约束⑦）。**默认 dry-run**；`--apply` 只重写 `<!-- sources-index -->` 标记块内部，块外正文一字不动，块缺失则追加到文末供人折进正文。幂等（内容不变 byte no-op）。之所以需要它：`overview.md` 的写入通道极窄——`revise-adopted` 的 `_safe_rel` 显式拒它、`kb-save` 是 new-page-only，**只有 ingest 的 `write_scope` 含它**，于是 ingest 之后没有维护手段 | `test_overview_nav.py` |
 | `review-coverage` | `cmd_review_coverage` → `pipeline.review_content_pages` + `wiki/Review-Queue/content-review-ledger.yaml` | **可选的运营辅助，不是流水线阶段**：只读统计内容页的人工审查覆盖率与最新一条 entry 仍为 `findings-open` 的页。未登记的页只按域列出、**不判失败**（它不是门禁）；仅台账条目指向不存在的页或报告时非零退出。内容页口径 = 排除顶层 `.obsidian/Review-Queue/_meta/assets/sources/concepts/graph` 与 `log.md`、文件名含 `generated` 的页 | `test_review_coverage.py` |
 | `proposals-resolve --id/--signature [--source] [--all-matching] [--apply]` | `cmd_proposals_resolve` → `state_store.resolve_review_proposals` | 失败信号退场：`--id`（可重复）精确选行，或 `--signature` 按 kind 批量（批量落库须显式 `--all-matching`，防误伤同类未修复的行）；只把 `status='open'` 的行改成 `'resolved'`；`--apply` 成功后自动重跑一次 `_refresh_skill_backlog` 让已修复簇立即退场 | `test_ops_metrics_cli.py` |
 | `reset-source --source --to {registered,profiled,converted,windowed,workorder_ready} [--apply]` | `cmd_reset_source` → `state_store.reset_source` | forward-only 状态机的确定性回退出口：只删 `source_stage_runs` 中回退目标之后阶段的行（这是 `should_run_stage` 的缓存来源，不删则同 `input_hash` 永远 `[skip]`）+ 插一条 `stage='reset'` 审计行；**不动** `ingest_progress`/`artifacts`/`work_orders`/`review_proposals`/staging 文件；拒绝 `running` 状态或持锁的 source；回退目标限定在预处理段（`RESETTABLE_TARGETS`），ingest 段请用既有的 `reopen` | `test_doctor_cli.py` |
@@ -1063,9 +1064,18 @@ vault preflight 复检全库 published 页、`vault-lint` CLI 可独立跑）**�
 （块内同级 `[!type]` 头渲染成字面量、折叠答案泄漏；嵌套须 `> > [!type]`）/
 `math-delimiter-nonobsidian`（`\(…\)`/`\[…\]` Obsidian 不渲染）/ `question-stem-empty`（空题干） /
 `mermaid-wikilink`（Mermaid 代码块内不得放 Obsidian `[[wikilink]]`，改用纯文本标签） /
-`L7-synthesis-missing` / `topics-missing`（两者与 `overview-seed` 同属 ingest 阶段 E 义务，kb-save 会话
-批豁免） / `placeholder-unfilled`（本轮 proposed 与已 published 页两处判定） / **`overview-seed`**
-（2026-07-08 新增，防"lint 失败回滚吃掉 overview 就地编辑、重跑无人复查"） / `concepts-uncovered` /
+`L7-synthesis-missing` / `topics-missing`（两者与 `overview-seed`、`overview-source-unlinked` 同属
+ingest 阶段 E 义务，kb-save 会话批豁免） / `placeholder-unfilled`（本轮 proposed 与已 published 页两处判定） / **`overview-seed`**
+（2026-07-08 新增，防"lint 失败回滚吃掉 overview 就地编辑、重跑无人复查"） /
+**`overview-source-unlinked`**（2026-08-08 新增：published 来源台账页必须能从 `overview.md` 到达。
+立法依据是该缺口跨三本书复现——mysql / llm-fundamentals / deep-learning，最后一次实测 22 个来源里
+**15 个**在 overview 中无任何入口。机制上它必然反复：`overview.md` **只有 ingest 的 `write_scope`
+一条写入通道**（`revise-adopted` 的 `_safe_rel` 显式拒它、`kb-save` 是 new-page-only），
+ingest 之后没有维护手段。因此本条**只在阶段 E 生效**，并配 `sync-overview-sources --apply`
+作为随时可用的机械补救——**门禁与补救通道必须同时存在**，否则就是核心约束⑦ 说的
+"要求编辑却不给编辑通道"。射程刻意只到**来源台账链接**、不到 topic：补一条指向既有页的链接
+不制造任何内容，而"每个 topic 都要有 overview 段落"会把冷门 topic 逼出填充式文字） /
+`concepts-uncovered` /
 `duplicate-canonical` / `risk-traceability`（仅 MinerU 风险源触发） / `unattributed-proposed`（孤儿
 proposed 页：既无 frontmatter 归属也不在任何 write_set） / **`unaccounted-write`**（2026-07-11 引入、2026-07-18 扩展：归属≠记账
 ——本轮 proposed 的**全部非 source 页**（concept/lesson/topic/comparison/synthesis/overview）必须入

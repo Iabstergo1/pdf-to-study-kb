@@ -856,8 +856,12 @@ def test_lint_blocks_concept_batch_without_source_page_and_seed_overview(tmp_pat
                       "一句话概括这份来源讲了什么、入库时提炼出了哪些可复用概念，以及弱化了什么。\n")
     meta, _ = mdpage.read_page(vault / "overview.md")
     meta["source_refs"] = [{"source": "note", "sections": ["1"]}]
+    # overview 重写必须**同时**给来源台账页留入口，否则 `overview-source-unlinked` 继续拦。
+    # 这条 2026-08-08 上线时当场抓住了本夹具：原来只链 topic、不链 sources/note，
+    # 正是"整本书发布完成而读者从入口页找不到它的台账"这一真实缺口的最小复现。
     mdpage.write_page(vault / "overview.md", meta,
-                      "## 主题导航\n\n从 [[topics/主题一|主题一]] 进入概念网络，按需深入。\n")
+                      "## 主题导航\n\n从 [[topics/主题一|主题一]] 进入概念网络，按需深入。\n\n"
+                      "来源台账：[[sources/note|Note 小册]]。\n")
     assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
     assert _run(["show-window", "--source", "note", "--window", "w0000"], tmp_path).returncode == 0
     assert _run(["window-start", "--source", "note", "--window", "w0000", "--hash", "h1"],

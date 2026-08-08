@@ -222,6 +222,40 @@ def scan_source_pages(vault) -> list[dict]:
     return out
 
 
+_OVERVIEW_SOURCE_LINK = re.compile(r"\[\[sources/([^\]|#\\]+)")
+
+
+def overview_unlinked_sources(vault) -> list[str]:
+    """overview.md 未链到的来源台账页（按 source_id 排序）。
+
+    口径：vault 内每个 `type: source` 页（published ∪ proposed），其 `sources/<id>` 必须在
+    `overview.md` 正文里作为 wikilink 目标出现过一次。wikilink 可带或不带 `.md` 后缀、
+    可带 `|别名`，两种写法都算命中。
+
+    **为什么只查来源页、不查 topic**：核心约束⑦——门禁不得在没有正当编辑的场景下逼人写东西。
+    "某来源页没有入口"的补救是加一条指向**确实存在的页**的链接，机械、完备、不制造内容；
+    而"某 topic 没有入口"的补救是为它写一段 overview 正文，冷门 topic 会被逼出填充式文字。
+    topic 入口缺失因此只作软信号，不进 fail-closed 面。
+
+    overview.md 缺失时返回空——它的存在性由 `overview-seed` 与 init-vault/retract 的 seed 保证。
+    """
+    vault = Path(vault)
+    ov = vault / "overview.md"
+    if not ov.is_file():
+        return []
+    _meta, body = mdpage.read_page(ov)
+    linked = set()
+    for target in _OVERVIEW_SOURCE_LINK.findall(body):
+        t = target.strip()
+        linked.add(t[:-3] if t.endswith(".md") else t)
+    missing = []
+    for page in scan_source_pages(vault):
+        sid = str(page["meta"].get("source_id") or "")
+        if sid and sid not in linked:
+            missing.append(sid)
+    return sorted(set(missing))
+
+
 def source_page_violations(pages: list[dict]) -> list[dict]:
     """来源台账页的路径规范 + 每 source_id 唯一（纯函数；调用方给 vault 内全部 source 页）。
 
@@ -495,6 +529,19 @@ def lint_pages(vault, pages: list[dict], *, phase_e: bool = True) -> list[dict]:
                 hit("overview.md", "overview-seed",
                     "本批产出 concept 但 overview.md 仍是未填充的种子骨架（含占位符）；"
                     "阶段 E 必做——重写 overview（注意：lint 失败回滚会连 overview 的就地编辑一起还原，修复重跑前须重新应用）")
+    # overview 导航完备性：每个来源台账页都必须能从 vault 入口页到达。
+    # 只在阶段 E（ingest）生效：overview.md 在 ingest 的 write_scope 里（workorder.py），
+    # 这是它**唯一**的写入通道——revise-adopted 的 _safe_rel 拒它、kb-save 是 new-page-only。
+    # 对 kb-save 批次设这条门就是"要求编辑却不给编辑通道"，正犯核心约束⑦。
+    # 补救办法机械且完备：`sync-overview-sources --apply`，或在阶段 E 重写 overview 时带上。
+    # 立法依据：该缺口跨书复现三次（mysql / llm-fundamentals / deep-learning），
+    # 最后一次实测 22 个来源里 15 个在 overview 中没有任何入口。
+    if phase_e:
+        for sid in overview_unlinked_sources(vault):
+            hit("overview.md", "overview-source-unlinked",
+                f"来源 `{sid}` 已有台账页却未被 overview.md 链接，读者无法从入口页到达；"
+                f"补一条 `[[sources/{sid}|<书名>]]`，或跑 "
+                f"`sync-overview-sources --apply` 由 CLI 机械补齐")
     # A2：概念未被任何 topic 收编（画布会落入"未分类"）→ concept-heavy 域 fail-closed
     for cp in concepts_uncovered_by_topic(vault):
         hit(cp, "concepts-uncovered",
