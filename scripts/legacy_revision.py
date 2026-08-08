@@ -331,16 +331,21 @@ def _sources(meta: dict) -> set[str]:
     return out
 
 
-_CONTENT_EXCLUDED_TOP = {
-    ".obsidian", "Review-Queue", "_meta", "assets", "concepts", "graph", "sources",
-}
+#: 内容页遍历的顶层排除集。**从 _EXCLUDED_TOP 派生，不手抄第二份**——
+#: 先前这里是一份字面量副本，与 pipeline.review_content_pages 各写各的，两处
+#: 的 log.md 与 generated 规则实际已经分叉（见 prepush-audit-2026-08-08 F4）。
+_CONTENT_EXCLUDED_TOP = _EXCLUDED_TOP | {"concepts", "graph", "sources"}
 
 
 def _content_page_paths(vault: Path) -> list[str]:
-    """内容页遍历（口径与 review-coverage 一致：R-08 评审清单 174 页）。
+    """内容页遍历——**全项目唯一实现**（`pipeline.review_content_pages` 直接转调本函数）。
 
     排除顶层 Review-Queue/_meta/concepts/graph/sources/.obsidian/assets、
-    *.generated.* 与顶层 log.md；overview.md 计入（归属可算、修订面仍由 _safe_rel 排除）。
+    `*.generated.md` 与顶层 log.md；overview.md 计入（归属可算、修订面仍由 _safe_rel 排除）。
+
+    两条规则刻意用精确形式而非宽松匹配：`log.md` 只排**顶层**（它是 vault 级台账，
+    域内同名页不该被静默吞掉）；generated 认 `.generated.md` **后缀**而非 "generated"
+    子串（否则 `topics/generated-notes.md` 这类正当内容页会被无声排除出分母）。
     """
     out = []
     for path in vault.rglob("*.md"):
@@ -371,14 +376,46 @@ def _owned_pages(vault: Path, source: str) -> list[str]:
 
 
 def _scope_digest(vault: Path, source: str) -> str:
-    """scope digest：该来源当前拥有的全部页按 (path, pre_sha256) 排序的规范形哈希。
+    """scope digest：**签发期**该来源拥有的全部页按 (path, pre_sha256) 排序的规范形哈希。
 
-    页集合一变（增删页或任一拥有页内容变化）即变；采纳来源不用它（identity 保持
-    adoption_manifest_sha256 逐字节不变）。
+    采纳来源不用它（identity 保持 adoption_manifest_sha256 逐字节不变）。
+
+    **射程说明（别把它当运行期锚）**：本值只在签发时计算并写进 identity，因此参与
+    operation_id 派生；恢复/提交路径**不会重算后比对**。它记录的是"签发那一刻该来源
+    拥有哪些页、内容如何"，是溯源快照，不是漂移检测器。刻意不做全量重算比对——
+    那会让任一无关归属页的正常编辑都炸掉操作，在人工编辑跨越 prepare→commit 的
+    真实节奏下过于脆。
+
+    真正的运行期保证由两处提供：`_assert_scope_still_owns`（切换前复验授权页仍属本源）
+    与 per-page `pre_sha256` + 完整 overlay lint。
     """
     entries = [(rel, _sha_bytes((vault / rel).read_bytes()))
                for rel in _owned_pages(vault, source)]
     return _sha_bytes(_json_bytes(entries))
+
+
+def _assert_scope_still_owns(context: dict, authorization: dict) -> None:
+    """切换前复验：授权里的每一页**当下仍属于本来源**。
+
+    签发时 `_build_authorization` 查过一次 `rel in scope_paths`，但 prepare→commit 之间
+    按设计要跨人工编辑候选的时间；期间某页可能不再带本来源的 `source_refs`（采纳来源
+    则是被移出 manifest）。此前无人复验，`scope_digest` 也只是签发期快照（见 `_scope_digest`）。
+
+    只在**尚未越过不可回头点**的阶段调用（prepare 与首次提交），与 `_assert_not_expired`
+    的放置一致：`committing` 之后再拒会把半完成的切换锁死，而恢复合同刻意不制造死锁。
+
+    这条不会在没有正当编辑的场景下逼人写东西（核心约束⑦）：页确实不再属于本来源时，
+    停下来就是正确结果，出口是从当前 live 新建请求，而不是补内容。
+    """
+    scope = set(context["scope_paths"])
+    lost = sorted(p["path"] for p in authorization["pages"] if p["path"] not in scope)
+    if lost:
+        kind = context.get("kind")
+        why = ("不再属于该 adoption manifest" if kind == "adoption"
+               else f"的 source_refs 已不含 {authorization['source_id']}")
+        raise LegacyRevisionError(
+            f"authorized pages left the source scope since signing ({kind}): "
+            f"{lost} {why}；请按当前 live 新建 mode: edit 请求")
 
 
 def _frontmatter_identity(meta: dict) -> dict:
@@ -1359,11 +1396,17 @@ def _verify_authorization(op: Path, workspace: Path) -> tuple[dict, bytes]:
     return auth, raw
 
 
-def emit_removal_sha(workspace, page_rel: str) -> list[dict]:
+def emit_removal_sha(workspace, page_rel: str, source: str | None = None) -> list[dict]:
     """只读导出目标页每条 citation 的规范 SHA-256 与可读摘要（供请求作者机械复制）。
 
     零写入：不建 operation、不动 live、不需要授权。哈希口径与 _citation_hash 一致
     （canonical JSON：ensure_ascii=False, indent=2, sort_keys=True + 换行）。
+
+    给了 ``source`` 就校验该页确实属于它（判据与 `_build_authorization` 同一条：
+    页的 `source_refs` 含该 source_id）。此前 CLI 的 ``--source`` 是必填却完全不参与，
+    可以拿任意来源 id 导出库里任意页，读命令日志的人会误以为导出被限定在该来源内。
+    刻意**不**走 `_revision_context`：那是重量级的落定态准入，而这只是个只读抄写器，
+    不该因为来源暂时不可修订就拒绝打印哈希。
     """
     vault = Path(workspace) / "wiki"
     rel = _safe_rel(page_rel)
@@ -1371,6 +1414,9 @@ def emit_removal_sha(workspace, page_rel: str) -> list[dict]:
     if not path.is_file() or path.is_symlink() or evidence_fs.resolved_inside(path, vault) is None:
         raise LegacyRevisionError(f"page missing or redirected: {rel}")
     meta, _body = mdpage.read_page(path)
+    if source is not None and source not in _sources(meta):
+        raise LegacyRevisionError(
+            f"page does not belong to source {source!r} (source_refs lacks it): {rel}")
     out = []
     for citation in meta.get("citations") or []:
         out.append({
@@ -1381,6 +1427,7 @@ def emit_removal_sha(workspace, page_rel: str) -> list[dict]:
             "sections": citation.get("sections"),
         })
     return out
+
 
 def _verify_transition(op: Path, auth: dict) -> tuple[dict, bytes, dict[str, bytes],
                                                        dict[str, bytes]]:
@@ -1628,6 +1675,7 @@ def _locked_run(*, workspace: Path, source: str, request: dict, request_sha: str
                                     lock_ttl_seconds=lock_ttl_seconds)
         if phase == "none":
             _assert_not_expired(authorization["valid_until"])
+            _assert_scope_still_owns(context, authorization)
             _prepare(op, authorization, candidates, context["vault"])
             _fault_point("prepared")
             return {"phase": "prepared", "operation_id": op.name,
@@ -1644,6 +1692,7 @@ def _locked_run(*, workspace: Path, source: str, request: dict, request_sha: str
                     "dry_run": False, "warnings": []}
         if phase == "prepared":
             _assert_not_expired(authorization["valid_until"])
+            _assert_scope_still_owns(context, authorization)
             _build_transition(op, authorization, context)
             _forward(op, authorization, context,
                      expected_unknown=_expected_live_manifest(expect_live_manifest))

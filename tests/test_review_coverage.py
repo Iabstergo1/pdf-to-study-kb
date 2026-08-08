@@ -133,3 +133,55 @@ def test_findings_open_counts_only_latest_entry(tmp_path):
     result = _run(["review-coverage"], tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "findings-open 的页: 1" in result.stdout
+
+
+def test_findings_open_uses_date_not_list_order(tmp_path):
+    """"最新"按 date 判，不按列表末尾——台账按"新条目写在最前"书写同样成立。
+
+    复审实证（prepush-audit-2026-08-08 F5）：实现曾逐条覆盖 last_outcome、取列表末尾，
+    `date` 完全不参与；上面那条测试恰好用日期升序 fixture，钉不住。这里用**降序**写同一
+    份数据：t.md 08-05 已复审关闭、overview.md 仍未决，答案必须仍是 1。
+    """
+    _make_vault(tmp_path)
+    _write_report(tmp_path, "kb-qa/r1.md")
+    _write_report(tmp_path, "kb-qa/r2.md")
+    _write_ledger(tmp_path, {
+        "topics/t.md": [                                     # 新条目写在最前
+            {"date": "2026-08-05", "report": "kb-qa/r2.md", "outcome": "findings-reworked"},
+            {"date": "2026-08-03", "report": "kb-qa/r1.md", "outcome": "findings-open"},
+        ],
+        "overview.md": [
+            {"date": "2026-08-03", "report": "kb-qa/r1.md", "outcome": "findings-open"},
+        ],
+    })
+    result = _run(["review-coverage"], tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "findings-open 的页: 1" in result.stdout
+
+
+def test_content_page_traversal_has_a_single_implementation(tmp_path):
+    """`pipeline.review_content_pages` 与 `legacy_revision._content_page_paths` 必须逐项相等。
+
+    两处曾各写各的、docstring 都声称"同一口径"，实际分叉了 log.md 与 generated 两条规则
+    （prepush-audit-2026-08-08 F4）。分叉的后果是"该审的页"（覆盖率分母）与"能改的页"
+    （`_owned_pages` 的修订射程）不是同一集合。这里连同两条分歧样本一起钉死。
+    """
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import legacy_revision
+    import pipeline
+
+    wiki = _make_vault(tmp_path)
+    # 两条历史分歧样本：域内 log.md 应计入；含 "generated" 但非 .generated.md 后缀应计入。
+    for rel in ("domains/statistics/log.md", "topics/generated-notes.md",
+                "topics/real.generated.md"):
+        page = wiki / rel
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text("---\ntype: topic\n---\n正文\n", encoding="utf-8")
+
+    via_pipeline = pipeline.review_content_pages(tmp_path)
+    via_legacy = legacy_revision._content_page_paths(wiki)
+    assert via_pipeline == via_legacy, (sorted(set(via_pipeline) ^ set(via_legacy)))
+    assert "domains/statistics/log.md" in via_pipeline, "域内 log.md 不该被当成顶层台账排除"
+    assert "topics/generated-notes.md" in via_pipeline, "子串匹配会静默吞掉正当内容页"
+    assert "topics/real.generated.md" not in via_pipeline, "*.generated.md 是派生层，应排除"
+    assert "log.md" not in via_pipeline, "顶层 log.md 是 vault 级台账，应排除"

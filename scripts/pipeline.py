@@ -2594,9 +2594,16 @@ def cmd_revise_adopted(args):
     if args.emit_removal_sha:
         if args.request:
             raise SystemExit("--emit-removal-sha cannot be combined with --request")
+        # 早退发生在阶段参数之前，静默忽略它们会让调用者以为操作被执行了。
+        for flag, on in (("--apply", args.apply), ("--abort", args.abort),
+                         ("--recover", args.recover is not None),
+                         ("--expect-live-manifest", args.expect_live_manifest is not None)):
+            if on:
+                raise SystemExit(
+                    f"--emit-removal-sha is read-only and cannot be combined with {flag}")
         try:
             for entry in legacy_revision.emit_removal_sha(
-                    _workspace_root(), args.emit_removal_sha):
+                    _workspace_root(), args.emit_removal_sha, source=args.source):
                 print(f"{entry['sha256']}  source={entry['source']!r}  "
                       f"title={entry['title']!r}  url={entry['url']!r}")
         except legacy_revision.LegacyRevisionError as exc:
@@ -2628,25 +2635,23 @@ def cmd_revise_adopted(args):
 
 
 def review_content_pages(workspace) -> list[str]:
-    """内容页遍历（与证据强度普查同一口径，见 evidence-strength-census-2026-08-05.md）：
-    基础排除复用 legacy_revision._EXCLUDED_TOP（口径收敛到一处，不手抄第二份清单），
-    追加内容页专属排除（sources/concepts/graph）与 log.md、*.generated.*。
-    注意 graph_model.collect_graph_pages 的口径不同（它包含 sources 与固定 _DERIVED 名单），
-    不要混用；本函数是台账覆盖率的唯一口径。"""
+    """内容页遍历（与证据强度普查同一口径，见 evidence-strength-census-2026-08-05.md）。
+
+    **直接转调 `legacy_revision._content_page_paths`，不再自带第二份实现。**
+    此前两处各写各的，docstring 都声称"同一口径"，实际已分叉两条规则：本函数曾按
+    `f.name == "log.md"` 排任意目录、按 `"generated" in f.name` 子串匹配，而
+    legacy_revision 侧只排顶层 log.md、只认 `.generated.md` 后缀。分叉的后果是
+    `topics/generated-notes.md` 这类页会被覆盖率分母静默排除，却仍在 `_owned_pages`
+    的修订射程里——"该审的页"和"能改的页"不是同一集合（prepush-audit-2026-08-08 F4）。
+
+    注意 `graph_model.collect_graph_pages` 的口径**不同**（它包含 sources 与固定
+    `_DERIVED` 名单），不要混用。
+    """
     import legacy_revision
     vault = Path(workspace) / "wiki"
-    exclude_top = legacy_revision._EXCLUDED_TOP | {"sources", "concepts", "graph"}
-    out = []
     if not vault.is_dir():
-        return out
-    for f in sorted(vault.rglob("*.md")):
-        rel = f.relative_to(vault).as_posix()
-        if rel.split("/", 1)[0] in exclude_top:
-            continue
-        if f.name == "log.md" or "generated" in f.name:
-            continue
-        out.append(rel)
-    return out
+        return []
+    return legacy_revision._content_page_paths(vault)
 
 
 def _review_domain_counts(pages) -> dict:
@@ -2691,17 +2696,22 @@ def cmd_review_coverage(args):
         registered.add(rel)
         if not isinstance(evs, list):
             continue
-        last_outcome = None
-        for ev in evs:
+        # findings-open = 该页**日期最新**的一条已识别 entry 是 findings-open。
+        # 曾按列表末尾取值（`date` 完全不参与），而台账按"新条目写在最前"书写是很自然的
+        # 记法——那样 08-05 已复审关闭的页会被 08-03 那条判成未决，结论直接反过来。
+        # 唯一的测试恰好用了日期升序 fixture，钉不住这条（prepush-audit-2026-08-08 F5）。
+        # 无 date / date 非法的条目按"最旧"处理，保持稳定排序不打乱同日次序。
+        dated = []
+        for idx, ev in enumerate(evs):
             if not isinstance(ev, dict):
                 continue
-            if ev.get("outcome") in {"no-findings", "findings-open", "findings-reworked"}:
-                last_outcome = ev.get("outcome")
             report = ev.get("report")
             if isinstance(report, str) and report:
                 if not (workspace / "pipeline-workspace" / "reports" / report).is_file():
                     errors.append(f"台账 report 指向不存在的报告: {rel}: {report}")
-        if last_outcome == "findings-open":
+            if ev.get("outcome") in {"no-findings", "findings-open", "findings-reworked"}:
+                dated.append((str(ev.get("date") or ""), idx, ev["outcome"]))
+        if dated and max(dated)[2] == "findings-open":
             findings_open.add(rel)
     unregistered = [p for p in pages if p not in registered]
     coverage = len(registered) / len(pages) if pages else 0.0
@@ -2978,7 +2988,7 @@ def main():
     lrp.add_argument("--request", required=False, help="人工审阅的 revision-request.yaml")
     lrp.add_argument("--emit-removal-sha", dest="emit_removal_sha", default=None,
                      help="只读导出指定页面每条 citation 的规范 SHA-256"
-                          "（无需 --request，零写入）")
+                          "（无需 --request，零写入；校验该页确属 --source）")
     lrp.add_argument("--apply", action="store_true")
     lrp.add_argument("--abort", action="store_true",
                      help="终止 prepared operation（必须与 --apply 同用）")

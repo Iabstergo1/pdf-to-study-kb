@@ -153,7 +153,7 @@ def visual_signals(page) -> dict:
 def render_page_png(doc, page_number: int, out_path, *, zoom: int = 3) -> str:
     """渲染开着的 fitz doc 的 1-based 第 page_number 页为整页 PNG（route B）。
     convert / source-audit 难页补图 / arbitration 物化共用同一渲染口径（zoom=3）。"""
-    import fitz  # noqa: F401（确保依赖存在；matrix 用到）
+    import fitz  # noqa: F401  # 确保依赖存在；matrix 用到
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     doc[page_number - 1].get_pixmap(matrix=fitz.Matrix(zoom, zoom)).save(str(out_path))

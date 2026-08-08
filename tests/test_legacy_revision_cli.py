@@ -1316,6 +1316,31 @@ def test_emit_removal_sha_readonly_and_hashes(tmp_path):
     assert not (tmp_path / "pipeline-workspace" / "legacy-revisions").exists()
 
 
+def test_emit_removal_sha_validates_the_page_belongs_to_source(tmp_path):
+    """`--source` 必须真的限定射程。
+
+    复审实证（prepush-audit-2026-08-08 F6）：该分支只把页路径传下去，`--source` 是
+    必填却完全不参与——可以拿任意（甚至不存在的）来源 id 导出库里任意页的 citation，
+    读命令日志的人会误以为导出被限定在该来源内。判据与签发同一条：页的 source_refs 含它。
+    """
+    _adopted_workspace(tmp_path, citations=[_existing_citation()])
+    result = _run(["revise-adopted", "--source", "some-other-source",
+                   "--emit-removal-sha", PAGE_REL], tmp_path)
+    assert result.returncode != 0
+    assert "does not belong to source" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("extra", [["--apply"], ["--abort", "--apply"],
+                                   ["--recover", "forward", "--apply"]])
+def test_emit_removal_sha_refuses_stage_flags(tmp_path, extra):
+    """只读分支在阶段参数前早退，静默忽略它们会让调用者以为操作被执行了。"""
+    _adopted_workspace(tmp_path, citations=[_existing_citation()])
+    result = _run(["revise-adopted", "--source", SOURCE,
+                   "--emit-removal-sha", PAGE_REL, *extra], tmp_path)
+    assert result.returncode != 0
+    assert "read-only and cannot be combined with" in result.stdout + result.stderr
+
+
 def test_emit_removal_sha_conflicts_with_request(tmp_path):
     _adopted_workspace(tmp_path)
     request = _request(tmp_path)

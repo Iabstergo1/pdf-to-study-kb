@@ -72,6 +72,56 @@ def test_clean_file_reports_nothing(tmp_path):
     assert not warnings
 
 
+def test_baseline_accepts_known_warnings_and_still_surfaces_new_ones(tmp_path):
+    """基线按 (路径, 命中文本) 记账：已接受的不再刷屏，**新形态仍然报出来**。
+
+    为什么需要基线而不是行内标记（prepush-audit-2026-08-08 §5.3 的修正）：
+    本仓库 20 条 warning 全在 PowerShell 示例代码块里，多数行以反引号续行结尾——
+    行内注释会破坏读者复制粘贴的命令。而一个常年亮 20 盏黄灯的门禁，第 21 条不会有人看见。
+    """
+    doc = tmp_path / "guide.md"
+    doc.write_text('放到 C:\\books\\ 下面\n落到 D:\\myvault\\ 里\n', encoding="utf-8")  # publishable-allow
+    _, warnings = check_publishable.scan_file(tmp_path, "guide.md")
+    assert len(warnings) == 2
+
+    baseline_path = tmp_path / check_publishable.BASELINE_REL
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text("# 注释行\n\nguide.md\tC:\\books\\\n", encoding="utf-8")  # publishable-allow
+    baseline = check_publishable.load_baseline(tmp_path)
+
+    remaining = [f for f in warnings if (f.path, f.text) not in baseline]
+    assert [f.text for f in remaining] == ["D:\\myvault\\"], "新的路径形态必须仍被报出"  # publishable-allow
+
+
+def test_baseline_is_line_number_independent(tmp_path):
+    """基线不含行号：示例在文档里挪位置不该让它失效（文档行号天天漂）。"""
+    doc = tmp_path / "guide.md"
+    doc.write_text('放到 C:\\books\\ 下面\n', encoding="utf-8")  # publishable-allow
+    _, before = check_publishable.scan_file(tmp_path, "guide.md")
+    doc.write_text('新增的前言\n\n\n放到 C:\\books\\ 下面\n', encoding="utf-8")  # publishable-allow
+    _, after = check_publishable.scan_file(tmp_path, "guide.md")
+    assert before[0].lineno != after[0].lineno, "前提：行号确实变了"
+    assert (before[0].path, before[0].text) == (after[0].path, after[0].text)
+
+
+def test_missing_baseline_is_not_an_error(tmp_path):
+    """基线是可选的：文件不存在就是空集，不报错（新仓库开箱即用）。"""
+    assert check_publishable.load_baseline(tmp_path) == set()
+
+
+def test_repository_baseline_covers_current_warnings():
+    """本仓库稳态必须是 0 errors / 0 **新增** warning。
+
+    这条是基线的自举：它一旦变红，说明有个新的路径形态被提交进来了，
+    而不是"又多了一条黄灯没人管"。
+    """
+    result = subprocess.run(
+        [sys.executable, "-B", str(ROOT / "scripts" / "check_publishable.py"), "--strict"],
+        cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "0 new warnings" in result.stdout
+
+
 def test_repository_itself_has_no_errors():
     """本仓库当前必须 0 error。
 

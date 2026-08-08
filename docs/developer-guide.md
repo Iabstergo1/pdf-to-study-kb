@@ -628,6 +628,9 @@ python scripts/pipeline.py revise-adopted --source <src> --emit-removal-sha <页
 ```
 
 它按 `sha256  source=...  title=...  url=...` 逐条打印该页 citation，供请求作者机械复制。
+`--source` 在这条路径上**真的限定射程**（校验该页 `source_refs` 含它，判据与签发同一条），
+并与 `--apply` / `--abort` / `--recover` / `--expect-live-manifest` 互斥——它是只读抄写器，
+静默忽略阶段参数会让调用者以为操作被执行了。
 
 实现使用 `pipeline-workspace/legacy-revisions/<source>/<operation-id>/` sidecar，不在 live 页上边改边验。
 首次 `--apply` 在 vault 锁内冻结 canonical `authorization.json`、永久 `pre/files` 与可编辑
@@ -643,11 +646,22 @@ python scripts/pipeline.py revise-adopted --source <src> --emit-removal-sha <页
 - 普通摄取：`work_orders` 恒为 1、无 `running`/`failed` 窗、`window_reads` 与窗口数一致——即操作期间
   仍保持准入时那个「已完成、可安全修订」的落定形态。
 
+**切换前的射程复验（`_assert_scope_still_owns`）：** 签发时查过一次"目标页在射程内"，
+但 prepare→commit 之间按设计要跨人工编辑候选的时间，期间该页可能不再带本来源的
+`source_refs`（采纳来源则是被移出 manifest）。因此在 **prepare 与首次提交**两处复验授权里
+每一页当下仍属本来源，不通过就拒绝，出口是按当前 live 新建 `mode: edit` 请求。
+
+放置刻意与 `_assert_not_expired` 一致——**只在尚未越过不可回头点的阶段**。`committing`
+之后不再复验，否则会把半完成的切换锁死，而恢复合同刻意不制造死锁。这条也不会在没有正当
+编辑的场景下逼人写东西（核心约束⑦）：页确实不再属于本来源时，停下来就是正确结果。
+
 > **已知口径限制**：`scope_digest` 只在**签发期**计算并写进 identity（因此参与 `operation_id` 派生），
-> 恢复/提交路径不会重算后比对。也就是说它记录的是"签发那一刻该来源拥有哪些页、内容如何"，
-> 不构成 prepare→commit 之间归属页集合变化的运行期检测。运行期真正被复验的锚是
-> `workorder` / `reuse_evidence` artifact 的字节与账本 sha 一致（采纳路径则是 `manifest.json` 逐字节比对）。
-> 目标页本身另有 per-page `pre_sha256` 与完整 overlay lint 兜底。
+> 恢复/提交路径不会重算后比对。它记录的是"签发那一刻该来源拥有哪些页、内容如何"，是溯源快照，
+> 不是漂移检测器。**刻意不做全量重算比对**：那会让任一无关归属页的正常编辑都炸掉操作，
+> 在人工编辑跨越 prepare→commit 的真实节奏下过于脆。
+> 运行期保证由三处提供：上面的射程复验、per-page `pre_sha256`、完整 overlay lint；
+> identity 锚本身则由 `workorder` / `reuse_evidence` artifact 字节与账本 sha 一致来复验
+> （采纳路径是 `manifest.json` 逐字节比对）。
 
 事件是 canonical JSON 追加链（`prepared → committing → completed`，另有 abort/recovery/rollback
 分支），每项冻结前一事件 SHA。`legacy_revision.evidence_findings` 是唯一核验实现，由命令自身、普通
@@ -964,8 +978,9 @@ python -m pytest tests --collect-only -q --basetemp=$bt   # 只看分层收集
 fixture，随仓库一起发布出去。lint 抓不到这类问题——它们语法完全合法。
 
 ```powershell
-python scripts/check_publishable.py            # 全部 git 已跟踪文件
-python scripts/check_publishable.py --strict   # 把 warning 也算失败
+python scripts/check_publishable.py                    # 全部 git 已跟踪文件
+python scripts/check_publishable.py --strict           # 把**新增** warning 也算失败（CI）
+python scripts/check_publishable.py --update-baseline  # 重写基线（须人工 review 差异）
 ```
 
 两级判定，因为两类命中的置信度差得很远：
@@ -973,10 +988,21 @@ python scripts/check_publishable.py --strict   # 把 warning 也算失败
 - **error**（命中即失败）：路径里带用户名，如 `C:\Users\<name>\…`、`/home/<name>/`；
 - **warn**（列出但不失败）：只带盘符的绝对路径。`README` 与 `user-guide` 里的 `C:\books`、
   测试里的 `C:/temp` 都是合法的通用占位；把它们判失败会得到一堆虚报，而虚报会让门禁被
-  整体绕过，比漏报更糟。发布前人工过一眼 warning 即可。
+  整体绕过，比漏报更糟。
 
-确需在文档里保留示例路径时，在该行加行内标记 `publishable-allow`。豁免只能逐行显式声明，
-不提供目录级或模式级整体豁免——那会让门禁悄悄失效。
+**豁免两级，都必须显式声明**，不提供目录级或模式级整体豁免——那会让门禁悄悄失效：
+
+1. **行内标记 `publishable-allow`** —— 适合源码与散文行。
+2. **基线文件 `scripts/publishable-baseline.txt`** —— 适合**加不了行内标记**的位置。
+   本仓库 20 条 warning 全部落在 PowerShell 示例代码块里，多数行以反引号续行结尾，
+   行内注释会破坏读者复制粘贴的命令。基线按 **`路径 + 命中文本`** 记账（**不按行号**，
+   文档行号天天漂），所以示例挪位置不会让它失效，而同一文件里出现**新的**路径形态
+   仍会被报出来。
+
+为什么需要第 2 级：这 20 条是一组稳定不变的通用占位。**一个常年亮着 20 盏黄灯的门禁，
+新增的第 21 条不会有人看见**——那才是真正的失效。基线让稳态回到"0 条新增"，
+同时把已接受的 11 组 `(路径, 文本)` **显式记录在案**，而不是藏起来。
+（`test_check_publishable.py::test_repository_baseline_covers_current_warnings` 是这条的自举断言。）
 
 **代码风格门禁**：`ruff.toml` 当前只开 `E9`（语法错误）与 `F`（pyflakes：未定义名、未使用
 的导入与变量），即"几乎一定是 bug"的规则。风格类规则留到代码本身清理过一轮再逐步打开。

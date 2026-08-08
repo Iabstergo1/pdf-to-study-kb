@@ -15,7 +15,7 @@ import graph_schema as gs
 import mdpage
 
 GRAPH_TYPES = ("overview", "topic", "concept", "comparison", "synthesis", "source")
-_EXCLUDE_TOP = {"Review-Queue", "_meta", "assets"}
+_EXCLUDE_TOP = {"Review-Queue", "_meta", "assets", ".obsidian"}  # .obsidian 见 wiki_gate 同名常量注释
 _DERIVED = {"index.generated.md", "aliases.md", "knowledge-map.generated.canvas",
             "graph-data.generated.json", "knowledge-graph.generated.html"}
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)")

@@ -91,25 +91,66 @@ def test_leftover_basetemp_props_are_excluded(extra_args, mechanism):
 # 纯判定矩阵在 test_sandbox_guard.py（fast 层）；这里跑真子进程，验证 conftest 在 **collection
 # 之前**就兑现了拒绝与隔离——这是只有真跑一次才看得出来的性质。
 
+#: 指纹的排除段名。**按任意层级的路径段匹配**，不是只看首段。
+#:
+#: 这条守卫要证明的是「被拒绝的那个子进程没有写真实库」，而不是「这 10 分钟里没有
+#: 任何人碰过仓库」。下列目录都会被 pytest 之外的进程写，纳入指纹只会让它随机变红：
+#:
+#: - ``tmp``            —— `_sandbox.py` 白名单指定的测试可写区（`test_resume_ingest_smoke` 就往里写）
+#: - ``.pytest_cache``  —— pytest 缓存
+#: - ``__pycache__``    —— 字节码缓存；**嵌套居多**（`scripts/__pycache__`、`tests/__pycache__`），
+#:                        先前用 `parts[0]` 判断，这两处根本不在射程，条目实为空转
+#: - ``.git``           —— 版本控制机器，任何 git 操作都会动它
+#: - ``.codegraph``     —— CodeGraph 文件监视守护进程的活数据库，改源码后异步落盘
+#: - ``reports``        —— `pipeline-workspace/reports/`，人和 agent 写报告的地方
+#:
+#: 实证（prepush-audit-2026-08-08 F9）：一次全量跑里本条变红，按时间窗口反查到的写入
+#: 全部来自 `.codegraph/*` 与 `pipeline-workspace/reports/*`——即"审计员在跑测试的同时
+#: 写报告"。危险面（`wiki/`、`pipeline-workspace/state`、`staging`）仍在射程内。
+_VOLATILE_SEGMENTS = frozenset({
+    "tmp", ".pytest_cache", "__pycache__", ".git", ".codegraph", "reports",
+})
+
+
 def _fingerprint(root: Path):
-    """(相对路径, sha256, mtime_ns) 聚合指纹；用于断言真实树一个字节都没动。"""
+    """相对路径 → (sha256, mtime_ns) 映射；用于断言真实树一个字节都没动。
+
+    返回**映射而非聚合哈希**：聚合哈希失败时只能报"被写过"，信息量为零，
+    这条守卫已经因此被反复猜过三轮。有了映射，断言可以直接列出变化的路径。
+    """
     import hashlib
     if not root.exists():
         return None
-    # scratch 目录（sanctioned 可写区 / 缓存）不属于「源码与测试资产」，排除出指纹：
-    # tmp/ 是 _sandbox.py 白名单指定的测试可写区，.pytest_cache/ 与 __pycache__/ 是缓存，
-    # 把它们纳入会让守卫监视套件自己被授权污染的目录（见 §4 flake）。
-    scratch_tops = {"tmp", ".pytest_cache", "__pycache__"}
-    h = hashlib.sha256()
+    out = {}
     for f in sorted(root.rglob("*")):
-        if f.is_file():
-            if f.relative_to(root).parts[0] in scratch_tops:
-                continue
+        if not f.is_file():
+            continue
+        rel = f.relative_to(root)
+        if _VOLATILE_SEGMENTS & set(rel.parts):
+            continue
+        try:
             st = f.stat()
-            h.update(f.relative_to(root).as_posix().encode("utf-8"))
-            h.update(hashlib.sha256(f.read_bytes()).digest())
-            h.update(str(st.st_mtime_ns).encode("ascii"))
-    return h.hexdigest()
+            out[rel.as_posix()] = (hashlib.sha256(f.read_bytes()).hexdigest(), st.st_mtime_ns)
+        except OSError:
+            # 竞态删除/占用：记为哨兵而不是让守卫崩在无关 IO 上。
+            out[rel.as_posix()] = ("<unreadable>", 0)
+    return out
+
+
+def _fingerprint_delta(before, after) -> str:
+    """人可读的差异说明；空串表示无变化。"""
+    if before is None or after is None:
+        return "" if before == after else f"目录存在性变化: before={before!r} after={after!r}"
+    added = sorted(set(after) - set(before))
+    removed = sorted(set(before) - set(after))
+    changed = sorted(k for k in set(before) & set(after) if before[k] != after[k])
+    if not (added or removed or changed):
+        return ""
+    parts = []
+    for label, items in (("新增", added), ("删除", removed), ("变更", changed)):
+        if items:
+            parts.append(f"{label}({len(items)}): {items[:10]}")
+    return "；".join(parts)
 
 
 @pytest.mark.parametrize("unsafe_rel", ["", "wiki", "pipeline-workspace"])
@@ -133,7 +174,11 @@ def test_pytest_refuses_an_unsafe_study_kb_root_before_collection(unsafe_rel):
     combined = result.stdout + result.stderr
     assert result.returncode != 0, combined[-3000:]
     assert "unsafe STUDY_KB_ROOT for tests" in combined, combined[-3000:]
-    assert _fingerprint(unsafe) == before, f"{unsafe} 在被拒绝的这轮里被写过"
+    delta = _fingerprint_delta(before, _fingerprint(unsafe))
+    assert not delta, (
+        f"{unsafe} 在被拒绝的这轮里被写过 —— {delta}\n"
+        f"（若变化路径与本套件无关，多半是跑全量期间有人/后台进程在改仓库；"
+        f"volatile 目录清单见 _VOLATILE_SEGMENTS）")
 
 
 def test_a_clean_session_allocates_an_isolated_study_kb_root():

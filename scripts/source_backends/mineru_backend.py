@@ -12,7 +12,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import source_artifacts as sa  # noqa: F401（C2/C3 归一用）
+import source_artifacts as sa  # noqa: F401  # C2/C3 归一用
 import thresholds  # OCR 低置信阈值单一真值（env 可覆盖）
 from source_backends import BackendUnavailable
 

@@ -15,7 +15,11 @@ import mdpage
 import page_rules
 import thresholds  # 门禁阈值单一真值（env 可覆盖）
 
-_EXCLUDE_TOP = {"Review-Queue", "_meta", "assets"}
+#: `.obsidian` 是 Obsidian 自身的配置目录，按定义不放知识页。它此前不在本集合里，
+#: 靠 frontmatter（type/status）过滤兜住，属于潜伏陷阱——插件塞一个 README.md 进去
+#: 就会进入遍历。补齐后与 legacy_revision/_retraction/source_reuse 的基础集一致
+#: （分歧矩阵与理由见 tests/test_vault_traversal_scopes.py）。
+_EXCLUDE_TOP = {"Review-Queue", "_meta", "assets", ".obsidian"}
 _DERIVED = {"index.generated.md", "aliases.md", "quiz-index.generated.md",
             "propositions.generated.md"}
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)")

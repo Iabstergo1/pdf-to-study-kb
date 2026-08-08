@@ -1,0 +1,15 @@
+# check_publishable 已接受的 warning 基线（由 --update-baseline 生成）。
+# 格式：<git 已跟踪路径><TAB><命中文本>。按路径+文本记账，不按行号——文档行号会漂。
+# 这些是文档/测试里的通用占位路径；新增条目请连同理由一起 review，不要顺手 --update-baseline。
+
+README.md	C:\books\
+README.md	C:\tmp\
+docs/user-guide.md	C:\backups\
+docs/user-guide.md	C:\books\
+docs/user-guide.md	C:\downloads\
+docs/user-guide.md	C:\tmp\
+tests/test_check_publishable.py	C:/temp/
+tests/test_check_publishable.py	C:\books\
+tests/test_ingest_guards.py	C:/temp/
+tests/test_sandbox_guard.py	C:/elsewhere/
+tests/test_sandbox_guard.py	C:/some/

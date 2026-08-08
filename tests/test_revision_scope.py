@@ -384,6 +384,59 @@ def test_adoption_identity_keeps_manifest_anchor_and_no_scope_digest(tmp_path):
     assert set(authorization) == identity_keys | {"operation_id"}
 
 
+def test_scope_recheck_rejects_a_page_that_left_the_source_after_signing(tmp_path):
+    """切换前必须复验授权页仍属本源（prepush-audit-2026-08-08 F3 的真实缺口）。
+
+    签发时查过一次 `rel in scope_paths`，但 prepare→commit 之间按设计要跨人工编辑
+    候选的时间；期间该页可能不再带本来源的 source_refs。此前无人复验：`scope_digest`
+    只在签发期算一次、运行期从不比对，运行期真正被复验的锚是 workorder artifact 字节，
+    与"当前哪些页带 source_refs"无关。
+    """
+    _ingest_workspace(tmp_path)
+    request_file = _request_file(tmp_path, source=INGEST,
+                                 pages=[_request_page(ALPHA)])
+    normal, _raw, request_sha = legacy_revision._validate_request(request_file, INGEST)
+    context = legacy_revision._revision_context(tmp_path, INGEST)
+    authorization, _candidates = legacy_revision._build_authorization(
+        context, normal, request_sha)
+    # 签发那一刻是通过的
+    legacy_revision._assert_scope_still_owns(context, authorization)
+
+    # 之后该页改归另一个来源（source_refs 不再含 INGEST）
+    alpha = tmp_path / "wiki" / ALPHA
+    _write_page(alpha, source="someone-else", rel=ALPHA)
+    fresh = legacy_revision._revision_context(tmp_path, INGEST)
+
+    with pytest.raises(legacy_revision.LegacyRevisionError) as excinfo:
+        legacy_revision._assert_scope_still_owns(fresh, authorization)
+    message = str(excinfo.value)
+    assert "left the source scope since signing" in message
+    assert ALPHA in message
+    assert INGEST in message
+
+
+def test_scope_recheck_passes_when_unrelated_owned_pages_change(tmp_path):
+    """复验只看"授权页是否仍属本源"，不看内容漂移。
+
+    刻意**不**重算 scope_digest 比对：那会让任一无关归属页的正常编辑都炸掉操作，
+    而 prepare→commit 之间跨人工编辑是这条合同的设计前提。
+    """
+    _ingest_workspace(tmp_path)
+    request_file = _request_file(tmp_path, source=INGEST,
+                                 pages=[_request_page(ALPHA)])
+    normal, _raw, request_sha = legacy_revision._validate_request(request_file, INGEST)
+    context = legacy_revision._revision_context(tmp_path, INGEST)
+    authorization, _candidates = legacy_revision._build_authorization(
+        context, normal, request_sha)
+
+    gamma = tmp_path / "wiki" / "domains/demo/concepts/gamma.md"
+    _write_page(gamma, source=INGEST, rel="domains/demo/concepts/gamma.md")
+    fresh = legacy_revision._revision_context(tmp_path, INGEST)
+    assert fresh["scope_digest"] != context["scope_digest"], "前提：digest 确实变了"
+
+    legacy_revision._assert_scope_still_owns(fresh, authorization)  # 不得抛
+
+
 def test_ingest_authorization_uses_scope_digest_anchor(tmp_path):
     _ingest_workspace(tmp_path)
     request_file = _request_file(tmp_path, source=INGEST,

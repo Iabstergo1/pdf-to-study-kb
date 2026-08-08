@@ -75,6 +75,8 @@ python scripts/pipeline.py revise-adopted --source <legacy_source> --emit-remova
 ```
 
 It prints every citation on the page as `sha256  source=...  title=...  url=...`.
+`--source` really scopes this path (the page's `source_refs` must name it, the same
+predicate signing uses) and is mutually exclusive with `--apply` / `--abort` / `--recover`.
 The request schema also accepts two optional, audited fields:
 
 - page-level `frontmatter_updates.aliases.remove: [...]` declares a controlled change of an immutable
