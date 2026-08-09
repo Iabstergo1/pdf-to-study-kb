@@ -2125,6 +2125,10 @@ def cmd_lint(args):
     # 收编垄断（软警告非阻断）：单 topic 收编域内过高比例概念 = 链接倾倒糊弄 A2 的征兆
     for msg in wiki_gate.topic_coverage_monopoly(vault):
         print(f"[warn] {msg}")
+    # 主题入口缺失（软警告非阻断）：说明书教了"把本源 topic 链进 overview"，但无人核对；
+    # 硬拦会逼冷门主题产出填充式介绍（核心约束⑦），故只提示，让缺口在落库当场可见。
+    for msg in wiki_gate.overview_unlinked_topics(vault):
+        print(f"[warn] {msg}" if not msg.startswith(" ") else msg)
     # vault preflight（与当前批**事务隔离**）：全库 published 页的渲染安全旧伤 → 阻断 promote、
     # 按 (rule, path, content_hash) 去重登记 Review-Queue，但不回滚当前批、不写 lint 阶段状态——
     # 旧书的旧伤不该吃掉新书这一轮的就地编辑（"回滚吞就地编辑"曾两书连踩）。修复旧页后直接重跑。

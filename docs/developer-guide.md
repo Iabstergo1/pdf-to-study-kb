@@ -1074,7 +1074,11 @@ ingest 阶段 E 义务，kb-save 会话批豁免） / `placeholder-unfilled`（�
 ingest 之后没有维护手段。因此本条**只在阶段 E 生效**，并配 `sync-overview-sources --apply`
 作为随时可用的机械补救——**门禁与补救通道必须同时存在**，否则就是核心约束⑦ 说的
 "要求编辑却不给编辑通道"。射程刻意只到**来源台账链接**、不到 topic：补一条指向既有页的链接
-不制造任何内容，而"每个 topic 都要有 overview 段落"会把冷门 topic 逼出填充式文字） /
+不制造任何内容，而"每个 topic 都要有 overview 段落"会把冷门 topic 逼出填充式文字。
+**topic 那一侧配的是软警告** `wiki_gate.overview_unlinked_topics`（非阻断，lint 收尾打
+`[warn]`，列出缺入口的主题及其概念数）：说明书教了"把本源 topic 链进 overview"却无人核对，
+一个库积累多本来源后，漏掉的主题只有全库审计才翻得出来。软警告把它变成落库当场可见的一行，
+看不看、补不补由人决定——**分级的依据是补救动作会不会制造内容，不是问题严不严重**） /
 `concepts-uncovered` /
 `duplicate-canonical` / `risk-traceability`（仅 MinerU 风险源触发） / `unattributed-proposed`（孤儿
 proposed 页：既无 frontmatter 归属也不在任何 write_set） / **`unaccounted-write`**（2026-07-11 引入、2026-07-18 扩展：归属≠记账

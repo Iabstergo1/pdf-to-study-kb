@@ -91,6 +91,63 @@ def test_rule_fires_in_phase_e_but_never_for_kb_save(tmp_path):
     assert quiet == [], "kb-save 会话不得被这条门禁拦住——它没有修复通道"
 
 
+def _with_topics(tmp_path, *, overview_body, topics):
+    """topics = {主题名: [概念名...]}；主题页正文链其概念，归属由 topic_membership 算出。"""
+    vault = _vault(tmp_path, overview_body=overview_body)
+    for tname, concepts in topics.items():
+        links = "".join(
+            f"[[domains/d/concepts/{c}|{c}]]、" for c in concepts)
+        (vault / "topics").mkdir(parents=True, exist_ok=True)
+        (vault / "topics" / f"{tname}.md").write_text(
+            f"---\ntype: topic\nstatus: published\nmanaged_by: pipeline\n"
+            f"title: {tname}\nsource_refs:\n- source: alpha\n---\n本主题连接 {links}。\n",
+            encoding="utf-8")
+        for c in concepts:
+            p = vault / "domains" / "d" / "concepts" / f"{c}.md"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(
+                f"---\ntype: concept\nstatus: published\nmanaged_by: pipeline\n"
+                f"canonical_id: concept.d.{c}\ncanonical_name: {c}\ndomain: d\n"
+                f"source_refs:\n- source: alpha\n---\n概念正文。\n", encoding="utf-8")
+    return vault
+
+
+def test_unlinked_topics_are_a_soft_signal_not_a_gate(tmp_path):
+    """主题缺入口**只提示、不阻断**——与来源台账那条硬门禁刻意分级。
+
+    硬拦主题会要求"每个主题都得在 overview 里有一段介绍"，冷门主题会被逼出填充式
+    文字，那是制造内容而非保证质量（核心约束⑦）。所以它走 `[warn]`，不进违规列表。
+    """
+    vault = _with_topics(
+        tmp_path,
+        overview_body="导航：[[topics/甲主题|甲主题]]。来源：[[sources/alpha|A]]、[[sources/beta|B]]。\n",
+        topics={"甲主题": ["c1"], "乙主题": ["c2", "c3"], "丙主题": ["c4"]})
+
+    msgs = wiki_gate.overview_unlinked_topics(vault)
+    joined = "\n".join(msgs)
+    assert "乙主题" in joined and "丙主题" in joined
+    assert "甲主题" not in joined, "已有入口的主题不该被提示"
+    assert "2 个主题" in msgs[0] and "3 个概念" in msgs[0], msgs[0]
+    assert msgs.index([m for m in msgs if "乙主题" in m][0]) < \
+        msgs.index([m for m in msgs if "丙主题" in m][0]), "缺口大的排前面"
+
+    # 关键：它绝不能变成违规
+    pages = [{"rel_path": "domains/d/concepts/c1.md", "body": "正文",
+              "meta": {"type": "concept", "status": "proposed"}}]
+    rules = {v["rule"] for v in wiki_gate.lint_pages(vault, pages, phase_e=True)}
+    assert not any("topic" in r and "unlinked" in r for r in rules), rules
+
+
+def test_no_unlinked_topics_means_silence(tmp_path):
+    """全部有入口时一个字都不打——软警告不能变成常年噪音。"""
+    vault = _with_topics(
+        tmp_path,
+        overview_body="导航：[[topics/甲主题|甲]]、[[topics/乙主题|乙]]。"
+                      "来源：[[sources/alpha|A]]、[[sources/beta|B]]。\n",
+        topics={"甲主题": ["c1"], "乙主题": ["c2"]})
+    assert wiki_gate.overview_unlinked_topics(vault) == []
+
+
 def test_sync_dry_run_writes_nothing(tmp_path, monkeypatch):
     vault = _vault(tmp_path, overview_body="只提到 [[sources/alpha|ALPHA]]。\n")
     monkeypatch.setenv("STUDY_KB_ROOT", str(tmp_path))

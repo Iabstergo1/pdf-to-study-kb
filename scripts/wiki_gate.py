@@ -420,6 +420,47 @@ def topic_coverage_monopoly(vault) -> list[str]:
     return out
 
 
+def overview_unlinked_topics(vault) -> list[str]:
+    """软警告（非阻断）：有主题页但 `overview.md` 里没有它的入口。
+
+    与 `overview-source-unlinked` 硬门禁**刻意分级**：
+    - 来源台账缺入口 → **硬拦**。补救是加一条指向既有页的链接，机械、完备、不制造内容。
+    - 主题缺入口 → **只提示**。若硬拦，就等于要求"每个主题都得在 overview 里有一段介绍"，
+      冷门主题会被逼出填充式文字——那不是保证质量，是制造内容（核心约束⑦）。
+
+    存在的理由：说明书教了"把本源的 topic 页链进 overview"，但没有任何机器核对它是否照做。
+    一个库积累多本来源后，漏掉的主题只有全库审计才会被翻出来，而那时已经攒了很多。
+    本函数把它变成落库当场可见的一行提示，看不看、补不补由人决定。
+
+    带上该主题收编的概念数，让读者一眼看出这条缺口有多大。
+    """
+    import graph_model
+    vault = Path(vault)
+    ov = vault / "overview.md"
+    if not ov.is_file():
+        return []
+    _meta, ov_body = mdpage.read_page(ov)
+    linked = set()
+    for target in _WIKILINK.findall(ov_body):
+        t = target.strip().rstrip("\\")
+        linked.add(t)
+        linked.add(t[:-3] if t.endswith(".md") else t + ".md")
+    nodes = _membership_nodes(vault)
+    membership, _unassigned = graph_model.topic_membership(nodes)
+    rows = [(len(membership.get(tp, [])), tp)
+            for tp, n in sorted(nodes.items())
+            if n["type"] == "topic" and tp not in linked]
+    if not rows:
+        return []
+    rows.sort(key=lambda r: (-r[0], r[1]))
+    total = sum(n for n, _tp in rows)
+    out = [f"以下 {len(rows)} 个主题页没有出现在 overview.md 的导航里"
+           f"（不阻断发布；这 {total} 个概念的读者只能从文件树发现它们）："]
+    out += [f"  {n:>4} 概念  {tp}" for n, tp in rows]
+    out.append("  —— 补一段导航即可，或跑 `sync-overview-sources` 看来源台账那一侧是否也缺")
+    return out
+
+
 def stray_files(vault) -> list[str]:
     """C4（非阻断软警告）：列出 Obsidian 点击坏链误建的杂物——0 字节 .md，以及 *.png.md/*.jpg.md
     （图片名却被建成 md 空页）。它们不影响发布，但会污染侧栏/画布，提示用户删除。"""
