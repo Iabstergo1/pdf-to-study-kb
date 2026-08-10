@@ -45,6 +45,6 @@ step that covers a group of concepts (the topic page then links the concepts, gi
 overview -> topic -> concept), and link the concept page directly only when that step *is* a single
 concept. Never invent a target to satisfy this: if a step has no page yet, rename the step to something
 that does exist, or drop it — fabricating a page to make a link resolve is the failure mode
-`broken-link` already caused once. **a concept-heavy source has at least one topic page** (else `topics-missing` blocks) with a
+`broken-link` already caused once. Also: **a concept-heavy source has at least one topic page** (else `topics-missing` blocks) with a
 per-source contribution table and `source_refs`; comparison states conclusion / dimensions / when-to-use /
 related concepts; every synthesis page is in `--writes`.
