@@ -39,6 +39,12 @@
 
 **Acceptance:** overview covers the concept map / recommended learning path (with per-leg outcomes) / model
 family comparison (structure is purpose-driven, not fixed section titles), not a bare link list, and carries
-`source_refs`; **a concept-heavy source has at least one topic page** (else `topics-missing` blocks) with a
+`source_refs`. **Every named step in a learning route must be a wikilink**, not plain text — a route the
+reader cannot click is a table of contents with the page numbers torn off. Link the **topic** page for a
+step that covers a group of concepts (the topic page then links the concepts, giving
+overview -> topic -> concept), and link the concept page directly only when that step *is* a single
+concept. Never invent a target to satisfy this: if a step has no page yet, rename the step to something
+that does exist, or drop it — fabricating a page to make a link resolve is the failure mode
+`broken-link` already caused once. **a concept-heavy source has at least one topic page** (else `topics-missing` blocks) with a
 per-source contribution table and `source_refs`; comparison states conclusion / dimensions / when-to-use /
 related concepts; every synthesis page is in `--writes`.
