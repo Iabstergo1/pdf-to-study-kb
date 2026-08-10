@@ -461,6 +461,51 @@ def overview_unlinked_topics(vault) -> list[str]:
     return out
 
 
+_ROUTE_ITEM = re.compile(r"^\s*\d+\.\s")
+#: 路线的括号说明（"读完能做什么"）——里面的箭头是叙述，不是步骤分隔，数之前先剥掉。
+_ROUTE_ASIDE = re.compile(r"（[^（）]*）")
+
+
+def overview_unclickable_routes(vault) -> list[str]:
+    """软警告（非阻断）：「推荐学习路线」里成串的步骤是纯文本，读者点不动。
+
+    判据刻意只数两样东西——**箭头数与 wikilink 数**，不去切分"步骤"：
+    路线里 `→` 与顿号混用、句末常跟解释性从句，任何切分方案都会误报（实测过）。
+    一条含 N 个箭头的路线至少有 N+1 步；wikilink 少于箭头数，就意味着**至少两步点不动**。
+
+    刻意不做门禁：硬拦会把作者推向"造一个页让链接解析成功"，那正是 `broken-link`
+    已经造成过一次的事故（为来源里根本没提的概念凭空造整页）。这里只提示。
+
+    数箭头**前先剥掉括号里的说明**：路线的"读完能做什么"里常自带箭头
+    （如"说清 n-grams→RNN→Transformer 为何依次被取代"），那是叙述不是步骤分隔。
+    这条在真实库上当场误报过一次，是加进来的。
+
+    实测本库：修复前 51 步里仅 2 步可点，本判据可命中 12 条路线中的 9 条；修复后静默。
+    """
+    vault = Path(vault)
+    ov = vault / "overview.md"
+    if not ov.is_file():
+        return []
+    _meta, body = mdpage.read_page(ov)
+    if "## 推荐学习路线" not in body:
+        return []
+    section = body.split("## 推荐学习路线", 1)[1].split("\n## ", 1)[0]
+    bad = []
+    for line in section.splitlines():
+        if not _ROUTE_ITEM.match(line):
+            continue
+        steps = _ROUTE_ASIDE.sub("", line)
+        arrows = steps.count("→")
+        links = len(_WIKILINK.findall(steps))
+        if arrows and links < arrows:
+            title = line.strip()[:40].replace("**", "")
+            bad.append(f"  {title}…（{arrows} 个箭头，仅 {links} 个链接）")
+    if not bad:
+        return []
+    return [f"「推荐学习路线」有 {len(bad)} 条路线的步骤多数是纯文本，读者点不动"
+            f"（不阻断；路线该链 topic 页，topic 页再链概念）："] + bad
+
+
 def stray_files(vault) -> list[str]:
     """C4（非阻断软警告）：列出 Obsidian 点击坏链误建的杂物——0 字节 .md，以及 *.png.md/*.jpg.md
     （图片名却被建成 md 空页）。它们不影响发布，但会污染侧栏/画布，提示用户删除。"""

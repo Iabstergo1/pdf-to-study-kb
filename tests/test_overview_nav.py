@@ -148,6 +148,71 @@ def test_no_unlinked_topics_means_silence(tmp_path):
     assert wiki_gate.overview_unlinked_topics(vault) == []
 
 
+def _routes(tmp_path, lines):
+    body = ("导航：[[topics/甲主题|甲]]。来源：[[sources/alpha|A]]、[[sources/beta|B]]。\n\n"
+            "## 推荐学习路线\n\n" + "\n".join(lines) + "\n")
+    return _vault(tmp_path, overview_body=body)
+
+
+def test_unclickable_routes_are_flagged(tmp_path):
+    """整条纯文本的路线要被点名；判据只数箭头与链接，不切分步骤。"""
+    vault = _routes(tmp_path, [
+        "1. **甲线**（读完能做甲）：一步 → 二步 → 三步。",
+        "2. **乙线**（读完能做乙）：[[topics/甲主题|一步]] → [[topics/乙主题|二步]] → "
+        "[[topics/丙主题|三步]]。",
+    ])
+    msgs = wiki_gate.overview_unclickable_routes(vault)
+    joined = "\n".join(msgs)
+    assert "甲线" in joined and "乙线" not in joined, joined
+    assert "2 个箭头，仅 0 个链接" in joined
+
+
+def test_partially_linked_route_still_flagged(tmp_path):
+    """只链了首尾、中间几步仍是纯文本 —— 这正是本库修复前的真实形态。"""
+    vault = _routes(tmp_path, [
+        "1. **甲线**：[[topics/甲主题|起点]] → 二步 → 三步 → 四步 → [[topics/乙主题|终点]]。",
+    ])
+    msgs = wiki_gate.overview_unclickable_routes(vault)
+    assert msgs and "4 个箭头，仅 2 个链接" in "\n".join(msgs)
+
+
+def test_fully_linked_routes_are_silent(tmp_path):
+    """全可点时一个字不打 —— 软警告不能变成常年噪音。"""
+    vault = _routes(tmp_path, [
+        "1. **甲线**：[[topics/甲主题|一]] → [[topics/乙主题|二]] → [[topics/丙主题|三]]。",
+        "2. **乙线**：只有一个入口 [[topics/甲主题|甲]]，无箭头。",
+    ])
+    assert wiki_gate.overview_unclickable_routes(vault) == []
+
+
+def test_route_warning_never_becomes_a_violation(tmp_path):
+    """与主题入口那条同理：只提示，绝不进违规列表。"""
+    vault = _routes(tmp_path, ["1. **甲线**：一步 → 二步 → 三步。"])
+    pages = [{"rel_path": "domains/d/concepts/c1.md", "body": "正文",
+              "meta": {"type": "concept", "status": "proposed"}}]
+    rules = {v["rule"] for v in wiki_gate.lint_pages(vault, pages, phase_e=True)}
+    assert not any("route" in r or "clickable" in r for r in rules), rules
+
+
+def test_arrows_inside_the_aside_do_not_count(tmp_path):
+    """路线说明里的箭头是叙述，不是步骤分隔。
+
+    真实库上当场误报过一次：「（读完能说清 n-grams→RNN→Transformer 为何依次被取代…）」
+    自带两个箭头，把一条全可点的路线判成了纯文本。判据必须先剥括号说明再数。
+    """
+    vault = _routes(tmp_path, [
+        "1. **甲线**（读完能说清 a→b→c 为何依次被取代）："
+        "[[topics/甲主题|一]] → [[topics/乙主题|二]] → [[topics/丙主题|三]]。",
+    ])
+    assert wiki_gate.overview_unclickable_routes(vault) == []
+
+
+def test_missing_route_section_is_silent(tmp_path):
+    """没有「推荐学习路线」小节时不报（结构由内容决定，D-4 不强制小节）。"""
+    vault = _vault(tmp_path, overview_body="只有导航：[[sources/alpha|A]]、[[sources/beta|B]]。\n")
+    assert wiki_gate.overview_unclickable_routes(vault) == []
+
+
 def test_sync_dry_run_writes_nothing(tmp_path, monkeypatch):
     vault = _vault(tmp_path, overview_body="只提到 [[sources/alpha|ALPHA]]。\n")
     monkeypatch.setenv("STUDY_KB_ROOT", str(tmp_path))
