@@ -2129,6 +2129,10 @@ def cmd_lint(args):
     # 硬拦会逼冷门主题产出填充式介绍（核心约束⑦），故只提示，让缺口在落库当场可见。
     for msg in wiki_gate.overview_unlinked_topics(vault):
         print(f"[warn] {msg}" if not msg.startswith(" ") else msg)
+    # 其他来源的 overview 入口欠账（软警告非阻断）：硬门禁只管本轮来源自己那一页，
+    # 历史欠账降级到这里——不能拿别人的债回滚我这批（cmd_lint 的回滚是无差别的）。
+    for msg in wiki_gate.overview_unlinked_other_sources(vault, current_source=args.source):
+        print(f"[warn] {msg}" if not msg.startswith(" ") else msg)
     # 路线可点性（软警告非阻断）：路线步骤是纯文本 = 撕掉页码的目录。硬拦会把作者
     # 推向"造一个页让链接解析成功"（broken-link 已造成过一次），故只提示。
     for msg in wiki_gate.overview_unclickable_routes(vault):
@@ -2171,7 +2175,8 @@ def cmd_lint(args):
                    "detail": "proposed 页不归属任何 source（缺 window-done --writes 记账"
                              "或 frontmatter 归属），fail-closed 阻断发布"}
                   for p in orphans] + wiki_gate.lint_pages(vault, proposed,
-                                                           phase_e=not session_mode)
+                                                           phase_e=not session_mode,
+                                                           source=args.source)
     if session_mode:
         import ingest_guards
         for rel in sorted(session_set - session_authorized):
@@ -2745,7 +2750,11 @@ _OVERVIEW_BLOCK_END = "<!-- sources-index:end -->"
 
 
 def _overview_sources_block(vault) -> str:
-    """按 source_id 排序的来源台账索引块（确定性，零 LLM）。"""
+    """按 source_id 排序的来源台账索引块（确定性，零 LLM）——**块的期望值**。
+
+    这是 sync 的唯一判据来源：块内容 != 本函数产出即需重写。所以它必须只依赖 vault 现状
+    （全部 `type: source` 页的 id 与 title），不含任何时间戳/随机量，否则幂等性就没了。
+    """
     import wiki_gate
     rows = []
     for page in wiki_gate.scan_source_pages(vault):
@@ -2754,52 +2763,98 @@ def _overview_sources_block(vault) -> str:
             continue
         title = str(page["meta"].get("title") or sid)
         rows.append((sid, f"[[sources/{sid}|{title}]]"))
-    body = "、".join(link for _sid, link in sorted(rows))
+    body = ("、".join(link for _sid, link in sorted(rows)) + "。") if rows \
+        else "（当前没有已登记的来源）"
     return (f"{_OVERVIEW_BLOCK_START}\n\n"
-            f"全部来源台账（每页记录该来源的落库范围与证据）：{body}。\n\n"
+            f"全部来源台账（每页记录该来源的落库范围与证据）：{body}\n\n"
             f"{_OVERVIEW_BLOCK_END}")
 
 
+def _overview_block_span(text: str):
+    """定位 sources-index 块的 [start, end)；块不存在返回 None；**块形态不合法就罢工**。
+
+    合法 = START 恰好一次、END 恰好一次、START 在 END 之前。任何其他形态一律拒绝执行，
+    绝不"尽力而为"地猜——本命令是全项目唯一会写 published 内容页的路径，overview.md 没有
+    快照、`wiki/` 是 gitignored，写坏了**不可恢复**。
+
+    旧实现只查两个标记"各自存在"，然后 `partition` 取首次出现。实证
+    （navigation-review-verdict-2026-08-10 F1）：overview 里若是"START 丢了 END + 后面
+    又有一个完整块"（阶段 E 的 LLM 重写 overview 时极易造成——模板里根本没有这个块，
+    它不知道标记要成对），`--apply` 会把夹在两块之间的人写正文**整段删掉**，不报错。
+    """
+    n_start, n_end = text.count(_OVERVIEW_BLOCK_START), text.count(_OVERVIEW_BLOCK_END)
+    if n_start == 0 and n_end == 0:
+        return None
+    start, end = text.find(_OVERVIEW_BLOCK_START), text.find(_OVERVIEW_BLOCK_END)
+    if n_start != 1 or n_end != 1 or start > end:
+        raise SystemExit(
+            f"拒绝执行：overview.md 里的 sources-index 标记块形态不合法"
+            f"（start 标记 {n_start} 个、end 标记 {n_end} 个"
+            f"{'、且 end 在 start 之前' if 0 <= end < start else ''}）。\n"
+            f"本命令绝不猜边界——猜错就是在 published 页上静默删正文，而 overview.md 无快照、"
+            f"wiki/ 不进版本控制，删了不可恢复。\n"
+            f"请人工把 overview.md 改成"
+            f"「恰好一对、且 start 在前」的形态后重跑；或整块删干净，让本命令重新追加。")
+    return start, end + len(_OVERVIEW_BLOCK_END)
+
+
 def cmd_sync_overview_sources(args):
-    """把 overview.md 里缺失的来源台账入口机械补齐（**默认 dry-run**）。
+    """把 overview.md 的来源台账索引块同步到期望值（**默认 dry-run**）。
 
     存在的理由：`overview-source-unlinked` 是 fail-closed 门禁，门禁必须配一条正当的
     补救通道，否则就是"要求编辑却不给编辑通道"（核心约束⑦）。而 overview.md 的写入通道
     极窄——`revise-adopted` 的 `_safe_rel` 显式拒它、`kb-save` 是 new-page-only，
     只有 ingest 的 write_scope 含它。本命令补上"任何时候都能维护"这一格。
 
-    只改 `<!-- sources-index -->` 标记块内部，**块外正文一字不动**；块不存在时追加到文末，
-    由人后续折进正文即可。幂等：内容不变则 byte no-op。
+    **判据是"块 ≠ 期望值"，不是"有没有缺口"**（F2）。旧判据 `missing` 非空才动，于是这条
+    通道**只会加、永远不会清**：撤库后 `sources/<id>.md` 被删（retract 对 shared 的
+    overview 契约是"字节不变、只报告"），块里 CLI 自己写下的链接就成了断链，而 `broken-link`
+    是硬门禁、overview 又只有 ingest 一条写入通道——补救通道自己造出了一个自己修不了的
+    硬门禁违规。按块比对后，撤库残留与陈旧书名都由同一条命令顺带收敛。
+
+    三分支：块在且 != 期望 → 重写；块不在且有缺口 → 文末追加；块不在且无缺口 → no-op
+    （不往人写得好好的 overview 里硬塞一个机器块）。块外正文一字不动，幂等。
     """
     import wiki_gate
     vault = _vault_dir()
     ov = vault / "overview.md"
     if not ov.is_file():
         raise SystemExit(f"overview.md 不存在：{ov}（先跑 init-vault）")
-    missing = wiki_gate.overview_unlinked_sources(vault)
-    if not missing:
-        print("[OK] sync-overview-sources: overview.md 已链全部来源台账，无需改动")
-        return 0
-    print(f"缺入口的来源（{len(missing)}）：")
-    for sid in missing:
-        print(f"  {sid}")
     text = ov.read_text(encoding="utf-8")
+    span = _overview_block_span(text)          # 形态不合法 → 在此罢工，零写入
     block = _overview_sources_block(vault)
-    if _OVERVIEW_BLOCK_START in text and _OVERVIEW_BLOCK_END in text:
-        head, _, rest = text.partition(_OVERVIEW_BLOCK_START)
-        _, _, tail = rest.partition(_OVERVIEW_BLOCK_END)
-        new_text = head + block + tail
-        where = "重写既有 sources-index 块"
-    else:
+    missing = wiki_gate.overview_unlinked_sources(vault)
+    if missing:
+        print(f"缺入口的来源（{len(missing)}）：")
+        for sid in missing:
+            print(f"  {sid}")
+
+    if span is not None:
+        old = text[span[0]:span[1]]
+        if old == block:
+            print("[OK] sync-overview-sources: sources-index 块已是期望值，无需改动")
+            return 0
+        new_text, where = text[:span[0]] + block + text[span[1]:], "重写既有 sources-index 块"
+    elif missing:
+        old = ""
         new_text = text.rstrip("\n") + "\n\n" + block + "\n"
         where = "在文末追加 sources-index 块（可后续折进正文）"
-    if not args.apply:
-        print(f"\n[DRY-RUN] 将{where}；加 --apply 落盘。"
-              f"\n注意：overview.md 是 published 页，--apply 直接改盘并不经两阶段发布——"
-              f"本块是确定性派生内容（只含指向既有来源页的链接），与 rebuild-* 同类。")
+    else:
+        print("[OK] sync-overview-sources: overview.md 已链全部来源台账且无机器块，无需改动")
         return 0
-    if new_text == text:
-        print("[OK] sync-overview-sources: byte no-op")
+
+    if not args.apply:
+        print(f"\n[DRY-RUN] 将{where}；加 --apply 落盘。")
+        if old:
+            # 只说"将重写既有块"，人无从判断会删掉什么。把被替换区间原样打出来。
+            print("\n--- 将被替换的区间（原文）---")
+            print(old)
+        print("--- 替换为 ---")
+        print(block)
+        print("\n注意：overview.md 是 published 页，--apply 直接改盘并不经两阶段发布。"
+              "\n它不是 rebuild-* 那种派生文件（那些写的是被 _DERIVED 排除的 *.generated.md），"
+              "\n而是**内容页里的一块机器所有区**：边界由上面的 fail-closed 校验保证，"
+              "\n块内是既有来源页链接的确定性全集，块外一字不动。")
         return 0
     ov.write_text(new_text, encoding="utf-8", newline="\n")
     print(f"[OK] sync-overview-sources: 已{where} -> {ov}")

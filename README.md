@@ -374,7 +374,7 @@ pdf-to-study-kb/
 | `check-session` | query-session 目录契约检查（Q1）；run_id 单层校验，saved 模式严格核对 canonical candidate 与 new-only 授权一一对应 | `--id <run_id> [--saved]` |
 | `ingest-stats` | 只读代理指标：窗口成败/阶段耗时与重跑/lint 失败/窗口账本估算 `pages_estimate` + 精确交付清单 `page_inventory`（报告总页数只认后者）/违规分布；不伪造 token/费用 | `--source [--json]` |
 | `review-coverage` | **可选的运营辅助，不是流水线阶段**：读 `wiki/Review-Queue/content-review-ledger.yaml`，统计内容页的人工审查覆盖率与仍 `findings-open` 的页。未登记的页只按域列出、**不判失败**（它不是门禁）；仅当台账条目指向不存在的页或报告时非零退出 | — |
-| `sync-overview-sources` | 把 `overview.md` 缺失的来源台账入口机械补齐（**默认 dry-run**）。这是 `overview-source-unlinked` 门禁的**补救通道**——门禁必须配正当的修复路径，否则就是"要求编辑却不给编辑通道"。只改 `<!-- sources-index -->` 标记块内部，块外正文一字不动；幂等 | `[--apply]` |
+| `sync-overview-sources` | 把 `overview.md` 的来源台账索引块同步到期望值（**默认 dry-run**）。这是 `overview-source-unlinked` 门禁的**补救通道**——门禁必须配正当的修复路径，否则就是"要求编辑却不给编辑通道"。判据是"块 ≠ 期望值"（不是"有没有缺口"），所以撤库残留与陈旧书名也会被顺带清掉；块形态不合法（标记不成对/不唯一/次序颠倒）时**拒绝执行**，绝不猜边界 | `[--apply]` |
 
 ### skill 自进化（零 LLM 命令；唯一 LLM 是人触发的 `skill-evolve` skill）
 

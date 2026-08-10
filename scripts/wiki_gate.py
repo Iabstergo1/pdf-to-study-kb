@@ -232,10 +232,15 @@ def overview_unlinked_sources(vault) -> list[str]:
     `overview.md` 正文里作为 wikilink 目标出现过一次。wikilink 可带或不带 `.md` 后缀、
     可带 `|别名`，两种写法都算命中。
 
-    **为什么只查来源页、不查 topic**：核心约束⑦——门禁不得在没有正当编辑的场景下逼人写东西。
-    "某来源页没有入口"的补救是加一条指向**确实存在的页**的链接，机械、完备、不制造内容；
-    而"某 topic 没有入口"的补救是为它写一段 overview 正文，冷门 topic 会被逼出填充式文字。
-    topic 入口缺失因此只作软信号，不进 fail-closed 面。
+    **为什么只查来源页、不查 topic**：一条 fail-closed 规则必须存在一个**能算出正确答案全集
+    的确定性补救**，否则它就是在逼人编内容（核心约束⑦）。来源台账那条的正确答案是"vault 内
+    全部 `type: source` 页的链接集合"，机器可完整枚举（`sync-overview-sources` 就是它的
+    实现）；而"这个 topic 该链在 overview 的哪一节、用哪句话引出"没有确定性答案，任何机器
+    补齐都是编内容。所以台账可以硬、topic 只能软——判据是**有没有确定性补救**，
+    不是"topic 会不会长到上百"那种规模论证。
+
+    本函数是**全库口径**（sync 补救通道与软警告都用它）。硬门禁的射程另有收窄：只认本轮
+    来源自己那一页，见 `lint_pages` 里 `overview-source-unlinked` 一段。
 
     overview.md 缺失时返回空——它的存在性由 `overview-seed` 与 init-vault/retract 的 seed 保证。
     """
@@ -254,6 +259,25 @@ def overview_unlinked_sources(vault) -> list[str]:
         if sid and sid not in linked:
             missing.append(sid)
     return sorted(set(missing))
+
+
+def overview_unlinked_other_sources(vault, *, current_source: str | None) -> list[str]:
+    """软警告（非阻断）：**除本轮来源以外**的来源台账页缺 overview 入口。
+
+    与 `overview-source-unlinked` 硬门禁配套分工：硬门禁只管本轮来源自己那一页
+    （缺口的成因就是"每次 ingest 忘掉自己那本"），历史欠账降级到这里。
+
+    为什么必须降级：`cmd_lint` 对任何一条违规都做**无差别回滚**（还原本源全部就地快照，
+    含 overview.md 这一轮的编辑）。用第 1..N-1 本书的欠账去回滚第 N 本这一批，射程与成因
+    完全不对齐，而本项目已经为"旧页旧伤不吃掉当前批"确立过先例（published 渲染安全预检
+    走事务隔离）。降级后欠账仍**看得见**，只是不再劫持别人的轮次。
+    """
+    rest = [s for s in overview_unlinked_sources(vault) if s != current_source]
+    if not rest:
+        return []
+    return [f"另有 {len(rest)} 个来源台账页没有 overview.md 入口（不阻断本轮；"
+            f"读者只能从文件树发现它们）：{'、'.join(rest)}",
+            "  —— 跑 `python scripts/pipeline.py sync-overview-sources --apply` 机械补齐"]
 
 
 def source_page_violations(pages: list[dict]) -> list[dict]:
@@ -480,6 +504,11 @@ def overview_unclickable_routes(vault) -> list[str]:
     （如"说清 n-grams→RNN→Transformer 为何依次被取代"），那是叙述不是步骤分隔。
     这条在真实库上当场误报过一次，是加进来的。
 
+    **不挂小节标题**：曾经整条检查以 `"## 推荐学习路线" not in body` 开头，于是把自己
+    钉在了一个 D-4 明文声明**不予约束**的东西上——新书把小节改叫「学习路线」，检查就永久
+    静默且没有任何信号（navigation-review-verdict-2026-08-10 §2.2 实证）。判据本身
+    （含箭头且 wikilink 少于箭头）只会命中路线形态的行，不需要标题当锚，故改扫全篇编号列表项。
+
     实测本库：修复前 51 步里仅 2 步可点，本判据可命中 12 条路线中的 9 条；修复后静默。
     """
     vault = Path(vault)
@@ -487,11 +516,8 @@ def overview_unclickable_routes(vault) -> list[str]:
     if not ov.is_file():
         return []
     _meta, body = mdpage.read_page(ov)
-    if "## 推荐学习路线" not in body:
-        return []
-    section = body.split("## 推荐学习路线", 1)[1].split("\n## ", 1)[0]
     bad = []
-    for line in section.splitlines():
+    for line in body.splitlines():
         if not _ROUTE_ITEM.match(line):
             continue
         steps = _ROUTE_ASIDE.sub("", line)
@@ -518,12 +544,17 @@ def stray_files(vault) -> list[str]:
     return out
 
 
-def lint_pages(vault, pages: list[dict], *, phase_e: bool = True) -> list[dict]:
+def lint_pages(vault, pages: list[dict], *, phase_e: bool = True,
+               source: str | None = None) -> list[dict]:
     """返回违规列表 [{path, rule, detail}]；空列表 = 门禁通过。
     phase_e=False（kb-save 会话模式）：跳过 ingest 阶段 E 的概念批义务
     （L7-synthesis-missing / topics-missing / overview-seed）——kb-save 的准入门禁
     已保证产出为综合层形态，且不背 overview 维护义务；A2 概念收编等 vault 级
-    不变量照常检查。"""
+    不变量照常检查。
+
+    ``source``：本轮来源 id。只有 `overview-source-unlinked` 用它——那条规则的射程是
+    **本轮来源自己那一页**，没有本轮来源就无从判定，故 ``None`` 时不评估该条
+    （唯一的 ``phase_e=True`` 调用方 `pipeline.cmd_lint` 恒传 ``args.source``）。"""
     vault = Path(vault)
     vs: list[dict] = []
 
@@ -615,19 +646,25 @@ def lint_pages(vault, pages: list[dict], *, phase_e: bool = True) -> list[dict]:
                 hit("overview.md", "overview-seed",
                     "本批产出 concept 但 overview.md 仍是未填充的种子骨架（含占位符）；"
                     "阶段 E 必做——重写 overview（注意：lint 失败回滚会连 overview 的就地编辑一起还原，修复重跑前须重新应用）")
-    # overview 导航完备性：每个来源台账页都必须能从 vault 入口页到达。
+    # overview 导航完备性：**本轮来源自己**的台账页必须能从 vault 入口页到达。
     # 只在阶段 E（ingest）生效：overview.md 在 ingest 的 write_scope 里（workorder.py），
     # 这是它**唯一**的写入通道——revise-adopted 的 _safe_rel 拒它、kb-save 是 new-page-only。
     # 对 kb-save 批次设这条门就是"要求编辑却不给编辑通道"，正犯核心约束⑦。
     # 补救办法机械且完备：`sync-overview-sources --apply`，或在阶段 E 重写 overview 时带上。
     # 立法依据：该缺口跨书复现三次（mysql / llm-fundamentals / deep-learning），
     # 最后一次实测 22 个来源里 15 个在 overview 中没有任何入口。
-    if phase_e:
-        for sid in overview_unlinked_sources(vault):
-            hit("overview.md", "overview-source-unlinked",
-                f"来源 `{sid}` 已有台账页却未被 overview.md 链接，读者无法从入口页到达；"
-                f"补一条 `[[sources/{sid}|<书名>]]`，或跑 "
-                f"`sync-overview-sources --apply` 由 CLI 机械补齐")
+    #
+    # **射程只到本轮来源**（navigation-review-verdict-2026-08-10 F4）：缺口的成因是
+    # "每次 ingest 忘掉自己那本"，射程就该精确对齐成因。旧射程扫全库，于是第 N 本书会被
+    # 第 1..N-1 本的欠账拖进 cmd_lint 的**无差别回滚**（连 overview 这一轮的就地编辑一起
+    # 还原，"回滚吃就地编辑"已连踩两本书），narrow rework 轮次同样会被拦——那正是
+    # L7-synthesis-missing 判错射程的同型错误（宪法核心约束⑦引为教训，5d6a7ea 修的就是射程）。
+    # 历史欠账降级到软警告 overview_unlinked_other_sources，仍看得见，只是不劫持别人的轮次。
+    if phase_e and source and source in overview_unlinked_sources(vault):
+        hit("overview.md", "overview-source-unlinked",
+            f"本轮来源 `{source}` 已有台账页却未被 overview.md 链接，读者无法从入口页到达；"
+            f"补一条 `[[sources/{source}|<书名>]]`，或跑 "
+            f"`sync-overview-sources --apply` 由 CLI 机械补齐")
     # A2：概念未被任何 topic 收编（画布会落入"未分类"）→ concept-heavy 域 fail-closed
     for cp in concepts_uncovered_by_topic(vault):
         hit(cp, "concepts-uncovered",

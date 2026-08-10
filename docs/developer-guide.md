@@ -1067,18 +1067,28 @@ vault preflight 复检全库 published 页、`vault-lint` CLI 可独立跑）**�
 `L7-synthesis-missing` / `topics-missing`（两者与 `overview-seed`、`overview-source-unlinked` 同属
 ingest 阶段 E 义务，kb-save 会话批豁免） / `placeholder-unfilled`（本轮 proposed 与已 published 页两处判定） / **`overview-seed`**
 （2026-07-08 新增，防"lint 失败回滚吃掉 overview 就地编辑、重跑无人复查"） /
-**`overview-source-unlinked`**（2026-08-08 新增：published 来源台账页必须能从 `overview.md` 到达。
+**`overview-source-unlinked`**（2026-08-08 新增，2026-08-10 收窄射程：**本轮来源自己**的 published
+台账页必须能从 `overview.md` 到达。
 立法依据是该缺口跨三本书复现——mysql / llm-fundamentals / deep-learning，最后一次实测 22 个来源里
 **15 个**在 overview 中无任何入口。机制上它必然反复：`overview.md` **只有 ingest 的 `write_scope`
 一条写入通道**（`revise-adopted` 的 `_safe_rel` 显式拒它、`kb-save` 是 new-page-only），
 ingest 之后没有维护手段。因此本条**只在阶段 E 生效**，并配 `sync-overview-sources --apply`
 作为随时可用的机械补救——**门禁与补救通道必须同时存在**，否则就是核心约束⑦ 说的
-"要求编辑却不给编辑通道"。射程刻意只到**来源台账链接**、不到 topic：补一条指向既有页的链接
-不制造任何内容，而"每个 topic 都要有 overview 段落"会把冷门 topic 逼出填充式文字。
+"要求编辑却不给编辑通道"。
+**射程只到本轮来源，不扫全库**（navigation-review-verdict-2026-08-10 F4）：缺口的成因是
+"每次 ingest 忘掉自己那本"，射程就该对齐成因。旧射程扫全库，而 `cmd_lint` 对任何一条违规都做
+**无差别回滚**——于是第 N 本书会被第 1..N-1 本的欠账连累，连 `overview.md` 这一轮的就地编辑
+一起被还原（"回滚吃就地编辑"已连踩两本书），只改几句措辞的 narrow rework 轮次同样会被拦。
+那正是 `L7-synthesis-missing` 判错射程的同型错误（宪法核心约束⑦引为教训）。其他来源的欠账
+降级到软警告 `wiki_gate.overview_unlinked_other_sources`，仍在收尾时打印，只是不劫持别人的轮次。
+射程刻意只到**来源台账链接**、不到 topic，判据是**有没有能算出正确答案全集的确定性补救**：
+`type: source` 页的集合机器可完整枚举（`sync-overview-sources` 就是它的实现），而"这个 topic 该链
+在 overview 的哪一节、用哪句话引出"没有确定性答案，任何机器补齐都是编内容。
 **topic 那一侧配的是软警告** `wiki_gate.overview_unlinked_topics`（非阻断，lint 收尾打
 `[warn]`，列出缺入口的主题及其概念数）：说明书教了"把本源 topic 链进 overview"却无人核对，
 一个库积累多本来源后，漏掉的主题只有全库审计才翻得出来。软警告把它变成落库当场可见的一行，
-看不看、补不补由人决定——**分级的依据是补救动作会不会制造内容，不是问题严不严重**） /
+看不看、补不补由人决定——**分级的依据是有无确定性补救，不是问题严不严重、也不是"topic 会不会
+长到上百"那种规模论证**） /
 `concepts-uncovered` /
 `duplicate-canonical` / `risk-traceability`（仅 MinerU 风险源触发） / `unattributed-proposed`（孤儿
 proposed 页：既无 frontmatter 归属也不在任何 write_set） / **`unaccounted-write`**（2026-07-11 引入、2026-07-18 扩展：归属≠记账
