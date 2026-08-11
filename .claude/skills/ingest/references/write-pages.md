@@ -99,7 +99,8 @@ Sub-unit command detail:
   output shows `<!-- route-b-assets`, each line like
   `- page=26 tier=must reason=formula staging=.../assets/p0026.png` is **visual evidence you must READ** —
   `tier=must` read the image, `tier=nice` at least skim it; then **re-express it natively in the page and never
-  embed it** (formula → native KaTeX `$$…$$` with the result stated, table → Markdown/prose, figure → mermaid/prose,
+  embed it** — **if you cannot actually open these image files, stop the ingest and say so**; writing the page
+  from the linearized text instead is the one failure no deterministic gate can catch (formula → native KaTeX `$$…$$` with the result stated, table → Markdown/prose, figure → mermaid/prose,
   per phase D; `source-image-embed` hard-blocks any `![[assets/…]]`). Read `staging/<src>/digest.md` first
   (skip on the first window). Use `--plain` only when debugging the raw slice.
 - U3: **first decide the concept's home domain — where the concept actually belongs, not the source book's

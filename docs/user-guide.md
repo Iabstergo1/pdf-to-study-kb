@@ -35,9 +35,46 @@
 | PyMuPDF + PyYAML（+ pytest） | **基础/开发依赖**：Markdown 与 PDF fast path 抽取、测试 | `requirements.txt` |
 | MinerU | **生产格式依赖**：strict PDF 双审、扫描 PDF、DOCX、PPTX 必须安装（未装则 fail-closed） | `requirements.txt` 末尾 MinerU 段 / `scripts/install_mineru.py` |
 | Claude Code 或 Codex | 对话接口，**二选一即可**（确定性行为一致） | README §安装 |
+| **模型必须能识图（多模态）** | **硬要求**。难页证据是整页 PNG，`show-window` 只交给模型一个`assets=…png` 路径；纯文本模型打不开、不报错、静默改用拍平文本写作 | 本文 §2.1、`CLAUDE.md` §7 |
 | 项目本体 | 克隆到本地任意路径（下文一律用 `<repo-root>` 指代） | — |
 | Obsidian（可选） | 阅读成品 vault | README §安装 |
 | MinerU（可选） | PDF 严格验收的复核后端 + 扫描/低文本 PDF、DOCX/PPTX 的主解析器 | `requirements.txt` 末尾、README §安装 |
+
+### 2.1 为什么必须用有识图能力的模型
+
+这一条不是偏好，是这套设计的地基。
+
+本项目的视觉保真走 **route B**：`profile` 阶段把公式页、矢量图页、表格页标为难页，`source-convert`
+把它们**渲染成整页 PNG**；写作时 `show-window` 在窗口顶部给出
+
+```
+<!-- window-meta: ... assets=assets/p0076.png,assets/p0085.png -->
+```
+
+——**是路径，不是图本身**。有识图能力的模型会去打开它们；没有的模型打不开，**而且不会报错**，
+只会退回去按 `source.md` 里被拍平的文本写。产出看起来完全正常：frontmatter 齐全、链接不断、
+记账合规、渲染安全——**全部确定性门禁都会放行**，因为门禁能审计"读没读窗口"，审计不了"看没看图"。
+
+**暴露面有多大，落书前就能免费查**：
+
+```powershell
+$env:PYTHONUTF8=1
+python scripts\pipeline.py preflight-eval --source <src> --strict
+# 输出里找这一行：
+#   [OK  ] detection_distribution (info) needs_vision 279/348=80%（高线 90%）
+```
+
+`needs_vision` 的比例就是**这本书里模型必须看得见的页面占比**。实测一本 348 页的算法教材是 **80%**，
+其中 223 页带图类信号（示意图 / 流程图），**没有任何文本等价物**；只有 36 页是"仅公式或表格"——
+那部分理论上可以用 MinerU 的 LaTeX/HTML 结构化文本替代读图，但那是少数。
+
+比例低的书（命令行手册、纯散文）风险小；**图密集的教材绝不能交给无识图能力的模型写**。
+它写出来的内容无源可依，而且只有逐页对照原书的 kb-qa 才查得出来——那是最贵的一种发现方式。
+
+**为什么不做成 CLI 门禁**：能力无法从流水线内部探测，而"让模型自己声明有没有识图能力"是一个
+迟早会被撒谎的开关。这条只能靠人在选模型时把关。
+
+---
 
 **路径要求：**
 
@@ -379,7 +416,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | `check-session` | query-session 目录契约检查；run_id 仅限单层目录名，saved 模式严格核对 canonical candidate 与 new-only 授权一一对应 | `--id <run_id>` | `--saved` |
 | `skill-mine` / `skill-gate` / `skill-stage` / `skill-adopt` | skill 自进化四步 | gate/stage/adopt 需 `--candidate` | `--base HEAD` |
 | `ingest-stats` | 只读"体检单"：窗口/返工、窗口账本估算 `pages_estimate`，以及按 vault `source_refs` 重建的精确交付清单 `page_inventory`（报告总页数只认后者；不含 token/费用） | `--source` | `--json` |
-| `review-coverage` | 只读"审查进度表"（**可选的运营辅助，不是流水线的一步**）：还有多少内容页没人工审过、哪些页复审后仍留着未决问题。**没登记不算失败**，纯参考；只有台账本身写错（指向不存在的页或报告）才报错 | — | — |
+| `review-coverage` | 只读"审查进度表"（**可选的运营辅助，不是流水线的一步**）：还有多少内容页没人工审过、哪些页复审后仍留着未决问题，以及**哪几本书整本没人逐页读过**（按来源列出没有 `whole-source` 整源认证记录的源；跨源共享页已去重，不会虚高）。**没登记不算失败**，纯参考；只有台账本身写错（指向不存在的页或报告）才报错 | — | — |
 | `sync-overview-sources` | 把 `overview.md` 里的来源台账索引块同步成"当前该有的样子"（**默认只打印计划，不改文件**；dry-run 会原样打印将被替换的那段，让你先看清会删什么）。当收尾 lint 报 `overview-source-unlinked` 时用它一键补齐；撤过库、改过书名也用它清掉过时条目。只动 `<!-- sources-index -->` 标记块，你自己写的正文不会被碰；万一那对标记被写坏了（少一个、多一对、次序颠倒），它会**直接罢工并请你手工处理**，不会去猜边界 | — | `--apply` |
 | `proposals-resolve` | **给已修复的错误销账**（不然 `skill-mine` 的 backlog 会越攒越脏）；**默认只列清单不改库**，看清楚了再加 `--apply` | `--id <行号>` 或 `--signature <类型>` | `--source`（配合 `--signature` 限定某源）`--all-matching`（批量落库必须加）`--apply` |
 | `reset-source` | **状态机"倒带键"**：某一步卡死重跑不了时，安全回退到更早的阶段。**默认只打印计划不改库**，确认后加 `--apply` | `--source --to {registered,profiled,converted,windowed,workorder_ready}` | `--apply` |

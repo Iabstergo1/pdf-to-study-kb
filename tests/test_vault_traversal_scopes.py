@@ -80,3 +80,63 @@ def test_derived_name_lists_are_pinned_with_reasons():
     assert "quiz-index.generated.md" in retraction._DERIVED
     assert "log.md" in source_reuse._DERIVED
     assert "concepts/_registry.yaml" in legacy_revision._DERIVED
+
+
+# ── review-coverage 的按来源整源认证统计 ───────────────────────────────────────
+#
+# 它回答的是"哪本书整本没人逐页读过"——按页算的覆盖率看不出这件事。
+# 实测（2026-08-12 复盘）：768 个内容页里 483 页来自 6 个做过整源认证的来源，
+# 而 17 个来源从未做过整源认证。判据只认台账条目自己的 `scope` 字段，不猜。
+
+
+def _src_page(vault, rel, sources, ptype="concept"):
+    p = vault / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    refs = "".join(f"- source: {s}\n" for s in sources)
+    p.write_text(f"---\ntype: {ptype}\nstatus: published\nsource_refs:\n{refs}---\n正文\n",
+                 encoding="utf-8")
+    return rel
+
+
+def test_source_coverage_counts_unique_pages_not_per_source_sum(tmp_path):
+    """跨源共享页不得按来源相加——那会让"没人读过的页数"虚高。
+
+    实测触发点：deep-learning 的概念页常带 4 个 `source_refs`（教材+课件+论文合并），
+    按来源相加得 442，去重后实为 285。一个虚高的数字与本项目要消灭的误导数同类。
+    """
+    import pipeline
+    vault = tmp_path / "wiki"
+    shared = _src_page(vault, "domains/d/concepts/共享.md", ["a", "b", "c"])
+    only_a = _src_page(vault, "domains/d/concepts/独有.md", ["a"])
+    pages = [shared, only_a]
+
+    rows = pipeline._review_source_coverage(vault, pages, {})
+    by = {r["source"]: r for r in rows}
+    assert by["a"]["owned"] == 2 and by["b"]["owned"] == 1 and by["c"]["owned"] == 1
+    # 三个来源 owned 相加 = 4，但去重后只有 2 个页
+    assert len(set().union(*(r["pages"] for r in rows))) == 2
+
+
+def test_source_coverage_reads_scope_field_not_mere_registration(tmp_path):
+    """只有 `scope: whole-source` 算整源认证；抽样登记（per-page）不算。"""
+    import pipeline
+    vault = tmp_path / "wiki"
+    p1 = _src_page(vault, "domains/d/concepts/一.md", ["book"])
+    p2 = _src_page(vault, "domains/d/concepts/二.md", ["book"])
+    entries = {
+        p1: [{"date": "2026-08-12", "outcome": "no-findings", "scope": "whole-source"}],
+        p2: [{"date": "2026-08-12", "outcome": "no-findings", "scope": "per-page"}],
+    }
+    row = pipeline._review_source_coverage(vault, [p1, p2], entries)[0]
+    assert row["owned"] == 2 and row["whole"] == 1 and row["sampled"] == 1
+
+
+def test_source_coverage_excludes_overview(tmp_path):
+    """overview.md 带全部来源的 source_refs，算进任何单一来源都失真——与台账写入口径一致。"""
+    import pipeline
+    vault = tmp_path / "wiki"
+    ov = _src_page(vault, "overview.md", ["a", "b"], ptype="overview")
+    c = _src_page(vault, "domains/d/concepts/x.md", ["a"])
+    rows = pipeline._review_source_coverage(vault, [ov, c], {})
+    assert [r["source"] for r in rows] == ["a"], rows
+    assert rows[0]["owned"] == 1

@@ -25,6 +25,18 @@
    from `page_inventory.total` / `page_inventory.by_type`. **Always use `page_inventory` for the delivered
    page total; never use `pages_estimate` as the delivery total.** `pages_estimate` is a window-ledger estimate
    retained for operational history; after reopen/partial rework it can omit unchanged pages from older rounds.
+6. **State the acceptance status in the closing report — this sentence is mandatory, not optional:**
+
+   > **published, pending content acceptance** —— 结构发布完成，内容尚未验收。
+   > 内容验收需要一次由**未参与本次写作**的会话执行的 kb-qa 逐页忠实度复核，并由人对其报告拍板。
+
+   Do **not** report an ingest as "完成 / done / 落库完成" without it. `lint` passing proves order, safety,
+   accounting and provenance — it proves nothing about whether the prose came from the source, and the
+   session that wrote the pages is the one party that cannot judge that (§ below; the executor's own
+   "acceptable" verdict was wrong twice, 2026-07-17/19). Omitting the sentence is how "published" silently
+   gets read as "verified" and the kb-qa pass never happens — measured: the 2026-08-10 hello-algo ingest
+   report contained no acceptance-status wording at all, and its two content findings surfaced only
+   because a kb-qa was run for unrelated reasons.
 
 ## Skipping phase E → lint blocks (no longer a soft warning)
 

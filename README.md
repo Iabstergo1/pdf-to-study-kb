@@ -54,7 +54,7 @@
 | 多本书各存一份笔记，概念重复、互不连通 | 单一 vault、按领域分区；同一概念**走唯一入口合并**，绝不重复建页 |
 | 笔记是线性翻译，越读越像目录 | **概念/主题为主**组织，lessons 仅为降级的可选辅助层（主题命名、非章节复述） |
 | 要记一堆命令、手动跑流水线 | **对话式**：一句“把这本书加进知识库”，skill 自己编排全流程 |
-| 公式/图表在 PDF 里转写易碎 | 文本走 PyMuPDF，**难页渲染整页 PNG** 交 Claude 多模态读图，写成 KaTeX |
+| 公式/图表在 PDF 里转写易碎 | 文本走 PyMuPDF，**难页渲染整页 PNG** 交**多模态模型**读图，写成 KaTeX（模型无识图能力则此层失效） |
 | 自动写库直接覆盖手改内容 | **两阶段发布** + 覆盖保护：先写 `proposed`，过门禁才 `published`，失败回滚进 Review-Queue |
 
 ---
@@ -62,6 +62,14 @@
 ## 🚀 安装（克隆后三步）
 
 **前置：** [Python](https://www.python.org/) 3.12+、[Claude Code](https://claude.com/claude-code) 或 **Codex**（任选其一作为对话接口）、[Obsidian](https://obsidian.md/)（可选，用来阅读成品）。
+
+> [!IMPORTANT]
+> **对话接口背后的模型必须具备多模态（识图）能力——这是硬要求，不是偏好。**
+> 本项目的视觉保真走 route B：难页渲染成整页 PNG，由写作 LLM **读图**后原生复述。`show-window` 交给模型的是
+> `assets=…png` 这样的**路径**，纯文本模型打不开、也不会报错，会静默退化成「只按拍平后的文本写」。
+> 实测一本 348 页教材：**279 页（80%）是难页，其中 223 页带图类信号、没有文本等价物**。这样跑出来的库
+> 能通过全部确定性门禁，却建立在模型从未看过的证据上。**先花零成本查暴露面**：`preflight-eval --strict`
+> 会打印 `needs_vision N/M=X%`，那就是这本书里模型必须「看得见」的比例。
 
 ```bash
 # ① 克隆并进入项目
@@ -373,7 +381,7 @@ pdf-to-study-kb/
 | `promote-concept` | 机械提升一个概念为 shared | `--id concept.<domain>.<slug>` |
 | `check-session` | query-session 目录契约检查（Q1）；run_id 单层校验，saved 模式严格核对 canonical candidate 与 new-only 授权一一对应 | `--id <run_id> [--saved]` |
 | `ingest-stats` | 只读代理指标：窗口成败/阶段耗时与重跑/lint 失败/窗口账本估算 `pages_estimate` + 精确交付清单 `page_inventory`（报告总页数只认后者）/违规分布；不伪造 token/费用 | `--source [--json]` |
-| `review-coverage` | **可选的运营辅助，不是流水线阶段**：读 `wiki/Review-Queue/content-review-ledger.yaml`，统计内容页的人工审查覆盖率与仍 `findings-open` 的页。未登记的页只按域列出、**不判失败**（它不是门禁）；仅当台账条目指向不存在的页或报告时非零退出 | — |
+| `review-coverage` | **可选的运营辅助，不是流水线阶段**：读 `wiki/Review-Queue/content-review-ledger.yaml`，统计内容页的人工审查覆盖率与仍 `findings-open` 的页，并按**来源**列出**从未做过整源认证**（`scope: whole-source`）的书——按页算的覆盖率看不出「哪本书整本没人逐页读过」。未登记的页只按域列出、**不判失败**（它不是门禁）；仅当台账条目指向不存在的页或报告时非零退出 | — |
 | `sync-overview-sources` | 把 `overview.md` 的来源台账索引块同步到期望值（**默认 dry-run**）。这是 `overview-source-unlinked` 门禁的**补救通道**——门禁必须配正当的修复路径，否则就是"要求编辑却不给编辑通道"。判据是"块 ≠ 期望值"（不是"有没有缺口"），所以撤库残留与陈旧书名也会被顺带清掉；块形态不合法（标记不成对/不唯一/次序颠倒）时**拒绝执行**，绝不猜边界 | `[--apply]` |
 
 ### skill 自进化（零 LLM 命令；唯一 LLM 是人触发的 `skill-evolve` skill）
@@ -475,6 +483,9 @@ wiki/
 - **概念归并按名做**：`resolve-concept` 按提及名 / 别名合并，跨域同名异义或细微语义差别可能需你在 `Review-Queue` / `kb-review` 里人工纠正。
 - **综合层是 LLM 的归纳**：overview / topic / comparison / synthesis 可能有偏差或过度概括，作为线索而非定论。
 - **每次入库都计费**：长文档的一次 ingest 是一段付费长会话；先用 `source-preflight` 零成本验证预处理，再决定是否入库。
+- **模型必须能识图**：难页证据是整页 PNG，`show-window` 只给路径。纯文本模型不会报错，只会静默改用拍平文本写作——
+  产出形式完美、门禁全绿，却无源可依，只有逐页对照原书的 kb-qa 才查得出来。落书前先看 `preflight-eval` 的 `needs_vision` 比例：
+  比例高的书（图密集教材可达 80%）绝不能交给无识图能力的模型写。
 
 ---
 

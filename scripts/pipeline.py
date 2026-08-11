@@ -2676,6 +2676,50 @@ def _review_domain_counts(pages) -> dict:
     return counts
 
 
+def _review_source_coverage(vault, pages, entries) -> list[dict]:
+    """按**来源**统计内容验收覆盖：这本书整本被逐页读过没有？（只读统计，不是门禁）
+
+    存在的理由：按页算的覆盖率看不出"哪本书整本没验过"。实测该缺口很大——2026-08-12 复盘时
+    768 个内容页里 483 页来自 6 个做过整源认证的来源，而 deep-learning 域 17 个来源的 269 页
+    只有 10 页被逐页点名过；这个事实在原先的输出里完全不可见。
+
+    判据用**台账条目自己的 `scope` 字段**，不猜：一页只要带过一条 `scope: whole-source` 的条目，
+    就算被整源认证覆盖过。`overview.md` 不计（它带全部来源的 source_refs，算进任何单一来源都失真，
+    与台账写入口径一致）。
+
+    刻意**不做成门禁**：整源认证是一次昂贵的人工复核，硬拦等于逼人立刻花这笔钱（核心约束⑦）。
+    这里只把"还有哪几本整本没人看过"摆出来，看不看、验不验由人决定。
+    """
+    import mdpage
+    vault = Path(vault)
+    whole, sampled = set(), set()
+    for rel, evs in (entries or {}).items():
+        for ev in evs if isinstance(evs, list) else []:
+            if not isinstance(ev, dict):
+                continue
+            (whole if ev.get("scope") == "whole-source" else sampled).add(rel)
+    by_source: dict[str, dict] = {}
+    for rel in pages:
+        if rel == "overview.md":
+            continue
+        meta, _body = mdpage.read_page(vault / rel)
+        for ref in meta.get("source_refs") or []:
+            sid = ref if isinstance(ref, str) else (
+                ref.get("source") if isinstance(ref, dict) else None)
+            if not isinstance(sid, str) or not sid:
+                continue
+            row = by_source.setdefault(sid, {"source": sid, "owned": 0, "whole": 0,
+                                             "sampled": 0, "pages": set()})
+            row["owned"] += 1
+            row["pages"].add(rel)
+            if rel in whole:
+                row["whole"] += 1
+            elif rel in sampled:
+                row["sampled"] += 1
+    return sorted(by_source.values(), key=lambda r: (r["whole"] / r["owned"] if r["owned"] else 0,
+                                                     -r["owned"], r["source"]))
+
+
 def cmd_review_coverage(args):
     """内容审查台账覆盖率（只读）。未登记不判失败——作用是把"还剩多少"随时可查，
     不是当门禁逼人把台账填满。error 仅两类：台账指向不存在的页/报告。"""
@@ -2734,6 +2778,21 @@ def cmd_review_coverage(args):
     print("未登记页（按域）:")
     for key, n in sorted(_review_domain_counts(unregistered).items()):
         print(f"  {key}   {n}")
+    # 按来源的整源认证覆盖：按页算的覆盖率看不出"哪本书整本没验过"。只读统计，不判失败。
+    rows = _review_source_coverage(workspace / "wiki", pages, entries)
+    gaps = [r for r in rows if r["whole"] < r["owned"]]
+    if gaps:
+        print(f"\n未整源认证的来源（{len(gaps)}/{len(rows)}；whole-source = 逐页整读认证，"
+              f"未登记不判失败）:")
+        print(f"  {'source':<28}{'内容页':>7}{'整源认证':>9}{'抽样登记':>9}")
+        for r in gaps:
+            print(f"  {r['source']:<28}{r['owned']:>7}{r['whole']:>9}{r['sampled']:>9}")
+        never = [r for r in gaps if r["whole"] == 0]
+        if never:
+            # 去重：跨源共享页（一页带多个 source_refs）不能按来源相加，否则数字虚高。
+            uniq = set().union(*(r["pages"] for r in never))
+            print(f"  —— 其中 {len(never)} 个来源**从未做过整源认证**"
+                  f"（去重后 {len(uniq)} 个内容页）：这些书没有人逐页读过。")
     for err in errors:
         print(f"[FAIL] {err}", file=sys.stderr)
     if errors:

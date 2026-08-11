@@ -86,6 +86,12 @@ and merged only by a human `skill-adopt`. Protocols: `docs/skill-runtime/{routin
 
 - **One ingest per vault at a time** (`source_locks`). Codex and Claude **must not ingest the same vault
   concurrently**; reclaim a crashed lock with `python scripts/pipeline.py unlock`.
+  **The lock covers the vault's ingest, not the repo working tree** — two sessions editing `CLAUDE.md`
+  or a skill tree at the same time will silently overwrite each other, and nothing warns them. Observed
+  2026-08-12: a kb-review session found 8 tracked files modified by a concurrent session and had to prove
+  by mtime that they were not its own. Discipline, not mechanism: one session touching this repo at a time,
+  `git status` before starting cross-session work, and **close Obsidian before any independent audit** (a
+  live editor rewrote 6 vault files' mtime mid-audit and contaminated that evidence line).
 - **The shared CLI is the only contract:** both agents call only `scripts/pipeline.py`; **business logic
   changes go there**, never duplicated in skills. If you change CLI behavior, keep both skill trees consistent.
 - **Resume anchor = `pipeline.py next` + the digest `## RESUME` block** (no session-level hook): after an
@@ -105,6 +111,20 @@ and merged only by a human `skill-adopt`. Protocols: `docs/skill-runtime/{routin
   absent); `md` = fast path; `docx`/`pptx` and scanned/low-text PDF = MinerU primary (`--backend auto`
   routes, `--backend mineru` forces; fail-closed if absent).
 - **Each book's ingest is a paid LLM operation**, not import-and-go; the project ships with an empty vault.
+- **The ingest agent MUST be multimodal (vision-capable) — this is a hard requirement, not a preference.**
+  Route B hands the writing LLM **rendered page images** as its evidence: `show-window` emits an
+  `assets=…png` header of **paths**, and phase A.5's arbitration packet likewise ships a `page_image`
+  path. A text-only model cannot open either, does not error, and silently degrades to writing from
+  the linearized `source.md`. The exposure is not marginal — measured on a real 348-page textbook:
+  **279/348 pages (80%) were hard pages, and 223 of them carried a figure-class signal that has no
+  textual equivalent** (only 36 were formula/table-only, where MinerU's LaTeX/HTML could in principle
+  substitute for the image). Such a run passes **every** deterministic gate — form, links, accounting,
+  provenance, render-safety — while resting on evidence the writer never saw; only a page-by-page kb-qa
+  against the source can find it (§7 "reading evidence can be audited, never enforced"). **Check the
+  exposure before spending:** `preflight-eval --strict` prints `detection_distribution … needs_vision
+  N/M=X%` — that ratio is the share of the book the agent must be able to *see*. Deliberately **not**
+  a CLI gate: capability cannot be probed from inside the pipeline, and a self-declared capability flag
+  would be a lie waiting to happen.
 - **Lint hard rules (form is not policed; order/safety/provenance is):** wikilinks must be full
   vault-relative paths (not Obsidian basenames); **no mandatory section titles** (D-4); per-type frontmatter
   complete (non-source pages carry `source_refs`); **no source image in a published body** (D-1); no body H1

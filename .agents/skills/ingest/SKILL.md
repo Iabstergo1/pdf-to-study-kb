@@ -178,7 +178,16 @@ incremental reopen        reopen → ingest-start →[ per-window backfill ]→ 
 ## 8. Failure stops / recovery
 
 Any preprocessing step errors; `check-write` DENY (out of scope / overwrite protection); lint fails;
-`managed_by: human` page conflict; cross-domain promotion candidate; the vault lock is held. **Recovery:**
+`managed_by: human` page conflict; cross-domain promotion candidate; the vault lock is held; **you cannot
+actually open the route-B page images** (see below — stop, do not write from the linearized text).
+
+> **Vision is a hard prerequisite, not a nice-to-have.** If `show-window` lists `route-b-assets` / an
+> `assets=…png` header and you cannot actually view those files, **stop and tell the user this source
+> needs a vision-capable agent** — do not continue from `source.md` alone. Writing a hard page without
+> seeing its image produces a page that passes every deterministic gate while resting on evidence you
+> never read, and only a page-by-page kb-qa against the source can catch it. The same applies to phase
+> A.5: never decide `ignore` on a `figure_missing_asset` packet whose `page_image` you could not open —
+> choose `render` (costs one image) or `needs_human`. **Recovery:**
 after an interruption, re-read `chapters.json` + the digest `## RESUME` block, **and re-read
 `references/write-pages.md` before writing any page** — an interrupted session has lost the writing
 contracts (prose organization, self-test nesting, accounting), and a fresh page's seed scaffold never
