@@ -68,14 +68,14 @@ the later edit but cannot validate the evidence or change `source_refs`.
 **A "not in the source" verdict requires an exhaustive search, and the search must be shown.** Before
 writing that a term/number/mechanism is absent, search the source for the Chinese rendering, the English
 name, the abbreviation, and case/hyphen variants — then **record every search term** in the finding. A
-`single-language search` is the documented way this goes wrong: a 2026-07-19 audit declared "the book
-never mentions History 链表" after searching only `history list`, while the book used the Chinese form
-four times. The cost is asymmetric — a missed finding leaves one clause unfixed, but a **false** finding
+`single-language search` is the documented way this goes wrong: an audit once declared a bilingual term
+"not mentioned" after searching only its English form, while the book used the Chinese form several
+times. The cost is asymmetric — a missed finding leaves one clause unfixed, but a **false** finding
 triggers a rewrite of a correct page, and every rewrite is a fresh chance to introduce an error.
 
 **Normalize five PDF extraction deformations before you conclude a term is absent.** A page's word can be
-verbatim in the source yet fail a naive string search because the extracted `source.md` mangled it. The
-2026-07-21 llm-fundamentals audit hit the first three at once (**20 false "not in source" candidates**),
+verbatim in the source yet fail a naive string search because the extracted `source.md` mangled it. One
+audit hit the first three at once (**20 false "not in source" candidates**),
 then the full page-by-page read surfaced two more — each of which, if believed, would have rewritten a
 correct page. Apply all five before the search, not after:
 

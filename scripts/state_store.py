@@ -786,7 +786,7 @@ def window_reads_in_round(db_path, source_id: str, round_token) -> set[str]:
 
 def export_source_rows(db_path, source_id: str) -> dict[str, list[dict]]:
     """retract 证据包 DB 侧（只读）：该源在全部相关表的行 → {table: [row dict...]}。
-    处置动作必须先有可复核底稿——曾直接清账导致审计数字永久不可复核（2026-07-17 mysql）。"""
+    处置动作必须先有可复核底稿——曾直接清账导致审计数字永久不可复核。"""
     con = connect(db_path)
     try:
         con.execute(_WINDOW_READS_DDL)

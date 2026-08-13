@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """fidelity_probe 纯函数层：反引号标识符的来源命中探测（advisory-only）。
 
-口径（与模块 docstring 一致，2026-07-19 mysql 内容忠实度返工 B 组）：
+口径（与模块 docstring 一致，源自一次内容忠实度返工的经验固化）：
 - 只看反引号内形如代码标识符的 token：`[A-Za-z_][A-Za-z0-9_]*` 可带尾随 `()`，
   且必须含 `_` 或以 `()` 结尾（排除普通英文单词）；含 CJK / 空格的 span 不算。
 - 大小写敏感（`MEMORY_BLOCK_READ_COST` ≠ 书里的 `memory_block_read_cost`——实测真阳性）。

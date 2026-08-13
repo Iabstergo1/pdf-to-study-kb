@@ -1,6 +1,6 @@
 """retract-source 的纯函数层：撤库分类 / 证据导出与核验 / 精确删除。
 
-设计动机（2026-07-17 mysql 事件）：下架动作曾直接清掉三张账本表，审计结论的原始证据
+设计动机（一次事故）：下架动作曾直接清掉三张账本表，审计结论的原始证据
 随处置消失。retraction 把「先导出证据包并核验完整 → 才允许删除 → 重建派生层」固化为
 确定性顺序；本文件测文件系统层的纯函数，CLI 编排在 test_doctor_cli.py。
 """
@@ -28,7 +28,7 @@ def _page(vault, rel, meta, body="正文。\n"):
 
 def _vault_for_classify(tmp_path):
     v = tmp_path / "wiki"
-    # 独占本源：规范台账页 + 域下错位重复台账页（mysql 事件原样）
+    # 独占本源：规范台账页 + 域下错位重复台账页（复现一次真实事故原样）
     _page(v, "sources/s1.md", {"type": "source", "status": "published",
                                "managed_by": "pipeline", "source_id": "s1"})
     _page(v, "domains/d/sources/s1.md", {"type": "source", "status": "published",

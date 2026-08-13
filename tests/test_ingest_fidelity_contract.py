@@ -1,4 +1,4 @@
-"""Ingest source-fidelity doc contract (2026-07-19 mysql content-fidelity postmortem).
+"""Ingest source-fidelity doc contract (source-fidelity postmortem).
 
 Guards the three A-group doc fixes in BOTH skill trees (byte parity itself is test_t2's job):
 - A1 write-pages.md: broken-link remediation is rephrase-first — creating a page is only legal
@@ -25,7 +25,7 @@ ordinary dual-tree doc maintenance guarded here:
 - D kb-qa SKILL.md: a sampling PASS covers only the assertions sampled; later rounds never
   inherit it as a page-level clean bill (three consecutive rounds overturned inherited CLEANs).
 - E CLAUDE.md / AGENTS.md: a gate must not demand an edit in situations where no legitimate edit
-  exists, or it manufactures content (broken-link → the source-less 死锁 page; L7 → touching an
+  exists, or it manufactures content (broken-link → a source-less concept page; L7 → touching an
   already-complete synthesis layer during a narrow rework).
 """
 import re
@@ -154,7 +154,7 @@ def test_c_zero_hit_verdict_requires_bilingual_search():
 def test_c_search_normalizes_pdf_extraction_deformations():
     """C 加固：判"来源中没有"前，检索须先归一 PDF 抽取形变，否则字面查无是假阳性。
 
-    2026-07-21 llm-fundamentals 复核实证：不做归一会把"其实在源里"的词误判为缺失，
+    实证：不做归一会把"其实在源里"的词误判为缺失，
     触发对正确页面的重写。抽样阶段撞到 3 种（连字/断行/空格），全量通读又撞到 2 种
     （逗号千分位 1,000、中文数字"连续三个"）——五种各需一种归一动作。
     """

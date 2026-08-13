@@ -214,7 +214,7 @@ def test_create_concept_falls_back_when_template_missing(tmp_path):
 
 
 def test_slugify_cjk_with_ascii_fragment_kept():
-    # 回归（2026-07-04 game-theory 入库踩到 3 次）：中文名里夹 ASCII 片段（"AI"/"20"/"A-F"）时，
+    # 回归（一次真实入库连续踩到 3 次）：中文名里夹 ASCII 片段（"AI"/"20"/"A-F"）时，
     # 不得取出局部 ASCII 残片当 slug（曾产出 ai.md / 20.md）——含任何非 ASCII 字符即走 CJK 分支保留原字。
     assert concept_store.slugify("生成式AI的科研辅助定位") == "生成式AI的科研辅助定位"
     assert concept_store.slugify("逻辑自查清单20问") == "逻辑自查清单20问"

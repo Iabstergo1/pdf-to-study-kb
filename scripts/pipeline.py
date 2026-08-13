@@ -1644,7 +1644,7 @@ def cmd_retract_source(args):
 
     顺序固定：分类（只读）→ 导出证据包（页面全文 + 全部 DB 行 + 计划）→ 核验哈希 →
     精确删除 → 清账本三表 → 状态机重置 → log 审计行 → 重建全部派生层。
-    动机（2026-07-17 mysql 事件）：手工下架直接清了三张账本表、index 残留 30 条死链——
+    动机：一次事故里手工下架直接清了三张账本表、index 残留 30 条死链——
     处置动作销毁了审计底稿且派生层收不干净。本命令保证"先有底稿，才有删除"。
     共享页（source_refs 含他源）与 human 页只报告、绝不删。staging 不动（重做入库要用）。"""
     import json
@@ -2178,7 +2178,7 @@ def cmd_lint(args):
                 state_store.complete_stage(db, args.source, "lint", output_hash=ihash)
                 # 与成功路径（本函数末尾）同一份清理：check-write 对既有页留下的写前快照
                 # 只在"跑完主体逻辑"时被删；命中缓存的跳过分支漏了这一步会让 manifest
-                # 永久残留（2026-08-13 实测复现：nndl-ppt-deep-generative r328）。
+                # 永久残留（实测复现：一个来源连续两轮空 proposed 集合命中缓存后复查）。
                 snap_dir = _workspace_root() / "pipeline-workspace/snapshots" / args.source
                 if snap_dir.exists():
                     shutil.rmtree(snap_dir)

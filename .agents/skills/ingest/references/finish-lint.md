@@ -33,9 +33,9 @@
    Do **not** report an ingest as "完成 / done / 落库完成" without it. `lint` passing proves order, safety,
    accounting and provenance — it proves nothing about whether the prose came from the source, and the
    session that wrote the pages is the one party that cannot judge that (§ below; the executor's own
-   "acceptable" verdict was wrong twice, 2026-07-17/19). Omitting the sentence is how "published" silently
-   gets read as "verified" and the kb-qa pass never happens — measured: the 2026-08-10 hello-algo ingest
-   report contained no acceptance-status wording at all, and its two content findings surfaced only
+   "acceptable" verdict has been wrong before). Omitting the sentence is how "published" silently
+   gets read as "verified" and the kb-qa pass never happens — measured: one ingest's closing report
+   contained no acceptance-status wording at all, and its content findings surfaced only
    because a kb-qa was run for unrelated reasons.
 
 ## Skipping phase E → lint blocks (no longer a soft warning)

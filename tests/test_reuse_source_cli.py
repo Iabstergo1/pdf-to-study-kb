@@ -67,7 +67,7 @@ def _fixture(tmp_path, *, concepts=37, topics=3, group_sizes=(7, 6, 6, 6, 6, 6, 
     _write_page(origin_vault / "sources" / "mysql.md", {
         "domain": "database-systems", "format": "pdf", "managed_by": "pipeline",
         "source_id": "mysql", "status": "published",
-        "title": "MySQL是怎样运行的", "type": "source",
+        "title": "示例数据库教材", "type": "source",
     }, "origin canonical source page")
     origins = []
     for i in range(concepts):
@@ -156,7 +156,7 @@ def _fixture(tmp_path, *, concepts=37, topics=3, group_sizes=(7, 6, 6, 6, 6, 6, 
     mapping.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n",
                        encoding="utf-8", newline="\n")
     args = [
-        "reuse-source", "--source", "mysql", "--title", "MySQL是怎样运行的",
+        "reuse-source", "--source", "mysql", "--title", "示例数据库教材",
         "--domain", "sql", "--path", str(pdf), "--sha256", pdf_sha,
         "--origin-root", str(origin), "--origin-source", "mysql",
         "--mapping", str(mapping),

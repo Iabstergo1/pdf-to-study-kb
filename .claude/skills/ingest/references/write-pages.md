@@ -31,8 +31,8 @@ source's window text**. A number, parameter default, symbol name, or mechanism y
 
 - When there is **no substantive coverage in the current source → no new page, no padding.** Do not
   create a concept page, and do not pad an existing one, from general knowledge the book itself doesn't cover.
-  (2026-07-19 postmortem: a complete `死锁` page was published for a book whose 389 pages never mention
-  the word — formally flawless, entirely source-less.)
+  (a postmortem once found a complete concept page published for a term the source never mentions
+  anywhere in its several hundred pages — formally flawless, entirely source-less.)
 - **general domain knowledge must never be presented as this source's content** — writing it under this
   source's `source_refs` launders provenance, the one thing lint can never catch. A fact that feels
   "obviously true" but isn't in the window text stays out.
@@ -46,8 +46,8 @@ source's window text**. A number, parameter default, symbol name, or mechanism y
   image." A false disclaimer is worse than an ordinary omission: it doesn't just under-cover the source,
   it tells the reader the source has nothing here and actively talks them out of checking, hollowing out
   the page around it. (2026-08-12 postmortem: 5 published pages carried a false "source doesn't give X"
-  line while the source did — 4 of the 5 in a slide image the writer never opened; on `adaboost.md` that
-  one sentence alone suppressed the entire worked algorithm.) If you genuinely can't find coverage, just
+  line while the source did — 4 of the 5 in a slide image the writer never opened; on one algorithm page
+  that one sentence alone suppressed the entire worked derivation.) If you genuinely can't find coverage, just
   omit the claim — a thinner page costs nothing, a false disclaimer costs the whole page.
 - **Cross-domain home-domain writes (e.g. `research-method`, D-3) need extra grounding discipline.**
   Generic methodology content is the material most likely to feel "obviously true" without actually being
@@ -121,8 +121,9 @@ Sub-unit command detail:
   per phase D; `source-image-embed` hard-blocks any `![[assets/…]]`). Read `staging/<src>/digest.md` first
   (skip on the first window). Use `--plain` only when debugging the raw slice.
 - U3: **first decide the concept's home domain — where the concept actually belongs, not the source book's
-  domain (D-3).** A game-theory book that discusses 研究问题 / 文献综述 / 学术论文结构 / A-F框架 (research
-  methodology) resolves those into `research-method`, not `game-theory`; statistics/econometrics → `statistics`,
+  domain (D-3).** A book on any specialized subject that discusses 研究问题 / 文献综述 / 学术论文结构 /
+  A-F框架 (research methodology) resolves those into `research-method`, not the book's own subject domain;
+  statistics/econometrics → `statistics`,
   optimization → `optimization`, etc. Then `python scripts/pipeline.py resolve-concept --mention "<mention>"
   --domain <home-domain> [--alias "<english name>"] --ref-source <src> --ref-sections "<5.2>"`, and edit the page
   it returns. The work order pre-authorizes cross-domain concept writes for the managed home domains (`research-method`

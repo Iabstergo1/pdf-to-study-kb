@@ -644,7 +644,7 @@ def test_lint_skip_still_promotes_source_to_published(tmp_path):
     # 同时验证快照清理：成功 lint（非 skip）会在末尾删掉 snapshots/<source>/ 整个目录
     # （check-write 对既有页做写前快照的产物，第 2371-2373 行）；skip 分支必须做同样的
     # 清理，否则一次直接编辑已发布页正文触发的 check-write 快照会永久残留在磁盘
-    # （2026-08-13 实测复现：nndl-ppt-deep-generative 的 r328 快照，根因正是这里漏清）。
+    # （实测复现：一个来源连续两轮空 proposed 集合命中缓存后，残留快照根因正是这里漏清）。
     db = _ingest_ready(tmp_path)
     snap_dir = tmp_path / "pipeline-workspace/snapshots/note"
     mdpage.write_page(tmp_path / "wiki/domains/misc/lessons/a.md",
@@ -692,7 +692,7 @@ def test_lint_skip_still_promotes_source_to_published(tmp_path):
         f"实际卡在 {src2['current_stage']}/{src2['current_status']}")
     assert not snap_dir.exists(), (
         "lint 跳过（内容未变）时也必须清空该来源的写前快照目录，不能让 check-write "
-        "产生的 manifest 永久残留（2026-08-13 实测复现：nndl-ppt-deep-generative r328）")
+        "产生的 manifest 永久残留")
 
 
 def test_sync_assets_copies_pngs_to_vault(tmp_path):

@@ -57,7 +57,7 @@ def _sources_with_synthesis(vault) -> frozenset[str]:
     供 concepts_without_synthesis 判断"这个来源的阶段 E 义务是否已被满足过"——首次入库
     仍必须在本批带综合层页，但对已有综合层覆盖的来源做窄范围返工（只改既有 concept 的
     局部措辞）不必每次重触综合层，否则会逼着写无实质内容的综合层编辑（历史教训：
-    broken-link 规则曾用同一逻辑逼出一整页无来源的"死锁"概念）。"""
+    broken-link 规则曾用同一逻辑逼出一整页无来源的概念页）。"""
     vault = Path(vault)
     out: set[str] = set()
     for f in sorted(vault.rglob("*.md")):
@@ -651,7 +651,7 @@ def lint_pages(vault, pages: list[dict], *, phase_e: bool = True,
     # 这是它**唯一**的写入通道——revise-adopted 的 _safe_rel 拒它、kb-save 是 new-page-only。
     # 对 kb-save 批次设这条门就是"要求编辑却不给编辑通道"，正犯核心约束⑦。
     # 补救办法机械且完备：`sync-overview-sources --apply`，或在阶段 E 重写 overview 时带上。
-    # 立法依据：该缺口跨书复现三次（mysql / llm-fundamentals / deep-learning），
+    # 立法依据：该缺口跨来源复现三次，
     # 最后一次实测 22 个来源里 15 个在 overview 中没有任何入口。
     #
     # **射程只到本轮来源**（navigation-review-verdict-2026-08-10 F4）：缺口的成因是

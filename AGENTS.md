@@ -115,7 +115,7 @@ and merged only by a human `skill-adopt`. Protocols: `docs/skill-runtime/{routin
   Route B hands the writing LLM **rendered page images** as its evidence: `show-window` emits an
   `assets=…png` header of **paths**, and phase A.5's arbitration packet likewise ships a `page_image`
   path. A text-only model cannot open either, does not error, and silently degrades to writing from
-  the linearized `source.md`. The exposure is not marginal — measured on a real 348-page textbook:
+  the linearized `source.md`. The exposure is not marginal — measured on a real large scanned textbook:
   **279/348 pages (80%) were hard pages, and 223 of them carried a figure-class signal that has no
   textual equivalent** (only 36 were formula/table-only, where MinerU's LaTeX/HTML could in principle
   substitute for the image). Such a run passes **every** deterministic gate — form, links, accounting,
@@ -163,7 +163,7 @@ and merged only by a human `skill-adopt`. Protocols: `docs/skill-runtime/{routin
   Deliberately **not** policed as gates: `started_at == finished_at` "instant windows" (writing need not
   happen between start/done, so it false-positives — surfaced instead as the `ingest-stats`
   `instant_write_windows` soft signal), and `source_refs` section numbers against `chapters.json`
-  (title formats differ per book — game-theory/pro-git carry no numbering at all, and `chapters.json`
+  (title formats differ per book — some published sources carry no numbering at all, and `chapters.json`
   under-collects deep headings, so it would false-positive on published books; it once produced a false
   "fabricated sections" audit verdict).
 
