@@ -2176,6 +2176,12 @@ def cmd_lint(args):
             if (src_row["current_stage"], src_row["current_status"]) != ("lint", "published"):
                 state_store.start_stage(db, args.source, "lint", input_hash=ihash)
                 state_store.complete_stage(db, args.source, "lint", output_hash=ihash)
+                # 与成功路径（本函数末尾）同一份清理：check-write 对既有页留下的写前快照
+                # 只在"跑完主体逻辑"时被删；命中缓存的跳过分支漏了这一步会让 manifest
+                # 永久残留（2026-08-13 实测复现：nndl-ppt-deep-generative r328）。
+                snap_dir = _workspace_root() / "pipeline-workspace/snapshots" / args.source
+                if snap_dir.exists():
+                    shutil.rmtree(snap_dir)
             print("[skip] lint up-to-date")
             return
         state_store.start_stage(db, args.source, "lint", input_hash=ihash)

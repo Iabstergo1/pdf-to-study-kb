@@ -641,7 +641,12 @@ def test_lint_skip_still_promotes_source_to_published(tmp_path):
     # `should_run_stage` 命中缓存打印 [skip] 直接 return——但来源自己的 stage/status 不能
     # 因此卡在 ingested/proposed，必须仍然落在 lint/published，否则下次 `status`/`next`
     # 会误报"还没 lint 过"，即使内容早已通过验证且 vault-lint 干净。
+    # 同时验证快照清理：成功 lint（非 skip）会在末尾删掉 snapshots/<source>/ 整个目录
+    # （check-write 对既有页做写前快照的产物，第 2371-2373 行）；skip 分支必须做同样的
+    # 清理，否则一次直接编辑已发布页正文触发的 check-write 快照会永久残留在磁盘
+    # （2026-08-13 实测复现：nndl-ppt-deep-generative 的 r328 快照，根因正是这里漏清）。
     db = _ingest_ready(tmp_path)
+    snap_dir = tmp_path / "pipeline-workspace/snapshots/note"
     mdpage.write_page(tmp_path / "wiki/domains/misc/lessons/a.md",
                       {"type": "lesson", "status": "proposed", "managed_by": "pipeline",
                        "title": "A 课", "source": "note"}, GOOD_LESSON)
@@ -650,20 +655,32 @@ def test_lint_skip_still_promotes_source_to_published(tmp_path):
     assert _run(["lint", "--source", "note"], tmp_path).returncode == 0
     assert state_store.get_source(db, "note")["current_status"] == "published"
 
-    # 第一次"空轮"reopen：proposed 集合第一次变成空集合，ihash 未被缓存过，正常跑完并 promote。
+    # 第一次"空轮"reopen：对已发布的 a.md 做一次 check-write（既有页写前快照，产出
+    # manifest），proposed 集合第一次变成空集合，ihash 未被缓存过，lint 正常跑完主体逻辑
+    # 并 promote——验证成功路径本身会清空 snapshots/note/。
     assert _run(["reopen", "--source", "note"], tmp_path).returncode == 0
     assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    r_cw1 = _run(["check-write", "--source", "note",
+                 "--path", "domains/misc/lessons/a.md"], tmp_path)
+    assert r_cw1.returncode == 0, r_cw1.stdout + r_cw1.stderr
+    assert snap_dir.exists() and any(snap_dir.iterdir()), "check-write 应已落盘写前快照"
     _account(tmp_path, "note", [])
     assert _run(["ingest-done", "--source", "note"], tmp_path).returncode == 0
     r1 = _run(["lint", "--source", "note"], tmp_path)
     assert r1.returncode == 0, r1.stdout + r1.stderr
     src1 = state_store.get_source(db, "note")
     assert (src1["current_stage"], src1["current_status"]) == ("lint", "published")
+    assert not snap_dir.exists(), "成功 lint（非 skip）后应清空该来源的写前快照目录"
 
-    # 第二次"空轮"reopen：内容依旧没变，ihash 与上一次"空轮"完全相同——命中缓存打印
-    # [skip]，来源状态机也必须仍然落在 lint/published。
+    # 第二次"空轮"reopen：再次对 a.md 做 check-write（新一轮快照），内容依旧没变，ihash
+    # 与上一次"空轮"完全相同——命中缓存打印 [skip]。来源状态机必须仍然落在
+    # lint/published，且这次 check-write 产生的快照目录也必须被清空，不能残留。
     assert _run(["reopen", "--source", "note"], tmp_path).returncode == 0
     assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    r_cw2 = _run(["check-write", "--source", "note",
+                 "--path", "domains/misc/lessons/a.md"], tmp_path)
+    assert r_cw2.returncode == 0, r_cw2.stdout + r_cw2.stderr
+    assert snap_dir.exists() and any(snap_dir.iterdir()), "第二轮 check-write 也应落盘写前快照"
     _account(tmp_path, "note", [])
     assert _run(["ingest-done", "--source", "note"], tmp_path).returncode == 0
     r2 = _run(["lint", "--source", "note"], tmp_path)
@@ -673,6 +690,9 @@ def test_lint_skip_still_promotes_source_to_published(tmp_path):
     assert (src2["current_stage"], src2["current_status"]) == ("lint", "published"), (
         "lint 跳过（内容未变）时也必须把来源状态机推进到 lint/published，"
         f"实际卡在 {src2['current_stage']}/{src2['current_status']}")
+    assert not snap_dir.exists(), (
+        "lint 跳过（内容未变）时也必须清空该来源的写前快照目录，不能让 check-write "
+        "产生的 manifest 永久残留（2026-08-13 实测复现：nndl-ppt-deep-generative r328）")
 
 
 def test_sync_assets_copies_pngs_to_vault(tmp_path):
