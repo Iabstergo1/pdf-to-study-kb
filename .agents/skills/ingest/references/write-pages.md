@@ -40,6 +40,23 @@ source's window text**. A number, parameter default, symbol name, or mechanism y
   with a wikilink; never restate it under this source's `source_refs`.
 - Tiebreaker when unsure: *would a reader auditing this page against the book find every claim?*
   A thinner faithful page outranks a fuller laundered one.
+- **A "this source doesn't give X" disclaimer is a high-risk claim, not a safe default.** Write it only
+  after you actually searched/opened the relevant evidence (window text, and for a hard page the source
+  image) and found nothing there — never as a stand-in for "I didn't look" or "I couldn't read this
+  image." A false disclaimer is worse than an ordinary omission: it doesn't just under-cover the source,
+  it tells the reader the source has nothing here and actively talks them out of checking, hollowing out
+  the page around it. (2026-08-12 postmortem: 5 published pages carried a false "source doesn't give X"
+  line while the source did — 4 of the 5 in a slide image the writer never opened; on `adaboost.md` that
+  one sentence alone suppressed the entire worked algorithm.) If you genuinely can't find coverage, just
+  omit the claim — a thinner page costs nothing, a false disclaimer costs the whole page.
+- **Cross-domain home-domain writes (e.g. `research-method`, D-3) need extra grounding discipline.**
+  Generic methodology content is the material most likely to feel "obviously true" without actually being
+  in this source — precisely because, once pulled out of the book's own chapter context into a shared
+  home domain, it reads as universal knowledge rather than this book's claim. (2026-08-12 postmortem: every
+  one of 5 audited `research-method` pages from one source carried an unsupported closing sentence, against
+  ~12% for that source's own domain.) Before adding a summary or evaluative closer on a page headed for a
+  home domain outside this source's own, re-check it against the window text with the same rigor as a
+  formula or a number — don't let "this is standard textbook wisdom" substitute for a citation.
 
 ## No audit scars (writing a correction)
 
