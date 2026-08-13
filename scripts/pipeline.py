@@ -2168,6 +2168,14 @@ def cmd_lint(args):
     ).encode("utf-8")).hexdigest()
     if not session_mode:
         if not state_store.should_run_stage(db, args.source, "lint", input_hash=ihash):
+            # 内容与上次已验证通过的 lint 结果完全相同（跳过重复检查），但来源自己的
+            # stage/status 未必已经在 lint/published——reopen 之后若本轮没有任何新
+            # proposed 页（例如只是直接编辑已发布页正文），ihash 会与上一次"空轮"撞上，
+            # 若不在此处补一次状态推进，来源会卡在 ingested/proposed（2026-08-13 实测复现）。
+            src_row = state_store.get_source(db, args.source)
+            if (src_row["current_stage"], src_row["current_status"]) != ("lint", "published"):
+                state_store.start_stage(db, args.source, "lint", input_hash=ihash)
+                state_store.complete_stage(db, args.source, "lint", output_hash=ihash)
             print("[skip] lint up-to-date")
             return
         state_store.start_stage(db, args.source, "lint", input_hash=ihash)

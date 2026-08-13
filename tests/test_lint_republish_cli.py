@@ -634,6 +634,47 @@ def test_reopen_enables_incremental_publish(tmp_path):
     assert "comparisons/x.md" in idx and "domains/misc/lessons/a.md" in idx
 
 
+def test_lint_skip_still_promotes_source_to_published(tmp_path):
+    # 回归测试（2026-08-13 实测复现）：reopen 增量修正一个已发布来源时，若本轮完全没有
+    # 新的 proposed 页（比如只是直接编辑已发布页正文，不走 proposed 流程），lint 计算的
+    # ihash 只由"当前 proposed 集合"决定；连续两轮都是空集合会得到同一个 ihash，第二次
+    # `should_run_stage` 命中缓存打印 [skip] 直接 return——但来源自己的 stage/status 不能
+    # 因此卡在 ingested/proposed，必须仍然落在 lint/published，否则下次 `status`/`next`
+    # 会误报"还没 lint 过"，即使内容早已通过验证且 vault-lint 干净。
+    db = _ingest_ready(tmp_path)
+    mdpage.write_page(tmp_path / "wiki/domains/misc/lessons/a.md",
+                      {"type": "lesson", "status": "proposed", "managed_by": "pipeline",
+                       "title": "A 课", "source": "note"}, GOOD_LESSON)
+    _account(tmp_path, "note", ["domains/misc/lessons/a.md"])
+    assert _run(["ingest-done", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["lint", "--source", "note"], tmp_path).returncode == 0
+    assert state_store.get_source(db, "note")["current_status"] == "published"
+
+    # 第一次"空轮"reopen：proposed 集合第一次变成空集合，ihash 未被缓存过，正常跑完并 promote。
+    assert _run(["reopen", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    _account(tmp_path, "note", [])
+    assert _run(["ingest-done", "--source", "note"], tmp_path).returncode == 0
+    r1 = _run(["lint", "--source", "note"], tmp_path)
+    assert r1.returncode == 0, r1.stdout + r1.stderr
+    src1 = state_store.get_source(db, "note")
+    assert (src1["current_stage"], src1["current_status"]) == ("lint", "published")
+
+    # 第二次"空轮"reopen：内容依旧没变，ihash 与上一次"空轮"完全相同——命中缓存打印
+    # [skip]，来源状态机也必须仍然落在 lint/published。
+    assert _run(["reopen", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    _account(tmp_path, "note", [])
+    assert _run(["ingest-done", "--source", "note"], tmp_path).returncode == 0
+    r2 = _run(["lint", "--source", "note"], tmp_path)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    assert "skip" in (r2.stdout + r2.stderr)
+    src2 = state_store.get_source(db, "note")
+    assert (src2["current_stage"], src2["current_status"]) == ("lint", "published"), (
+        "lint 跳过（内容未变）时也必须把来源状态机推进到 lint/published，"
+        f"实际卡在 {src2['current_stage']}/{src2['current_status']}")
+
+
 def test_sync_assets_copies_pngs_to_vault(tmp_path):
     # 通用：把 staging/<src>/assets 难页 PNG 复制进 wiki/assets/<src>/，公式嵌图才不断链。
     assert _run(["init-vault"], tmp_path).returncode == 0
