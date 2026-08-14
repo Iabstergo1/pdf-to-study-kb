@@ -319,6 +319,68 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
   再点链接回原页展开折叠答案核对；`wiki/propositions.generated.md`（命题总表）是"这个库断言了哪些事"
   的资产清单，做研究时可检索引用。
 
+### 第 5 步：复习、看原图、带走
+
+第 4 步是"在 Obsidian 里读"。这一步是**读完之后**的三件事：怎么记住、怎么回查原书、怎么带出 Obsidian。
+三者都是零 LLM 派生层，前两个随每次发布自动重建，第三个手动跑。
+
+#### 5-A 用 Anki 复习（`export-anki`）
+
+本项目**只负责导出**：把全库 `[!question]` 自测题连折叠答案导成 Anki 可导入的 TSV。
+排程、判分、错题本、掌握度、手机同步全部交给 Anki——重造这些是净损失。
+
+- **产物**：`wiki/anki-export.generated.tsv`（**每次发布自动重建**，无需手动跑）
+- **导入**：Anki → `文件` → `导入` → 选该文件。
+  ⚠️ **永远不要双击 `.tsv` 文件**——它会被文本编辑器接管，与 Anki 无关。导入必须从 Anki 内部发起。
+- **无需配置字段**：文件头 5 行是 Anki 原生指令（`#separator:tab` / `#html:true` / `#notetype:Basic`
+  / `#deck:study-kb` / `#tags column:3`），正常情况下直接点导入即可。
+- **落新书后要再导一次**：TSV 会自动更新，但 **Anki 不监视文件**。重新导入是安全且增量的——
+  题干是去重键，已有卡片被**更新**（复习进度保留）、新书的题**追加**进来。
+- **卡片怎么用**：Anki 是**自评**不是机器判分。看题面 → 心里（或纸上）想答案 → 显示答案 → 自己判断
+  刚才想的对不对 → 按「重来/困难/良好/简单」。这四个按钮就是"对比"机制；间隔重复的有效性来自
+  主动回忆 + 诚实自评，不是逐字比对。本库的答案是整段论证，逐字比对只会因措辞不同误判。
+- **牌组与标签**：单牌组 `study-kb`；`domain::<域>` 与 `source::<来源>` 进 tags，
+  可用「自定义学习 → 按标签筛选」定向复习某个域或刚读完的某本书。
+- **每天只出 20 张新卡**是 Anki 默认。卡多时会觉得"怎么才这么几张"——
+  牌组右侧 ⚙ → 选项 → 每天新卡上限，按需调高（调太猛会让新卡连日堆积）。
+- **回链**：卡片背面的「回原页」用 `obsidian://open?vault=<vault 目录名>&file=<库内相对路径>`。
+  `vault=` 取的是 vault **目录名**（本项目即 `wiki`）。若你在 Obsidian 里把这个库注册成了别的名字，
+  回链会失效——这是回链唯一的失败模式，验收时优先检查这一项。
+
+#### 5-B 回查原书难页（`rebuild-source-images`）
+
+发布正文按设计**不嵌入源图**（D-1：公式转 KaTeX、表格转 Markdown、图用 mermaid/散文重建）。
+但难页原图本身一直保存在 `wiki/assets/<来源>/`；这个索引给它们一个入口，用于"这段推导我想看原书那页"。
+
+- **产物**：`wiki/source-images.generated.md`（**每次发布自动重建**），在 Obsidian 里直接打开。
+- **两级精度，逐条标注，绝不混淆**：
+  - **page 级**：`[[概念页]] → [p.58]、[p.64]` —— 已定位到具体知识页。
+    语义是"**写该页时所读窗口的难页原图**"，因此可能包含同窗的邻近上下文页，
+    **不等同于"关于该概念的图"**。
+  - **source 级**：无法证明具体页归属时，按来源整列，并写明真实原因
+    （所属窗口无当前轮 finished 写集 / 原图未被任何窗口 assets 引用）。
+- **为什么不做成每页一个链接**：那需要编辑数百个已发布页，会撞覆盖保护；索引是单个派生文件，
+  不动任何阅读页。
+
+#### 5-C 带走：离线单文件站点（`export-site`）
+
+不装 Obsidian 也能完整读、能发手机、能分享给别人。
+
+```powershell
+python scripts/pipeline.py export-site                 # 默认：不打包图片
+python scripts/pipeline.py export-site --with-images   # 打包 assets（体积暴涨，会打印警告）
+```
+
+- **产物**：`pipeline-workspace/exports/site/study-kb.html` —— **单个自包含 HTML**。
+  KaTeX（公式）与字体全部内嵌 base64，**无 CDN、不发任何网络请求**，断网可读。
+- **怎么用**：浏览器直接打开；复制这一个文件到手机/U 盘/发给别人即可阅读，对方不需要装任何东西。
+- **包含**：全部 published 页正文、按域/主题的侧栏导航、全文搜索、折叠自测题、
+  表格 / 代码 / 行内与块级公式、响应式（手机可读）。
+- **与前两个不同：它不接发布钩子，只在你手动跑时重建。**
+  它是重量级分发动作（数 MB），每次 lint 都重建纯属浪费。落完新书想更新站点，手动跑一次即可。
+- **默认不打包图片是有意的**：`wiki/assets/` 体量很大（真实库可达数百 MB），
+  打进去产物就失去了"随手发出去"的意义。确需带图时用 `--with-images`，命令会打印体积警告。
+
 ---
 
 ## 5. README 中每个操作的用户指南
@@ -355,7 +417,7 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 ### 5.3 底层 CLI 操作（高级排障 / 手动重跑）
 
 > 所有 skill 背后都是 `python scripts/pipeline.py <command>`。下面按生命周期分组，标注**必填/可选参数**。
-> 共 **52 个**子命令（完整实现映射见开发文档 §3；含 `adopt-vault` 既有库基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用、`reseal-source` v1→v2 证据重封、`vault-lint` 全库渲染安全健康门禁、`lint --source kb-save --session <run_id>` 会话发布路径与 `retract-source` 证据先行撤库）。
+> 共 **55 个**子命令（完整实现映射见开发文档 §3；含 `adopt-vault` 既有库基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用、`reseal-source` v1→v2 证据重封、`vault-lint` 全库渲染安全健康门禁、`lint --source kb-save --session <run_id>` 会话发布路径、`rebuild-source-images` 难页原图索引、`export-anki` 自测题导出、`export-site` 静态站点导出与 `retract-source` 证据先行撤库）。
 
 **状态与维护：**
 
@@ -375,6 +437,9 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 | `graph-lint` | 校验知识图谱产物（errors→exit 2） | — | — | `... graph-lint` |
 | `rebuild-quiz` | 从 published 页的 `[!question]` 重建自测题库索引 `quiz-index.generated.md`（题干+回链、不含答案；收尾 lint 自动重建） | — | — | `... rebuild-quiz` |
 | `rebuild-propositions` | 从 published 页的具名命题（`**命题（名）**：…`）重建命题总表 `propositions.generated.md`（全库结论清单+回链；收尾 lint 自动重建） | — | — | `... rebuild-propositions` |
+| `rebuild-source-images` | 从窗口难页图 ⋈ 当前轮窗口写集重建 `source-images.generated.md` 难页原图索引（page 级=写该页时所读窗口的难页原图，可能含同窗邻近上下文；source 级=无法证明具体页归属、整源显式标注；普通 markdown 链接不嵌图；收尾 lint 自动重建） | — | — | `... rebuild-source-images` |
+| `export-anki` | 把全库自测题（题干+success 后代答案+回链）导成 `anki-export.generated.tsv`，Anki 原生导入即可排程；首字段题干作去重键，跨页重复题干确定性消歧并软警告 | — | — | `... export-anki` |
+| `export-site` | 把 published 正文导成 `pipeline-workspace/exports/site/study-kb.html` 单文件离线站点（callout/表格/公式/代码/搜索/响应式；默认不打包图片，`--with-images` 显式打包并打印体积警告；手动分发动作，**不接发布钩子**） | — | `--with-images` | `... export-site` |
 | `apply-obsidian-style` | 落地学习库 CSS 观感片段（纯配置，幂等） | — | — | `... apply-obsidian-style` |
 
 **预处理（零 LLM，顺序固定，幂等跳过）：**
@@ -584,6 +649,7 @@ python scripts/pipeline.py source-convert --source micro-econ
 | `wiki/knowledge-graph.generated.html` | 力导向交互知识图谱（浏览器打开） | 否 | 点击节点跳 `obsidian://` 打开对应 Obsidian 笔记 |
 | `wiki/quiz-index.generated.md` | 全库自测题索引（按领域分组，只列题干+回链，不泄露答案） | **否**（收尾重建，手改会被覆盖） | 复习入口：抽几题自答 → 点回链到原页展开折叠答案核对 |
 | `wiki/propositions.generated.md` | 命题总表：全库承重结论清单（`**命题（名）**：…` 自动汇总，结论句+回链） | **否**（收尾重建，手改会被覆盖） | "这个库断言了哪些事"的资产清单；做研究时可检索引用 |
+| `wiki/anki-export.generated.tsv` | Anki 自测题导出（题干+success 后代答案+回链，`#html:true`，domain/source 进 tags；回链用 `obsidian://open?vault=<库名>&file=<库内相对路径>`） | **否**（收尾重建，手改会被覆盖） | 导入 Anki 后排程/判分/错题本交给 Anki，本项目不调度 |
 | `wiki/Review-Queue/*.md` | 未过门禁 / 待人工决策项 | 你处置（用 kb-review） | 修复后重跑 lint |
 | `wiki/_meta/purpose.md` | **你手写**的学习目标 | **是**（唯一你维护的输入文件） | ingest 读取 |
 | `wiki/log.md` | 操作日志（append-only） | 否 | 回溯 |
@@ -699,6 +765,9 @@ python scripts/pipeline.py rebuild-graph                # 重建知识图谱 v2.
 python scripts/pipeline.py graph-lint                   # 校验知识图谱产物
 python scripts/pipeline.py rebuild-quiz                 # 重建自测题库索引 quiz-index.generated.md
 python scripts/pipeline.py rebuild-propositions         # 重建命题总表 propositions.generated.md
+python scripts/pipeline.py rebuild-source-images        # 重建难页原图索引 source-images.generated.md
+python scripts/pipeline.py export-anki                  # 导出 Anki 自测卡片 anki-export.generated.tsv
+python scripts/pipeline.py export-site                  # 导出自包含离线站点 study-kb.html
 python scripts/pipeline.py apply-obsidian-style         # 可选：学习库 CSS 观感
 
 # ── 9. 每本书发布后的收尾三件事（对话说即可，命令仅供参考） ──

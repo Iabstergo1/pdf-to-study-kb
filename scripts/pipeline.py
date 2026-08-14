@@ -726,10 +726,15 @@ def cmd_adopt_vault(args):
         for warning in graph_result["warnings"]:
             print(f"[warn] {warning}")
         wiki_gate.write_quiz_index(vault)
+        cards = wiki_gate.collect_quiz_cards(vault)
+        wiki_gate.write_anki_tsv(vault, cards)
+        for duplicate in wiki_gate.duplicate_question_stems(cards):
+            print(f"[warn] 题干重复（Anki 首字段去重键，已确定性消歧）：{duplicate}")
         props = wiki_gate.collect_propositions(vault)
         wiki_gate.write_propositions_index(vault)
         for duplicate in wiki_gate.duplicate_proposition_names(props):
             print(f"[warn] 命题重名（名字即锚点，域内应唯一）：{duplicate}")
+        wiki_gate.write_source_images(vault, workspace=_workspace_root())
         try:
             state_created = state_store.adopt_source(
                 db, args.source, domain=args.domain,
@@ -855,10 +860,15 @@ def cmd_reuse_source(args):
         for warning in graph_result["warnings"]:
             print(f"[warn] {warning}")
         wiki_gate.write_quiz_index(vault)
+        cards = wiki_gate.collect_quiz_cards(vault)
+        wiki_gate.write_anki_tsv(vault, cards)
+        for duplicate in wiki_gate.duplicate_question_stems(cards):
+            print(f"[warn] 题干重复（Anki 首字段去重键，已确定性消歧）：{duplicate}")
         props = wiki_gate.collect_propositions(vault)
         wiki_gate.write_propositions_index(vault)
         for duplicate in wiki_gate.duplicate_proposition_names(props):
             print(f"[warn] 命题重名（名字即锚点，域内应唯一）：{duplicate}")
+        wiki_gate.write_source_images(vault, workspace=_workspace_root())
         try:
             # Derived rebuild may be long; recheck all external truth immediately before
             # committing reused/published so recovery cannot publish stale origin inputs.
@@ -1004,10 +1014,15 @@ def cmd_reseal_source(args):
             for warning in graph_result["warnings"]:
                 print(f"[warn] {warning}")
             wiki_gate.write_quiz_index(vault)
+            cards = wiki_gate.collect_quiz_cards(vault)
+            wiki_gate.write_anki_tsv(vault, cards)
+            for duplicate in wiki_gate.duplicate_question_stems(cards):
+                print(f"[warn] 题干重复（Anki 首字段去重键，已确定性消歧）：{duplicate}")
             props = wiki_gate.collect_propositions(vault)
             wiki_gate.write_propositions_index(vault)
             for duplicate in wiki_gate.duplicate_proposition_names(props):
                 print(f"[warn] 命题重名（名字即锚点，域内应唯一）：{duplicate}")
+            wiki_gate.write_source_images(vault, workspace=_workspace_root())
         failpoint("derived")
 
         try:
@@ -1264,6 +1279,19 @@ def cmd_rebuild_quiz(args):
     print(f"[OK] rebuild-quiz -> {vault / 'quiz-index.generated.md'}")
 
 
+def cmd_export_anki(args):
+    """导出 Anki 自测卡片 anki-export.generated.tsv（零 LLM：题干+折叠答案+回链；不调度）。"""
+    import wiki_gate
+    vault = _vault_dir()
+    if not vault.exists():
+        raise SystemExit("no wiki/ vault yet")
+    cards = wiki_gate.collect_quiz_cards(vault)
+    wiki_gate.write_anki_tsv(vault, cards)
+    for d in wiki_gate.duplicate_question_stems(cards):
+        print(f"[warn] 题干重复（Anki 首字段去重键，已确定性消歧）：{d}")
+    print(f"[OK] export-anki -> {len(cards)} 张 -> {vault / 'anki-export.generated.tsv'}")
+
+
 def cmd_rebuild_propositions(args):
     """重建命题总表 propositions.generated.md（零 LLM：published 页具名命题 + 回链原页）。"""
     import wiki_gate
@@ -1275,6 +1303,30 @@ def cmd_rebuild_propositions(args):
     for d in wiki_gate.duplicate_proposition_names(props):
         print(f"[warn] 命题重名（名字即锚点，域内应唯一）：{d}")
     print(f"[OK] rebuild-propositions -> {len(props)} 条 -> {vault / 'propositions.generated.md'}")
+
+
+def cmd_rebuild_source_images(args):
+    """重建难页原图索引 source-images.generated.md（零 LLM：窗口写集 ⋈ 难页图入口）。"""
+    import wiki_gate
+    vault = _vault_dir()
+    if not vault.exists():
+        raise SystemExit("no wiki/ vault yet")
+    wiki_gate.write_source_images(vault, workspace=_workspace_root())
+    print(f"[OK] rebuild-source-images -> {vault / 'source-images.generated.md'}")
+
+
+def cmd_export_site(args):
+    """导出自包含静态站点 pipeline-workspace/exports/site/study-kb.html（零 LLM，手动分发动作）。"""
+    import site_exporter
+    vault = _vault_dir()
+    if not vault.exists():
+        raise SystemExit("no wiki/ vault yet")
+    result = site_exporter.write_site(vault, workspace=_workspace_root(),
+                                      with_images=args.with_images)
+    size = result.path.stat().st_size
+    if args.with_images:
+        print(f"[WARN] 已启用 --with-images；产物可能包含大量 base64 图片，体积 = {size} bytes")
+    print(f"[OK] export-site -> {result.page_count} 页 -> {result.path} ({size} bytes)")
 
 
 def cmd_graph_lint(args):
@@ -1758,13 +1810,16 @@ def cmd_retract_source(args):
         rebuilds = (("registry", lambda: cmd_rebuild_registry(args)), ("index", _reb_index),
                     ("graph", lambda: cmd_rebuild_graph(args)),
                     ("quiz", lambda: cmd_rebuild_quiz(args)),
-                    ("propositions", lambda: cmd_rebuild_propositions(args)))
+                    ("propositions", lambda: cmd_rebuild_propositions(args)),
+                    ("source-images", lambda: cmd_rebuild_source_images(args)),
+                    ("anki", lambda: cmd_export_anki(args)))
         for name, fn in rebuilds:
             try:
                 fn()
             except (Exception, SystemExit) as e:
                 failures.append(name)
-                print(f"[warn] rebuild {name} failed: {e}；可单独重跑 rebuild-{name}")
+                retry_cmd = "export-anki" if name == "anki" else f"rebuild-{name}"
+                print(f"[warn] rebuild {name} failed: {e}；可单独重跑 {retry_cmd}")
         if failures:
             print(f"[retract done with warnings] 派生层重建失败: {', '.join(failures)}"
                   "（撤库本体已完成，证据包完整；修复后单独重跑对应 rebuild 命令）")
@@ -2362,12 +2417,23 @@ def cmd_lint(args):
     except Exception as e:
         print(f"[WARN] 自测题库索引重建失败：{e}；发布不受影响，可手动跑 rebuild-quiz")
     try:
+        _cards = wiki_gate.collect_quiz_cards(vault)
+        wiki_gate.write_anki_tsv(vault, _cards)
+        for d in wiki_gate.duplicate_question_stems(_cards):
+            print(f"[warn] 题干重复（Anki 首字段去重键，已确定性消歧）：{d}")
+    except Exception as e:
+        print(f"[WARN] Anki 自测卡片导出重建失败：{e}；发布不受影响，可手动跑 export-anki")
+    try:
         _props = wiki_gate.collect_propositions(vault)
         wiki_gate.write_propositions_index(vault)
         for d in wiki_gate.duplicate_proposition_names(_props):
             print(f"[warn] 命题重名（名字即锚点，域内应唯一）：{d}")
     except Exception as e:
         print(f"[WARN] 命题总表重建失败：{e}；发布不受影响，可手动跑 rebuild-propositions")
+    try:
+        wiki_gate.write_source_images(vault, workspace=_workspace_root())
+    except Exception as e:
+        print(f"[WARN] 难页原图索引重建失败：{e}；发布不受影响，可手动跑 rebuild-source-images")
     # 本源历史 lint 失败报告已过时（本轮已通过），清理避免误导；不动其他 source 的报告
     for stale in sorted((vault / "Review-Queue").glob(f"{args.source}-lint-*.md")):
         stale.unlink()
@@ -3250,6 +3316,14 @@ def main():
                           help="重建自测题库索引 quiz-index.generated.md（零 LLM；published 页 [!question] 题干+回链）")
     subparsers.add_parser("rebuild-propositions",
                           help="重建命题总表 propositions.generated.md（零 LLM；published 页具名命题+回链）")
+    subparsers.add_parser("rebuild-source-images",
+                          help="重建难页原图索引 source-images.generated.md（零 LLM；窗口写集 ⋈ 难页图入口）")
+    subparsers.add_parser("export-anki",
+                          help="导出 Anki 自测卡片 anki-export.generated.tsv（零 LLM；题干+折叠答案+回链）")
+    esp = subparsers.add_parser("export-site",
+                                help="导出自包含离线静态站点 study-kb.html（零 LLM；手动分发动作，不接发布钩子）")
+    esp.add_argument("--with-images", action="store_true",
+                     help="显式打包正文引用的本地图片（默认不打包；会显著增大产物）")
     wop = subparsers.add_parser("workorder", help="生成 source 级 ingest work order")
     wop.add_argument("--source", required=True)
     rop = subparsers.add_parser("reopen", help="重开已收尾来源做增量补充（重建 workorder + 状态机回 workorder_ready）")
@@ -3386,6 +3460,9 @@ def main():
         'rebuild-graph': cmd_rebuild_graph,
         'rebuild-quiz': cmd_rebuild_quiz,
         'rebuild-propositions': cmd_rebuild_propositions,
+        'rebuild-source-images': cmd_rebuild_source_images,
+        'export-anki': cmd_export_anki,
+        'export-site': cmd_export_site,
         'graph-lint': cmd_graph_lint,
         'vault-lint': cmd_vault_lint,
         'workorder': cmd_workorder,

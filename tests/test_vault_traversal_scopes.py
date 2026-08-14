@@ -60,26 +60,31 @@ def test_legacy_revision_base_matches_and_content_set_derives_from_it():
 
 
 def test_derived_name_lists_are_pinned_with_reasons():
-    """`_DERIVED` 四份互不相同——**这是有意的**，钉死当前形态防止静默漂移。
+    """`_DERIVED` 分块不同——**这是有意的**，钉死当前形态防止静默漂移。
 
     差异理由（改动时连同本注释一起更新）：
     - `wiki_gate`      只管 *.md 遍历，故不含 .json/.html 两个非 md 派生物；含已退休的
-                       `aliases.md` 是为了继续把残留文件当派生物清理掉。
+                       `aliases.md` 是为了继续把残留文件当派生物清理掉；P2 增
+                       `source-images.generated.md` 同属 *.md 派生阅读层。
     - `graph_model` /
-      `graph_lint`     图谱侧要认自己的产物（graph-data.json / knowledge-graph.html），
-                       还留着已删的 canvas 名以便旧库里的残留不被当成知识页。
+      `graph_lint`     图谱侧同样只做 *.md 遍历，现已与 wiki_gate 对齐（P2 顺手补齐
+                       曾缺失的 quiz/propositions、清掉已废的 canvas 与非 md 死条目）。
     - `retraction`     撤库要认全部派生物（含 quiz / propositions），否则会当成独占页删掉。
     - `source_reuse`   复用证据额外把 `log.md` 视为派生（它是 vault 级台账，不进证据集）。
     - `legacy_revision` 修订 overlay 要认 `concepts/_registry.yaml`（其余模块不遍历它）。
     """
     assert set(wiki_gate._DERIVED) == {
         "index.generated.md", "aliases.md",
-        "quiz-index.generated.md", "propositions.generated.md"}
+        "quiz-index.generated.md", "propositions.generated.md",
+        "source-images.generated.md"}
     assert set(graph_model._DERIVED) == set(graph_lint._DERIVED)
-    assert "graph-data.generated.json" in graph_model._DERIVED
+    assert set(graph_model._DERIVED) == set(wiki_gate._DERIVED)
     assert "quiz-index.generated.md" in retraction._DERIVED
+    assert "source-images.generated.md" in retraction._DERIVED
     assert "log.md" in source_reuse._DERIVED
+    assert "source-images.generated.md" in source_reuse._DERIVED
     assert "concepts/_registry.yaml" in legacy_revision._DERIVED
+    assert "source-images.generated.md" in legacy_revision._DERIVED
 
 
 # ── review-coverage 的按来源整源认证统计 ───────────────────────────────────────

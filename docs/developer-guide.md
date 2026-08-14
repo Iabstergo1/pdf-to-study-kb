@@ -3,7 +3,7 @@
 > 本文面向开发者，描述本仓库的架构、模块职责、数据契约、命令层与测试。
 > 所有结论以**源码为准**。
 > 面向使用者的操作说明见 [用户使用说明](user-guide.md)。
-> 版本锚点：当前工作树（2026-08-02 增量核对）；**52 个 CLI 子命令**（含 `adopt-vault` 基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用与 `reseal-source` 证据重封）/ 11 个技能。测试数量以 `pytest --collect-only -q` 为准——本轮两次证明精确计数写进文档当场就腐烂，故不再保留任何快照。
+> 版本锚点：当前工作树（2026-08-02 增量核对）；**55 个 CLI 子命令**（含 `adopt-vault` 基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用、`reseal-source` 证据重封、`rebuild-source-images` 难页原图索引、`export-anki` 自测题导出与 `export-site` 静态站点导出）/ 11 个技能。测试数量以 `pytest --collect-only -q` 为准——本轮两次证明精确计数写进文档当场就腐烂，故不再保留任何快照。
 > 2026-07-11 六阶段重构后的新机制（§7 已更新，其余章节以源码为准）：统一 callout 解析器
 > `page_rules.parse_callouts`（唯一语法入口，错误不吞节点）、渲染安全唯一实现 + **vault preflight
 > 事务隔离**（published 旧伤阻断 promote 但不回滚当前批）、`vault-lint` 全库健康门禁、归属≠记账
@@ -30,7 +30,7 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 
 | 入口 | 文件 | 说明 |
 |------|------|------|
-| 唯一 CLI 入口 | `scripts/pipeline.py` → `main()` | argparse 分发 **52 个**子命令（见 §3；含 `adopt-vault` / `revise-adopted` / `reuse-source` / `reseal-source` 四条确定性旁路/维护路径）。 |
+| 唯一 CLI 入口 | `scripts/pipeline.py` → `main()` | argparse 分发 **55 个**子命令（见 §3；含 `adopt-vault` / `revise-adopted` / `reuse-source` / `reseal-source` 四条确定性旁路/维护路径）。 |
 | LLM 编排入口 | `.claude/skills/ingest/SKILL.md`（+ `references/*`） | 端到端入库 skill；常规 ingest 是唯一 LLM 写库步骤，legacy-vault 接管分支为零 LLM。 |
 | 无人值守续跑 | `scripts/resume-ingest.ps1` | OS 调度触发的有界续跑脚本（PowerShell）。 |
 | 可选后端安装 | `scripts/install_mineru.py` → `main()` | 按机型自动安装 MinerU + 匹配 CUDA torch。 |
@@ -40,7 +40,7 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 
 | 模块 | 职责 | 关键符号 |
 |------|------|----------|
-| `pipeline.py` | CLI 分发 + 各阶段编排（每个 `cmd_*` 一个子命令，共 51 个） | `main()`、`cmd_*` 函数族、`_workspace_root()`、`_vault_dir()`、`_staging_dir()` |
+| `pipeline.py` | CLI 分发 + 各阶段编排（每个 `cmd_*` 一个子命令，共 55 个） | `main()`、`cmd_*` 函数族、`_workspace_root()`、`_vault_dir()`、`_staging_dir()` |
 | `state_store.py` | 单一业务 SQLite 状态机（**8 张表**）+ 原子阶段 API + 轮次 token | `STAGES`、`NEXT`、`start_stage/complete_stage/fail_stage`、`should_run_stage`、`adopt_source`、`reuse_source`、`reopen_source`、`reset_source`、`RESETTABLE_TARGETS`、`resolve_review_proposals`、`source_stats`、`*_window`、`round_anchor`、`window_reads_in_round`、`export_source_rows`、`purge_source_ledgers` |
 | `vault_adoption.py` | 既有 vault 的只读接管计划、ZIP/页面集合核验、不可变逐页证据、canonical source 页与历史基线/接管后 live drift 分层 | `AdoptionError`、`build_plan`、`write_evidence`、`write_source_page` |
 | `legacy_revision.py` | adopted legacy 页的请求校验、授权/pre/candidate/post sidecar、全 vault overlay lint、哈希链事件与可恢复切换；普通 lint/vault-lint 共用证据核验 | `LegacyRevisionError`、`run`、`evidence_findings`、`CONTRACT_VERSION` |
@@ -207,7 +207,7 @@ pdf-to-study-kb/
 ├── .gitattributes
 │
 ├── scripts/                     # ⭐ 全部业务逻辑（零 LLM）
-│   ├── pipeline.py              # 唯一 CLI 入口（52 子命令）
+│   ├── pipeline.py              # 唯一 CLI 入口（55 子命令）
 │   ├── state_store.py           # 状态机 SQLite（8 张表：sources/source_stage_runs/artifacts/
 │   │                            #   work_orders/source_locks/review_proposals/ingest_progress/
 │   │                            #   window_reads）
@@ -313,6 +313,9 @@ pdf-to-study-kb/
 | 校验知识图谱 | `graph-lint` | `cmd_graph_lint` → `graph_lint.validate_graph_data` | graph-data + html | 报告 → `pipeline-workspace/reports/graph-lint-*.md` | errors → 退出 2 | `test_graph_lint.py` | 准确 |
 | **重建自测题库索引** | `rebuild-quiz` | `cmd_rebuild_quiz` → `wiki_gate.build_quiz_index`/`write_quiz_index` | published 页 `[!question]` 题干 | `quiz-index.generated.md`（按 domain 分组、只列题干+回链、不含答案） | 写派生文件；lint 收尾自动重建、publish-isolated | `test_wiki_gate.py`、`test_lint_republish_cli.py`、`test_page_rules.py` | 准确 |
 | **重建命题总表** | `rebuild-propositions` | `cmd_rebuild_propositions` → `wiki_gate.collect_propositions`/`build_propositions_index`/`write_propositions_index` | published 页 `**命题（名）**：…` | `propositions.generated.md`（按 domain 分组、名字即锚点、v1 不编号）；域内重名走 `duplicate_proposition_names` 软警告 | 写派生文件；lint 收尾自动重建、publish-isolated | 同上 | 准确 |
+| **重建难页原图索引** | `rebuild-source-images` | `cmd_rebuild_source_images` → `wiki_gate.build_source_images`/`write_source_images` | `windows.jsonl` `assets` ⋈ SQLite 当轮 finished `write_set_json` + `wiki/assets/<src>/*.png` / `*.jpg` / `*.jpeg`（文件名含 `pNNN` 的显示 `p.N`；其余按稳定排序编号为 `图N`） | `source-images.generated.md`（page 级=写该页时所读窗口的难页原图，可能含同窗邻近上下文；source 级=无法证明具体页归属、整源显式横幅；none 不出条目；普通 markdown 链接，不嵌图） | 写派生文件；lint 收尾自动重建、publish-isolated；**不进** `derived_violations`（输入含 staging/SQLite，非纯 vault 重算） | `test_wiki_gate.py`、`test_vault_init_cli.py` | 准确 |
+| **导出 Anki 自测卡片** | `export-anki` | `cmd_export_anki` → `wiki_gate.collect_quiz_cards`/`build_anki_tsv`/`write_anki_tsv`（答案提取走 `page_rules.extract_question_cards`，判定与 `question_resolution` 同源） | published 页 `[!question]` 题干 + `success` 后代答案（含非折叠/跳级/sibling） | `anki-export.generated.tsv`（`#html:true`，单牌组 study-kb，domain/source 进 tags；题干作首字段去重键，跨页重复题干确定性消歧 + 软警告） | 写派生文件；lint 收尾自动重建、publish-isolated | `test_wiki_gate.py`、`test_vault_init_cli.py`、`test_page_rules.py` | 准确 |
+| **导出静态站点** | `export-site [--with-images]` | `cmd_export_site` → `site_exporter.build_site`/`write_site` | published 页正文（`page_rules.parse_callouts` + markdown-it + 内嵌 KaTeX） | `pipeline-workspace/exports/site/study-kb.html`（自包含、离线、可搜索、响应式；默认不打包图片，`--with-images` 显式打包） | 手动分发动作；**不接发布钩子、不进任何 `_DERIVED`、不进 `derived_violations`、不进 retract rebuilds** | `test_site_exporter.py` | 准确 |
 
 ### 3.3 预处理命令
 
@@ -395,8 +398,8 @@ pdf-to-study-kb/
 | 「按章内容路由（理论/方法/案例/参考/观点）」 | `.claude/skills/ingest/references/content-routing.md`；路由表写进 `staging/<src>/digest.md`；**零 CLI 校验**，纯 LLM 判断记录在纸面上；偏离走 `[routing-deviation]` 标记，供 skill-evolve 修订路由表本身的证据 |
 | 「写作装置预算（推导折叠/案例解剖/定位段/具名命题）」 | `.claude/skills/ingest/references/write-pages.md`「Phase D」段；默认零装置，推导折叠不计预算、鼓励用，其余装置一页至多一种；**无对应 lint 规则**，纯写作纪律 |
 | 「具名命题格式抽取」 | `page_rules.extract_propositions`（正则 `\*\*命题（[^）]{1,24}）\*\*[：:]\s*(.+)`）→ `rebuild-propositions` |
-| 「自测题干抽取」 | `page_rules.extract_question_stems` → `rebuild-quiz` |
-| 「在 Obsidian 阅读」 `wiki/` | overview.md + `.obsidian/graph.json` + `knowledge-graph.generated.html` + `quiz-index.generated.md` + `propositions.generated.md` |
+| 「自测题干抽取」 | `page_rules.extract_question_stems` → `rebuild-quiz`；带答案卡片走 `page_rules.extract_question_cards`（题干复用 `_node_stem`，答案判定与 `question_resolution` 同源，含非折叠/跳级/sibling）→ `export-anki` |
+| 「在 Obsidian 阅读」 `wiki/` | overview.md + `.obsidian/graph.json` + `knowledge-graph.generated.html` + `quiz-index.generated.md` + `propositions.generated.md` + `anki-export.generated.tsv` |
 | 「source-preflight 零成本验证」 | `source-preflight` skill（只跑预处理链 + 验收，不写库） |
 | 「中断续跑：说『继续』」 | `pipeline.py next` + digest `## RESUME` 块（digest 由 LLM skill 维护，非 CLI）；`next --source <src> --resume-packet` 输出结构化 `RESUME_PACKET v1`（`resume_packet.py`，fail-closed：RESUME 过期/digest 或 workorder 缺失即拒绝出包） |
 | 「无人值守续跑」 `resume-ingest.ps1` | OS 调度 + resume packet 落盘 `tmp/resume-packet.txt` + 单行 prompt 引用（多行参数会被 Windows `.cmd` shim 截断）；有界 `-MaxWindows` 默认 4；packet 拿不到则记日志退出，不唤起 agent |
@@ -863,14 +866,21 @@ stage/artifact SHA 并恢复 published。`next` 会把崩溃残留显示为 `res
 | `knowledge-graph.generated.html` | lint / rebuild-graph（graph_html） | 力导向交互 HTML | 点击节点跳 `obsidian://` 对应笔记；publish-isolated（失败不阻断发布） |
 | `quiz-index.generated.md` | lint / rebuild-quiz（`wiki_gate.write_quiz_index`） | 零 LLM 派生 | published 页 `[!question]` 题干 + 回链，按 domain 分组，不含答案；publish-isolated |
 | `propositions.generated.md` | lint / rebuild-propositions（`wiki_gate.write_propositions_index`） | 零 LLM 派生 | published 页具名命题（`**命题（名）**：…`）+ 回链，按 domain 分组，名字即锚点、v1 不编号；publish-isolated |
+| `anki-export.generated.tsv` | lint / export-anki（`wiki_gate.write_anki_tsv`） | 零 LLM 派生 | published 页 `[!question]` 题干 + `success` 后代答案（含非折叠/跳级/sibling）+ 回链；`#html:true`，单牌组 study-kb，domain/source 进 tags；题干作首字段去重键，跨页重复题干确定性消歧 + 软警告；回链用 `obsidian://open?vault=<库名>&file=<库内相对路径>`；publish-isolated |
+| `source-images.generated.md` | lint / rebuild-source-images（`wiki_gate.write_source_images`） | 零 LLM 派生 | `windows.jsonl` `assets` ⋈ 当轮 finished `write_set_json` 出的难页图入口；page 级=写该页时所读窗口的难页原图（可能含同窗邻近上下文）；source 级=无法证明具体页归属、整源显式横幅；none 不出条目；普通 markdown 链接不嵌图；publish-isolated |
 | `log.md` | ingest + lint / retract-source / adopt-vault / revise-adopted / reuse-source / reseal-source 追加 | append-only | 操作日志；唯一格式由 `wiki_gate.log_line()` 定义（`## [日期] 动词 \| 来源 \| 摘要`）。adopt/reuse 只在终态首次登记时追加；reseal 按新 manifest 短 SHA 去重；revise-adopted 追加含 operation id 与 post manifest 短 SHA 的唯一锚点，并与 operation 目录双向核验；`log.md` 不是派生产物输入 |
 | `Review-Queue/*.md` | lint 失败 / promotion | — | 未过门禁 / 待人工决策项 |
 | `_meta/purpose.md` | **用户手写**（init-vault 落空模板） | — | 学习目标与偏好；ingest 读取，优先级高于内容路由/装置预算等 advisory |
 
 **派生文件系列**（`_registry.yaml` / `index.generated.md` / `graph-data.generated.json` +
-`knowledge-graph.generated.html` / `quiz-index.generated.md` / `propositions.generated.md`）一律由收尾
+`knowledge-graph.generated.html` / `quiz-index.generated.md` / `propositions.generated.md` /
+`anki-export.generated.tsv` / `source-images.generated.md`）一律由收尾
 CLI 从 frontmatter/正文重建（`adopt-vault --apply` / `reuse-source --apply` 都在登记终态前重建），skill **绝不手写**，手改会被下次收尾覆盖。**`aliases.md` 已退休**（别名保留
 在概念页 `aliases:` frontmatter，`rebuild-registry` 主动清理残留）。
+
+> **`anki-export.generated.tsv` 迁移提示**：它加入了 `derived_violations` 的字节比对清单，
+> 因此任何**尚未重建过**该文件的旧 vault 首次跑 `reuse-source` 会报 drift；先跑一次
+> `python scripts/pipeline.py export-anki` 生成基线即可。
 
 **页面正文的强制项已从"小节标题"转移到"frontmatter 字段"**：`page_rules.REQUIRED_SECTIONS` 七个页型键
 （`source/lesson/concept/topic/comparison/synthesis/overview`）**仍然存在，但每个键的值都已清空为
@@ -1121,10 +1131,20 @@ content-routing.md`）按 5 分类（理论/方法/案例/参考/观点）判断
 占位符）、溯源（`source_refs` 完整）三类底线，正文该长什么样完全交给 LLM + `purpose.md`。偏离路由标签
 须记 `[routing-deviation]`，作为后续 `skill-evolve` 修订路由分类表本身的证据（"活文档"）。
 
-**quiz-index / propositions 两个派生阅读层**（`wiki_gate.py`，2026-07-07/08 新增）：`rebuild-quiz` /
-`rebuild-propositions` 零 LLM 从 published 页正文提取 `[!question]` 题干（不含答案）与具名命题
-`**命题（名）**：…`（名字即锚点，v1 不编号，域内重名软警告不阻断）；两者与知识图谱同为 **publish-isolated**
-（失败只 warn、不阻断发布），lint 收尾自动重建。
+**quiz-index / propositions / anki-export / source-images 四个派生阅读层**（`wiki_gate.py`，2026-07-07/08 新增，2026-08-13
+补 anki，2026-08-14 补 source-images）：`rebuild-quiz` / `rebuild-propositions` / `export-anki` /
+`rebuild-source-images` 零 LLM 从 published 页正文提取
+`[!question]` 题干（quiz 不含答案）、`success` 后代答案（anki 导出成 TSV，判定与 `question_resolution`
+同源）与具名命题
+`**命题（名）**：…`（名字即锚点，v1 不编号，域内重名软警告不阻断），以及从 `windows.jsonl` 难页图
+⋈ 窗口写集出的难页原图入口（page 级=写该页时所读窗口的难页原图，可能含同窗邻近上下文；source 级=无法证明具体页归属、整源显式标注）；四者与知识图谱同为 **publish-isolated**
+（失败只 warn、不阻断发布），lint 收尾自动重建。Anki 只导出、不调度：间隔重复/判分/错题本/掌握度全部交
+Anki，本项目不新开个人学习状态持久化层。
+
+**`export-site` 是手动分发动作，不是 vault 派生层**（`site_exporter.py`，2026-08-14）：把 published 正文
+渲染成单个自包含离线 HTML（callout 用 `page_rules.parse_callouts`、Markdown 用 `markdown-it-py`、公式用
+内嵌 KaTeX），默认不打包图片、`--with-images` 显式打包并打印体积警告。它**不接发布钩子、不进任何
+`_DERIVED`、不进 `derived_violations`、不进 `retract-source` 的 rebuilds 元组**——每次 lint 重建几 MB 是纯浪费。
 
 **运营层四件套是"改状态/删文件三命令默认 dry-run"的统一约定**（2026-07-09 新增，`proposals-resolve` /
 `reset-source` / `staging-clean`）：不带 `--apply` 一律只打印计划、零改动；`skill-mine` 现在只统计

@@ -26,7 +26,7 @@ preprocess (zero-LLM CLI):  add-source → profile → source-convert → source
 same session (the LLM): read chapters.json (whole-book map) → per-chapter content-routing table into digest (advisory type→writing-approach, deviations logged; ingest references/content-routing.md, a skill-evolve living document) + source.md / hard-page images
                         → write status:proposed pages (hard-page source images are read as evidence, re-expressed natively — never embedded)
                         → concept resolution → synthesis layer
-finish (zero LLM):      lint → promote(proposed→published) or rollback + Review-Queue → rebuild index/registry (aliases.md retired — aliases in concept frontmatter) + knowledge graph v2.0 (graph-data.generated.json → force-directed offline knowledge-graph HTML, click-node-opens-Obsidian via obsidian://; zero-LLM Louvain communities; rebuild-graph CLI + lint hook; publish-isolated — graph failure never blocks publish; canvas removed — topic_membership lives in graph_model and powers the A2 concept-coverage gate) + quiz-index.generated.md (zero-LLM review entry: published [!question] stems + back-links, no answers; rebuild-quiz CLI + lint hook, publish-isolated; lint also soft-warns on unanswered questions and cleans this source's stale Review-Queue lint reports on success) + propositions.generated.md (zero-LLM claims registry: published named **命题（…）** statements + back-links, name-as-anchor / no numbering; rebuild-propositions CLI + lint hook, publish-isolated; in-domain duplicate names soft-warned)
+finish (zero LLM):      lint → promote(proposed→published) or rollback + Review-Queue → rebuild index/registry (aliases.md retired — aliases in concept frontmatter) + knowledge graph v2.0 (graph-data.generated.json → force-directed offline knowledge-graph HTML, click-node-opens-Obsidian via obsidian://; zero-LLM Louvain communities; rebuild-graph CLI + lint hook; publish-isolated — graph failure never blocks publish; canvas removed — topic_membership lives in graph_model and powers the A2 concept-coverage gate) + quiz-index.generated.md (zero-LLM review entry: published [!question] stems + back-links, no answers; rebuild-quiz CLI + lint hook, publish-isolated; lint also soft-warns on unanswered questions and cleans this source's stale Review-Queue lint reports on success) + propositions.generated.md (zero-LLM claims registry: published named **命题（…）** statements + back-links, name-as-anchor / no numbering; rebuild-propositions CLI + lint hook, publish-isolated; in-domain duplicate names soft-warned) + anki-export.generated.tsv (zero-LLM Anki export: published [!question] stems + success descendant answers + back-links, duplicate stems deterministically disambiguated + soft-warned; export-anki CLI + lint hook, publish-isolated; exports only — scheduling/judging/mistake-book/mastery delegated to Anki, no in-project personal learning state store) + source-images.generated.md (zero-LLM hard-page original-image index: page-level entries link each written knowledge page to the source page images that produced it via windows.jsonl assets ⋈ the current round's finished window write-set; sources without a usable write-set degrade to source-level and are explicitly flagged, never disguised as page-level; rebuild-source-images CLI + lint hook, publish-isolated; ordinary markdown links only, never embeds source images) + `pipeline-workspace/exports/site/study-kb.html` (zero-LLM self-contained offline static site via export-site CLI; manual distribution action — NOT a vault derived layer, NOT in the publish hook / _DERIVED / derived_violations / retract rebuilds; callout structure via page_rules.parse_callouts, Markdown via markdown-it-py, math via vendored KaTeX; images excluded by default, `--with-images` opt-in)
 ```
 
 ## 3. Core constraints
@@ -166,6 +166,21 @@ and merged only by a human `skill-adopt`. Protocols: `docs/skill-runtime/{routin
   (title formats differ per book — some published sources carry no numbering at all, and `chapters.json`
   under-collects deep headings, so it would false-positive on published books; it once produced a false
   "fabricated sections" audit verdict).
+- **An export/derived layer is accepted by diffing it against its source — never by counting.**
+  Counting successes is not acceptance: a run reporting "5507 math nodes rendered" hid that 32 of them
+  were destroyed. **Counting failures is not acceptance either** — the same run reported
+  `.katex-error = 0` while every formula containing `<` had already been swallowed by the HTML parser
+  *before* KaTeX ran, so the error counter never saw a broken formula. The only judgement that holds is
+  **item-by-item source-vs-artifact comparison**: extract every unit from the source, extract every unit
+  from the rendered/exported artifact, and assert the source set is fully contained in the artifact set.
+  Report `source count / intact count / lost count`, and require lost = 0. Three rounds cost one rework
+  each before this was written down (P2 page-level attribution, P3 markdown eating math, P3 HTML
+  swallowing math). Applies to every export surface: Anki TSV, source-image index, static site.
+- **Restoring protected content must re-apply the target format's escaping.** Both export layers protect
+  math from the surrounding processor, then restore it — and both shipped a bug because the restore step
+  forgot that the *target* (Anki `#html:true`, static-site HTML) still needs `<`/`>`/`&` escaped. Same
+  defect class, two modules, two rework rounds. When you write a protect→process→restore pipeline, the
+  restore step owns the target format's escaping contract; state that contract in the module docstring.
 
 ## 8. Windows / PowerShell tooling
 

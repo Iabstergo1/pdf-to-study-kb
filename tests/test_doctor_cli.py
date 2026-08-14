@@ -192,6 +192,31 @@ def _publish_lesson(tmp_path, sid, rel):
     assert r.returncode == 0, r.stdout + r.stderr
 
 
+def test_lint_publish_hook_failure_keeps_exit_zero(tmp_path):
+    # R8：发布钩子（publish-isolated）失败只 warn、保留旧产物，不得改 lint 退出码。
+    # 用 quiz-index 目标被占成目录的方式确定性触发 write_quiz_index 抛异常，
+    # 锁住 cmd_lint 里 `except Exception` 的实际语义——否则只能靠"看代码"保证。
+    _preprocessed(tmp_path, sid="note")
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["show-window", "--source", "note", "--window", "w0000"],
+                tmp_path).returncode == 0
+    assert _run(["window-start", "--source", "note", "--window", "w0000", "--hash", "h1"],
+                tmp_path).returncode == 0
+    rel = "domains/misc/lessons/note.md"
+    mdpage.write_page(tmp_path / "wiki" / rel,
+                      {"type": "lesson", "status": "proposed", "managed_by": "pipeline",
+                       "title": "note", "source": "note"}, _RETRACT_LESSON)
+    assert _run(["window-done", "--source", "note", "--window", "w0000",
+                 "--writes", json.dumps([rel])], tmp_path).returncode == 0
+    assert _run(["ingest-done", "--source", "note"], tmp_path).returncode == 0
+
+    (tmp_path / "wiki" / "quiz-index.generated.md").mkdir()
+    r = _run(["lint", "--source", "note"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "自测题库索引重建失败" in r.stdout
+    assert "lint passed" in r.stdout
+
+
 def test_retract_source_dry_run_then_apply_roundtrip(tmp_path):
     # 证据先行的撤库全链：dry-run 零改动 → apply 导证据包→删页→清账→重置→重建派生层
     db = _preprocessed(tmp_path, sid="keep")

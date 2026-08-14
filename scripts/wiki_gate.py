@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import re
 import sys
+from html import escape as _html_escape
 from pathlib import Path
+from urllib.parse import quote as _url_quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import concept_store
@@ -21,7 +23,7 @@ import thresholds  # 门禁阈值单一真值（env 可覆盖）
 #: （分歧矩阵与理由见 tests/test_vault_traversal_scopes.py）。
 _EXCLUDE_TOP = {"Review-Queue", "_meta", "assets", ".obsidian"}
 _DERIVED = {"index.generated.md", "aliases.md", "quiz-index.generated.md",
-            "propositions.generated.md"}
+            "propositions.generated.md", "source-images.generated.md"}
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)")
 # callout 学习白名单（设宽；不强制必须用 callout，只禁未知类型，防 LLM 乱编导致 Obsidian 不渲染）
 CALLOUT_WHITELIST = frozenset({"note", "tip", "info", "important", "warning", "question",
@@ -749,6 +751,7 @@ def derived_violations(vault: Path) -> list[str]:
         "knowledge-graph.generated.html",
         "quiz-index.generated.md",
         "propositions.generated.md",
+        "anki-export.generated.tsv",
     )
     raw: dict[str, bytes] = {}
     findings: list[str] = []
@@ -784,10 +787,11 @@ def derived_violations(vault: Path) -> list[str]:
     for rel, builder in (
             ("index.generated.md", build_index),
             ("quiz-index.generated.md", build_quiz_index),
-            ("propositions.generated.md", build_propositions_index)):
+            ("propositions.generated.md", build_propositions_index),
+            ("anki-export.generated.tsv", build_anki_tsv)):
         try:
             expected = builder(vault).encode("utf-8")
-        except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        except (OSError, UnicodeError, yaml.YAMLError, ValueError) as exc:
             findings.append(f"derived artifact verification failed: {rel}: {exc}")
         else:
             if raw.get(rel) != expected:
@@ -909,6 +913,168 @@ def write_quiz_index(vault) -> None:
                                                          encoding="utf-8", newline="\n")
 
 
+_MATH_BLOCK = re.compile(r"\$\$(.+?)\$\$", re.DOTALL)
+_MATH_INLINE = re.compile(r"(?<!\$)\$(?!\s)(.+?)(?<!\$)\$(?!\d)", re.DOTALL)
+_CODE_SPAN = re.compile(r"`([^`\n]+?)`")
+_WIKILINK_ALIAS = re.compile(r"\[\[([^\]|]+?)\|([^\]]+?)\]\]")
+_WIKILINK_BARE = re.compile(r"\[\[([^\]|]+?)\]\]")
+_BOLD = re.compile(r"\*\*([^*\n]+?)\*\*")
+_MARK = re.compile(r"==([^=\n]+?)==")
+
+
+def _bare_wikilink_display(target: str) -> str:
+    """裸 wikilink 的显示名：先去掉 ``#锚点`` 再取文件名 stem（锚点只影响滚动，不进显示名）。"""
+    return Path(target.split("#", 1)[0]).stem
+
+
+def obsidian_uri(vault, rel: str) -> str:
+    """构造打开 vault 内页面的 ``obsidian://`` URI。
+
+    R2 决策：采用 Obsidian 的 ``vault`` + ``file`` 形式
+    ``obsidian://open?vault=<vault 目录名>&file=<vault 相对路径>``，而不是沿用
+    ``graph_html.py`` 里 ``path=<绝对路径>`` 的形式。理由：
+
+    - 这份 TSV 会随 Anki 同步到手机/平板，``path=D:/...`` 这类本机绝对路径在那些设备上
+      没有意义；而 vault 目录名 + 库内相对路径只要各端库名一致就能跳转。
+    - TSV 是字节确定性的派生层（``derived_violations`` 逐字节校验），把本机绝对路径冻进
+      产物会让换机/换盘/移动库位置破坏确定性；vault 相对路径则与机器无关。
+    - ``vault`` 参数因此真正参与构造（提供库名），不再是被忽略的形参。
+
+    与 ``graph_html.py`` 的差异是刻意的：图谱 HTML 只在当前机器的浏览器里打开，绝对路径
+    已足够；TSV 需要跨设备，故采用 Obsidian 官方 URI 的库名+相对路径形式。
+    """
+    vault_name = Path(vault).name
+    return ("obsidian://open?vault=" + _url_quote(vault_name, safe="")
+            + "&file=" + _url_quote(str(rel), safe=""))
+
+
+def anki_inline_html(text: str) -> str:
+    """把 vault 内联 Markdown 转成 Anki `#html:true` 可渲染的 HTML 片段。
+
+    覆盖范围固定且窄：`$..$`/`$$..$$` 数学、`**x**`、`` `x` ``、`==x==`、
+    `[[path|alias]]`；未知的 HTML 特殊字符转义。数学与行内代码先保护再处理，避免
+    它们内部的标记被二次转换。数学内容还原时先做 HTML 转义（MathJax 读的是转义后文本，
+    渲染不变），并把跨行公式内的换行扁平化为空格，避免调用方把 ``\\n`` 换成 ``<br>`` 时
+    切开 MathJax 的 `\\[…\\]` 配对。纯函数、无 I/O。"""
+    protected: list[tuple[str, str]] = []
+
+    def _protect(match, kind: str) -> str:
+        protected.append((kind, match.group(1)))
+        return f"\x00{len(protected) - 1}\x00"
+
+    out = _MATH_BLOCK.sub(lambda m: _protect(m, "block"), text)
+    out = _MATH_INLINE.sub(lambda m: _protect(m, "inline"), out)
+    out = _CODE_SPAN.sub(lambda m: _protect(m, "code"), out)
+    out = (out.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    out = _WIKILINK_ALIAS.sub(lambda m: m.group(2).strip(), out)
+    out = _WIKILINK_BARE.sub(lambda m: _bare_wikilink_display(m.group(1)), out)
+    out = _BOLD.sub(r"<b>\1</b>", out)
+    out = _MARK.sub(r"<mark>\1</mark>", out)
+    for idx, (kind, value) in enumerate(protected):
+        placeholder = f"\x00{idx}\x00"
+        if kind == "block":
+            replacement = "\\[" + _html_escape(value).replace("\n", " ") + "\\]"
+        elif kind == "inline":
+            replacement = "\\(" + _html_escape(value).replace("\n", " ") + "\\)"
+        else:
+            replacement = "<code>" + _html_escape(value) + "</code>"
+        out = out.replace(placeholder, replacement)
+    return out
+
+
+def collect_quiz_cards(vault) -> list[dict]:
+    """全库 published 页的 Anki 自测卡片：
+    [{stem, answer, rel, display, domain, source}]，rglob 排序确定性。"""
+    vault = Path(vault)
+    out: list[dict] = []
+    for f in sorted(vault.rglob("*.md")):
+        rel = f.relative_to(vault).as_posix()
+        if rel in _DERIVED or rel.split("/")[0] in _EXCLUDE_TOP:
+            continue
+        meta, body = mdpage.read_page(f)
+        if meta.get("status") != "published":
+            continue
+        cards = page_rules.extract_question_cards(body)
+        if not cards:
+            continue
+        display = meta.get("title") or meta.get("canonical_name") or Path(rel).stem
+        dom = str(meta.get("domain") or rel.split("/")[0])
+        refs = meta.get("source_refs") or []
+        source = ""
+        if refs:
+            first = refs[0]
+            source = str(first.get("source") or "") if isinstance(first, dict) else str(first)
+        for card in cards:
+            out.append({"stem": card["stem"], "answer": card["answer"], "rel": rel,
+                        "display": display, "domain": dom, "source": source})
+    return out
+
+
+def duplicate_question_stems(cards: list[dict]) -> list[str]:
+    """重复的题干（Anki 首字段去重键；确定性消歧 + 软警告用）。"""
+    counts: dict[str, int] = {}
+    for c in cards:
+        counts[c["stem"]] = counts.get(c["stem"], 0) + 1
+    return sorted(stem for stem, n in counts.items() if n > 1)
+
+
+def _tsv_field(value: str) -> str:
+    """RFC 4180 字段转义（Anki 的 TSV 导入按 CSV 规则解析）。
+
+    仅当字段含双引号、制表符或换行时整体加引号，内部 ``"`` 写成 ``""``；
+    其余字段原样输出，避免无谓改写其它字节。
+    """
+    if '"' in value or "\t" in value or "\n" in value or "\r" in value:
+        return '"' + value.replace('"', '""') + '"'
+    return value
+
+
+def build_anki_tsv(vault, cards=None) -> str:
+    """anki-export.generated.tsv：全库自测题卡片（零 LLM 派生层）。
+
+    只导出，不调度：Anki Basic 首字段（题干）即为去重键。重复题干不再 fail-closed，
+    而是确定性消歧（首个保留原题干，其后追加页名、必要时追加序号）以保证首字段唯一；
+    重复信息由 duplicate_question_stems 暴露给调用方打软警告，与 duplicate_proposition_names
+    的既有处理一致——fail-closed 会让一个含重复题干的既有 vault 永远过不了 adopt/reuse/reseal
+    的字节 no-op 路径，且这是跨来源劫持（约束⑦同型）。单牌组 study-kb，domain/source 放 tags。
+    """
+    cards = collect_quiz_cards(vault) if cards is None else cards
+    lines = ["#separator:tab", "#html:true", "#notetype:Basic", "#deck:study-kb",
+             "#tags column:3"]
+
+    def _tag_value(value: str) -> str:
+        return value.strip().replace(" ", "_") if value else ""
+
+    stem_seen: dict[str, int] = {}
+    front_seen: set[str] = set()
+    for c in cards:
+        stem = c["stem"]
+        stem_seen[stem] = stem_seen.get(stem, 0) + 1
+        if stem_seen[stem] == 1:
+            front_stem = stem
+        else:
+            front_stem = f"{stem}（{c['display']}）"
+            k = 2
+            while front_stem in front_seen:
+                front_stem = f"{stem}（{c['display']} #{k}）"
+                k += 1
+        front_seen.add(front_stem)
+        front = anki_inline_html(front_stem).replace("\n", "<br>").replace("\t", " ")
+        back = anki_inline_html(c["answer"]).replace("\n", "<br>").replace("\t", " ")
+        uri = obsidian_uri(vault, c["rel"]).replace("&", "&amp;")
+        back += f'<br><a href="{uri}">回原页</a>'
+        tags = [f"domain::{_tag_value(c['domain'])}"]
+        if c["source"]:
+            tags.append(f"source::{_tag_value(c['source'])}")
+        lines.append(f"{_tsv_field(front)}\t{_tsv_field(back)}\t{_tsv_field(' '.join(tags))}")
+    return "\n".join(lines) + "\n"
+
+
+def write_anki_tsv(vault, cards=None) -> None:
+    (Path(vault) / "anki-export.generated.tsv").write_text(build_anki_tsv(vault, cards),
+                                                           encoding="utf-8", newline="\n")
+
+
 def collect_propositions(vault) -> list[dict]:
     """全库 published 页的具名命题（`**命题（名）**：结论`）：
     [{name, statement, rel, display, domain}]，rglob 排序确定性。"""
@@ -958,6 +1124,241 @@ def build_propositions_index(vault) -> str:
 def write_propositions_index(vault) -> None:
     (Path(vault) / "propositions.generated.md").write_text(build_propositions_index(vault),
                                                            encoding="utf-8", newline="\n")
+
+
+def build_source_images(vault, workspace=None) -> str:
+    """source-images.generated.md：已入库难页原图入口索引（派生阅读层，零 LLM）。
+
+    把 ``wiki/assets/<source>/pNNNN.png`` 与写它的知识页关联。唯一确定性连接是
+    ``pipeline-workspace/staging/<source>/windows.jsonl`` 的 ``assets`` ⋈ 业务 SQLite
+    ``ingest_progress.write_set_json``（知识页 → 写它的窗口 → 该窗难页图）。``source_refs``
+    只含章节号不含页码、且章节号已明确不可信，故绝不据此反推。
+
+    精度分级基于“能否证明页归属”，不是“能否覆盖更多图”：
+    - page 级：某窗口在当前可核对的 finished 写集中写出仍存在的页面，且该窗难页图在磁盘上
+      存在时，把图挂到该页。语义是“写该页时所读窗口的难页原图”，可能含同窗邻近上下文页，
+      不表示“这些图都在讲这个概念”。
+    - source 级：不能证明上述归属的图按来源整列，并显式给出实际判定原因。
+    - none：该源没有难页图，不出条目。
+
+    ``workspace`` 缺省取 ``vault.parent``（vault 位于 ``<workspace>/wiki``）。纯函数：
+    只读 vault/workspace，不写盘，输出字节确定（全部排序、无时间戳）。
+    """
+    import json
+    import sqlite3
+    import source_artifacts
+    import state_store
+
+    vault = Path(vault)
+    workspace = Path(workspace) if workspace is not None else vault.parent
+    db_path = workspace / "pipeline-workspace" / "state" / "study-kb.sqlite"
+
+    def _db_connect():
+        if not db_path.is_file():
+            return None
+        try:
+            return state_store.connect(db_path)
+        except (OSError, sqlite3.Error):
+            return None
+
+    def _stage_flags(src: str) -> tuple[bool, bool]:
+        con = _db_connect()
+        if con is None:
+            return False, False
+        try:
+            rows = con.execute(
+                "SELECT id, stage FROM source_stage_runs WHERE source_id=? ORDER BY id",
+                (src,),
+            ).fetchall()
+        except sqlite3.Error:
+            return False, False
+        finally:
+            con.close()
+        last_reopen = max((r["id"] for r in rows if r["stage"] == "reopened"),
+                          default=None)
+        reopened = last_reopen is not None
+        rewindowed_after_reopen = (
+            last_reopen is not None
+            and any(r["stage"] == "windowed" and r["id"] > last_reopen for r in rows)
+        )
+        return reopened, rewindowed_after_reopen
+
+    def _round_anchor(src: str):
+        if not db_path.is_file():
+            return None
+        try:
+            return state_store.round_anchor(db_path, src)
+        except (OSError, sqlite3.Error):
+            return None
+
+    def _page_number(name: str):
+        match = re.fullmatch(r"p(\d+)\.(?:png|jpg|jpeg)", name, re.IGNORECASE)
+        return int(match.group(1)) if match else None
+
+    def _asset_label(name: str, readable_index: dict[str, str]) -> str:
+        page = _page_number(name)
+        if page is not None:
+            return f"p.{page}"
+        if name in readable_index:
+            return readable_index[name]
+        return Path(name).stem
+
+    def _page_display(rel: str) -> str:
+        # 展示名是纯装饰；任何读取失败都确定性降级为文件名 stem，不让索引重建失败。
+        try:
+            meta, _body = mdpage.read_page(vault / rel)
+        except Exception:
+            meta = {}
+        return str(meta.get("title") or meta.get("canonical_name") or Path(rel).stem)
+
+    sections: list[str] = []
+    assets_root = vault / "assets"
+    source_dirs = ([d for d in assets_root.glob("*") if d.is_dir()]
+                   if assets_root.exists() else [])
+    for src_dir in sorted(source_dirs, key=lambda p: p.name):
+        src = src_dir.name
+        asset_files = sorted(
+            f for ext in ("*.png", "*.jpg", "*.jpeg")
+            for f in src_dir.glob(ext)
+        )
+        if not asset_files:
+            continue
+
+        # 可读序号只覆盖无法从文件名推出页码的资产（内容哈希命名等），
+        # 页码型 pNNN 仍显示 p.N，哈希型按本源稳定排序编号为 图1/图2/…。
+        readable_index = {
+            f.name: f"图{i}"
+            for i, f in enumerate(
+                (f for f in asset_files if _page_number(f.name) is None), 1
+            )
+        }
+
+        round_anchor = _round_anchor(src)
+        _, rewindowed_after_reopen = _stage_flags(src)
+
+        windows: dict[str, dict] = {}
+        windows_file = workspace / "pipeline-workspace" / "staging" / src / "windows.jsonl"
+        if windows_file.is_file():
+            try:
+                rows = source_artifacts.read_jsonl(windows_file)
+            except (OSError, UnicodeError, ValueError):
+                rows = []
+            for record in rows:
+                if isinstance(record, dict) and isinstance(record.get("window_id"), str):
+                    windows[record["window_id"]] = record
+
+        write_set_by_window: dict[str, list[str]] = {}
+        states: list[dict] = []
+        if db_path.is_file():
+            try:
+                states = state_store.window_states(db_path, src)
+            except (OSError, sqlite3.Error):
+                states = []
+        trusted_any = False
+        for row in states:
+            if row.get("status") != "finished" or not row.get("write_set_json"):
+                continue
+            if round_anchor is not None:
+                row_round_ok = row.get("round") == round_anchor
+            else:
+                # 无轮次 token 时，只有窗口没有被 reopen 后重生成，window_id 才是当前窗口
+                # 的稳定键；否则旧写集无法按轮次区分，不能用于页归属。
+                row_round_ok = not rewindowed_after_reopen
+            if not row_round_ok:
+                continue
+            try:
+                parsed = json.loads(row["write_set_json"])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(parsed, list) and parsed:
+                write_set_by_window[str(row["window_id"])] = [str(x) for x in parsed]
+                trusted_any = True
+
+        page_asset_set: dict[str, set[str]] = {}
+        accounted: set[str] = set()
+        saw_no_write = False
+        saw_no_page = False
+        all_window_asset_names: set[str] = set()
+        for window_id in sorted(windows):
+            record = windows[window_id]
+            write_set = write_set_by_window.get(window_id)
+            asset_names: list[str] = []
+            for raw_asset in record.get("assets") or []:
+                name = Path(str(raw_asset)).name
+                if (src_dir / name).is_file():
+                    asset_names.append(name)
+                    all_window_asset_names.add(name)
+            if not asset_names:
+                continue
+            if not write_set:
+                saw_no_write = True
+                continue
+            attached = False
+            for page in write_set:
+                page = page.replace("\\", "/")
+                if (vault / page).is_file():
+                    page_asset_set.setdefault(page, set()).update(
+                        f"assets/{src}/{name}" for name in asset_names)
+                    attached = True
+            if attached:
+                accounted.update(asset_names)
+            else:
+                saw_no_page = True
+
+        unaccounted = [f for f in asset_files if f.name not in accounted]
+        if not page_asset_set and not unaccounted:
+            continue
+        has_unreferenced = any(f.name not in all_window_asset_names for f in unaccounted)
+
+        def _source_level_reason() -> str:
+            if not trusted_any:
+                if round_anchor is None and rewindowed_after_reopen:
+                    return "work order 无轮次 token，且 reopen 后重新生成窗口，无法按轮次核对窗口写集"
+                if round_anchor is None:
+                    return "work order 无轮次 token，且没有可核对的 finished 窗口写集"
+                return "当前轮次没有 finished 窗口写集"
+            reasons: list[str] = []
+            if saw_no_write:
+                reasons.append("部分原图所属窗口无当前轮 finished 写集")
+            if saw_no_page:
+                reasons.append("部分原图所属窗口的写集不含现存知识页")
+            if has_unreferenced:
+                reasons.append("部分原图未被任何窗口 assets 引用")
+            if reasons:
+                return "，".join(reasons)
+            return "以下原图无法证明具体页归属"
+
+        section = [f"## {_page_display(f'sources/{src}.md')}", ""]
+        if page_asset_set:
+            section += ["**page 级**（写该页时所读窗口的难页原图）", ""]
+            for page in sorted(page_asset_set):
+                links = "、".join(
+                    f"[{_asset_label(rel.rsplit('/', 1)[-1], readable_index)}]({rel})"
+                    for rel in sorted(page_asset_set[page]))
+                section.append(f"- [[{page}|{_page_display(page)}]] → {links}")
+            section.append("")
+        if unaccounted:
+            section += ["**source 级**（无法证明具体页归属："
+                        + _source_level_reason() + "，"
+                        "以下原图按来源整列）", ""]
+            for asset in unaccounted:
+                section.append(
+                    f"- [{_asset_label(asset.name, readable_index)}](assets/{src}/{asset.name})")
+            section.append("")
+        sections.append("\n".join(section).rstrip("\n"))
+
+    lines = ["# 难页原图索引（派生文件：由收尾 CLI 重建，只收录已入库难页原图入口，勿手改）", "",
+             "page 级：写该页时所读窗口的难页原图（可能含同窗邻近上下文，不等同于“关于该概念”）；"
+             "source 级：无法证明具体页归属，仅按来源整列。"]
+    if sections:
+        lines.append("")
+        lines.extend(sections)
+    return "\n".join(lines)
+
+
+def write_source_images(vault, workspace=None) -> None:
+    (Path(vault) / "source-images.generated.md").write_text(
+        build_source_images(vault, workspace), encoding="utf-8", newline="\n")
 
 
 def promote(vault, pages: list[dict]) -> int:

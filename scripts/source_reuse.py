@@ -98,6 +98,7 @@ assert not (_DIAGNOSTICS_TABLES & _TRANSIENT_TABLES)
 _DERIVED = {
     "index.generated.md", "quiz-index.generated.md", "propositions.generated.md",
     "knowledge-graph.generated.html", "graph-data.generated.json", "aliases.md", "log.md",
+    "anki-export.generated.tsv", "source-images.generated.md",
 }
 _EXCLUDE_TOP = {".obsidian", "Review-Queue", "_meta", "assets"}
 

@@ -261,6 +261,35 @@ def extract_question_stems(body: str) -> list[str]:
     return [s for n in _question_nodes(body) if (s := _node_stem(n))]
 
 
+def extract_question_cards(body: str) -> list[dict]:
+    """返回正文中每个已解答的 [!question] callout 卡片 [{"stem","answer"}]。
+
+    题干口径复用 _node_stem（与 extract_question_stems 完全一致，不得另立口径）；
+    「什么算已解答」复用 question_resolution（不再各判各的）：nested_success 取所有
+    success 后代正文按文档序拼接，sibling_success 取紧随其后的同级 success 正文，
+    linked_resolution_candidate/none 无内联答案文本、跳过。纯函数、无 I/O。"""
+    nodes, _ = parse_callouts(body)
+    cards: list[dict] = []
+    for i, q in enumerate(nodes):
+        if q["type"] != "question":
+            continue
+        stem = _node_stem(q)
+        if not stem:
+            continue
+        resolution = question_resolution(nodes, i)
+        if resolution == "nested_success":
+            answer = _success_descendants_answer(nodes, q)
+        elif resolution == "sibling_success":
+            sibling = nodes[_sibling_success_index(nodes, i)]
+            answer = "\n".join(
+                text for depth, text in sibling["body"] if depth == sibling["depth"]).strip()
+        else:
+            continue
+        if answer:
+            cards.append({"stem": stem, "answer": answer})
+    return cards
+
+
 # 具名命题：库内承重结论的稳定锚点（`**命题（先发优势）**：一句话结论`）。名字即锚点、域内唯一，
 # v1 不做数字编号（编号需持久注册表，重建即重排会断引用）；收尾收割成 propositions.generated.md。
 _PROPOSITION = re.compile(r"\*\*命题（([^）\n]{1,24})）\*\*[：:]\s*(.+)")
@@ -311,6 +340,30 @@ def misplaced_question_stems(body: str) -> list[str]:
             if n["title"].rstrip().endswith(("？", "?")) and _node_stem(n) != n["title"]]
 
 
+def _sibling_success_index(nodes: list[dict], q_index: int) -> int | None:
+    """紧随 question 之后的第一个同级 success 节点下标；无/被非 success 隔断则 None。"""
+    for j in range(q_index + 1, len(nodes)):
+        node = nodes[j]
+        if node["parent"] is None:
+            return j if node["type"] == "success" else None
+    return None
+
+
+def _success_descendants_answer(nodes: list[dict], node: dict) -> str:
+    """一个 question 节点所有 success 后代的直接正文行，按文档序拼接（含跳级、不折叠）。"""
+    lines: list[str] = []
+
+    def walk(current: dict) -> None:
+        for child_idx in current["children"]:
+            child = nodes[child_idx]
+            if child["type"] == "success":
+                lines.extend(text for depth, text in child["body"] if depth == child["depth"])
+            walk(child)
+
+    walk(node)
+    return "\n".join(lines).strip()
+
+
 def question_resolution(nodes: list[dict], q_index: int) -> str:
     """一道 question 的解答形态（软判断的确定性前置）：
     `nested_success`（success 后代——含跳级）> `linked_resolution_candidate`（题干区 wikilink
@@ -325,12 +378,7 @@ def question_resolution(nodes: list[dict], q_index: int) -> str:
         stack.extend(c["children"])
     if any("[[" in t for _d, t in q["body"]):
         return "linked_resolution_candidate"
-    for j in range(q_index + 1, len(nodes)):
-        if nodes[j]["parent"] is None:
-            if nodes[j]["type"] == "success":
-                return "sibling_success"
-            break  # 下一个顶层块不是 success → 不算紧随解答
-    return "none"
+    return "sibling_success" if _sibling_success_index(nodes, q_index) is not None else "none"
 
 
 def unanswered_question_stems(body: str) -> list[str]:

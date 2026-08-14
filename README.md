@@ -89,7 +89,8 @@ python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yam
 > **Claude Code 与 Codex 二选一即可**：两者各读自己的项目真值（[`CLAUDE.md`](CLAUDE.md) / [`AGENTS.md`](AGENTS.md)）与各自的 skill 树（[`.claude/skills/`](.claude/skills/) 与 [`.agents/skills/`](.agents/skills/)，两树**协议 / 语义对等**——仅各自的 project-truth 指针不同），且**调用同一套 CLI、操作同一个 `wiki/`**，因此确定性行为一致；调用界面、权限与写作质量因 agent 而异。你**无需两个都装**。
 
 > [!NOTE]
-> **基础/开发依赖**：**PyMuPDF + PyYAML**（+ pytest 供测试；见 [`requirements.txt`](requirements.txt)）——覆盖 Markdown 与 PDF fast path。**生产格式依赖**：strict PDF 双审、扫描 PDF、DOCX、PPTX **必须装 MinerU**（见下方 TIP，未装则 fail-closed、不伪装成功）。
+> **基础/开发依赖**：**PyMuPDF + PyYAML + markdown-it-py**（+ pytest 供测试；见 [`requirements.txt`](requirements.txt)）——覆盖 Markdown 与 PDF fast path，`markdown-it-py` 供 `export-site` 渲染正文 Markdown。**生产格式依赖**：strict PDF 双审、扫描 PDF、DOCX、PPTX **必须装 MinerU**（见下方 TIP，未装则 fail-closed、不伪装成功）。
+> `export-site` 的 KaTeX 已离线 vendor 到 [`scripts/vendor/katex/`](scripts/vendor/katex/)，**该目录进入 Git**（当前未被 ignore）——否则新 clone 无法离线构建单文件站点。
 > 默认 fast path 视觉保真走 route B：`source-convert` 用 PyMuPDF 抽文本，**难页（公式 / 矢量图 / 表 / 图表标题）高召回渲染整页 PNG**，由 ingest **读图**保真（公式写 KaTeX）。fast path 不依赖重型 OCR/ML。
 
 > [!TIP]
@@ -248,9 +249,9 @@ pdf-to-study-kb/
 ├── CLAUDE.md                 # Claude Code 的项目真值（架构 / 约束 / 协作）
 ├── AGENTS.md                 # Codex 的项目真值（与 CLAUDE.md 对等）
 ├── README.md                 # 本文件
-├── requirements.txt          # 基础依赖 PyMuPDF + PyYAML + pytest（生产格式另需 MinerU，见末尾可选段）
+├── requirements.txt          # 基础依赖 PyMuPDF + PyYAML + markdown-it-py + pytest（生产格式另需 MinerU，见末尾可选段）
 ├── scripts/
-│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（52 子命令，全部业务逻辑在此）
+│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（55 子命令，全部业务逻辑在此）
 │   ├── state_store.py / locks.py                # 业务 SQLite 状态机 / 单-ingest 并发锁
 │   ├── vault_adoption.py / legacy_revision.py / source_reuse.py
 │   │                                           # 既有 vault 接管 / adopted 页受控修订 / 跨库来源复用
@@ -299,14 +300,14 @@ pdf-to-study-kb/
 
 所有 skill 背后调用的都是 `python scripts/pipeline.py <command>`（零 LLM、可独立运行，**全部业务逻辑与安全守卫都在这里**）。日常对话无需手动输入；该接口面向**精细控制、问题排查、手动重跑某一阶段、无人值守脚本化**等高级场景。
 
-命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 52 个子命令（以 `python scripts/pipeline.py --help` 为准）：
+命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 55 个子命令（以 `python scripts/pipeline.py --help` 为准）：
 
 <details>
 <summary><b>展开：完整 CLI 命令参考</b></summary>
 
 ### 状态与维护
 
-> **为什么有这组**：ingest 是可中断的长任务，且同一 vault 受并发锁保护。这组命令让你不依赖 LLM 就能"看清现状 + 崩溃自救"——`status`/`next` 回答"每个来源走到哪一步、锁在谁手里、下一步该做什么"；`fail` 把崩溃残留的 `running` 阶段标记 `failed` 以便重跑；`unlock` 受控回收超时的 stale 锁（活锁拒绝，防误删）；`adopt-vault` 以不可变基线接管既有库；`revise-adopted` 通过 sidecar 候选与不可变事件链修订 adopted legacy 页；`reuse-source` 从只读 published vault 登记选择性复用；`reseal-source` 在旧证据完整前提下受控替换 v1→v2 topic 证据；`rebuild-registry` 从概念页 frontmatter 重建派生索引；`rebuild-graph` 从 published 图谱重建 graph-data + 离线 HTML 力导向图（派生阅读层，fail-hard）、`graph-lint` 校验图谱产物；`rebuild-quiz` 从 published 页的 `[!question]` 重建自测题库索引（复习入口，派生阅读层）；`rebuild-propositions` 从 published 页的具名命题（`**命题（名）**：…`）重建命题总表（全库结论清单，名字即锚点）；`init-vault` 幂等搭起空脚手架。
+> **为什么有这组**：ingest 是可中断的长任务，且同一 vault 受并发锁保护。这组命令让你不依赖 LLM 就能"看清现状 + 崩溃自救"——`status`/`next` 回答"每个来源走到哪一步、锁在谁手里、下一步该做什么"；`fail` 把崩溃残留的 `running` 阶段标记 `failed` 以便重跑；`unlock` 受控回收超时的 stale 锁（活锁拒绝，防误删）；`adopt-vault` 以不可变基线接管既有库；`revise-adopted` 通过 sidecar 候选与不可变事件链修订 adopted legacy 页；`reuse-source` 从只读 published vault 登记选择性复用；`reseal-source` 在旧证据完整前提下受控替换 v1→v2 topic 证据；`rebuild-registry` 从概念页 frontmatter 重建派生索引；`rebuild-graph` 从 published 图谱重建 graph-data + 离线 HTML 力导向图（派生阅读层，fail-hard）、`graph-lint` 校验图谱产物；`rebuild-quiz` 从 published 页的 `[!question]` 重建自测题库索引（复习入口，派生阅读层）；`rebuild-propositions` 从 published 页的具名命题（`**命题（名）**：…`）重建命题总表（全库结论清单，名字即锚点）；`rebuild-source-images` 从窗口难页图 ⋈ 写集重建难页原图索引（page 级逐页、source 级整源显式标注，普通链接不嵌图）；`export-anki` 把全库自测题连答案导成 Anki 可一键导入的 TSV（只导出、不调度）；`export-site` 把全库正文导成单个自包含离线 HTML（手动分发动作，不接发布钩子）；`init-vault` 幂等搭起空脚手架。
 
 | 命令 | 作用 | 关键参数 |
 |------|------|------|
@@ -324,6 +325,9 @@ pdf-to-study-kb/
 | `graph-lint` | 校验 graph-data(+HTML)：fail-hard 非零退出、warn-only 不阻断 | — |
 | `rebuild-quiz` | 从 published 页的 `[!question]` 重建 `quiz-index.generated.md` 自测题库索引（题干+回链、不含答案；收尾 lint 自动重建） | — |
 | `rebuild-propositions` | 从 published 页的具名命题重建 `propositions.generated.md` 命题总表（结论句+回链，名字即锚点不编号；收尾 lint 自动重建，域内重名软警告） | — |
+| `rebuild-source-images` | 从窗口难页图 ⋈ 当前轮窗口写集重建 `source-images.generated.md` 难页原图索引（page 级=写该页时所读窗口的难页原图，可能含同窗邻近上下文；source 级=无法证明具体页归属、整源显式标注；普通 markdown 链接、不嵌图；收尾 lint 自动重建） | — |
+| `export-anki` | 把全库自测题（题干+success 后代答案+回链）导成 `anki-export.generated.tsv`，Anki 原生导入即可排程；首字段题干作去重键，跨页重复题干确定性消歧并软警告 | — |
+| `export-site` | 把 published 正文导成 `pipeline-workspace/exports/site/study-kb.html` 单文件离线站点（callout/表格/公式/代码/搜索/响应式；默认不打包图片，`--with-images` 显式打包并打印体积警告；手动分发动作，**不接发布钩子**） | `--with-images` |
 | `apply-obsidian-style` | 落地学习库观感 CSS snippet + merge `appearance.json`（幂等，纯配置层零内容改动） | — |
 
 ### 预处理（零 LLM，顺序固定，幂等跳过）
@@ -599,6 +603,7 @@ OS 级调度提供的是收敛式重试，而非“一次完成”的保证：�
 4. 用浏览器打开 **`knowledge-graph.generated.html`**（vault 根，收尾 `lint` 自动重建、或手动 `rebuild-graph`）：一张**零依赖、自包含的力导向知识图谱**——按社区(主题)着色分簇、可拖拽/缩放/平移、悬停高亮邻居；**点击节点（或详情面板的「在 Obsidian 中打开」、双击节点）经 `obsidian://` 直接跳到对应笔记**精读。它是派生阅读层、随库确定性重建（零 LLM）。要让跳转生效，先在 Obsidian 里把 `wiki/` 作为库打开过一次。
 5. **复习入口**：打开 **`quiz-index.generated.md`**（vault 根，收尾 `lint` 自动重建、或手动 `rebuild-quiz`）——全库自测题按领域分组汇总（只列题干+回链，不泄露答案）；不想系统读书时抽几题自答，再点链接回原页展开折叠答案核对。
 6. **命题总表**：打开 **`propositions.generated.md`**（vault 根，收尾 `lint` 自动重建、或手动 `rebuild-propositions`）——全库承重结论的具名清单（`**命题（名）**：一句话` 收割而来，名字即锚点、不编号），是"这个库断言了哪些事"的资产清单，配回链跳回原页看完整论证。
+7. **难页原图索引**：打开 **`source-images.generated.md`**（vault 根，收尾 `lint` 自动重建、或手动 `rebuild-source-images`）——按来源汇总“写每个知识页时所读窗口的难页原图”入口；能证明某窗写出某页的图列为 `page 级`（会包含同窗邻近上下文页，不等同于“该图在讲这个概念”），无法证明具体页归属的整源列为 `source 级` 并显式说明，普通链接点开看原图、不把源图嵌进阅读页。
 
 所有生成笔记的 frontmatter 都是 **Dataview 友好**的（`type` / `canonical_id` / `domain` / `status` / `source_refs` …），可用 Dataview 自定义查询视图。
 

@@ -45,13 +45,22 @@ _IMMUTABLE_FRONTMATTER = (
     "type", "canonical_id", "canonical_name", "aliases", "scope", "domain",
     "page_path", "managed_by", "source_refs",
 )
-_DERIVED = (
+_DERIVED_V1 = (
     "concepts/_registry.yaml",
     "index.generated.md",
     "graph-data.generated.json",
     "knowledge-graph.generated.html",
     "quiz-index.generated.md",
     "propositions.generated.md",
+)
+#: 派生产物集合随能力单调增长（只增、不改名）。P1 把 anki-export 加进来之后，
+#: ``_DERIVED_V1`` 仍保留 P1 之前的集合：它是没有 ``derived_files`` 字段的历史
+#: transition 回退校验的唯一锚。若未来（P2）再增 source-images.generated.md，
+#: 只需继续增长 ``_DERIVED``；新 transition 会各自快照当时的集合，旧 evidence
+#: 靠 ``derived_files`` 或 ``_DERIVED_V1`` 两种回退自证，不需要再冻结新历史版本。
+_DERIVED = _DERIVED_V1 + (
+    "anki-export.generated.tsv",
+    "source-images.generated.md",
 )
 _EXCLUDED_TOP = {".obsidian", "Review-Queue", "_meta", "assets"}
 _PAGE_REQUIRED_KEYS = {"path", "reason", "evidence", "citation_removals"}
@@ -1037,11 +1046,13 @@ def _rebuild_derived(overlay: Path, final_vault: Path) -> None:
         graph_html.to_html(data, vault_root=final_vault.resolve().as_posix()),
         encoding="utf-8", newline="\n")
     wiki_gate.write_quiz_index(overlay)
+    wiki_gate.write_anki_tsv(overlay)
     props = wiki_gate.collect_propositions(overlay)
     duplicates = wiki_gate.duplicate_proposition_names(props)
     if duplicates:
         raise LegacyRevisionError("duplicate proposition names in revision overlay: " + duplicates[0])
     wiki_gate.write_propositions_index(overlay)
+    wiki_gate.write_source_images(overlay, workspace=final_vault.parent)
 
 
 def _log_line(source: str, operation_id: str, post_sha: str) -> str:
@@ -1104,6 +1115,9 @@ def _build_transition(op: Path, authorization: dict, context: dict) -> dict:
                 "pre_size": len(switch_pre["log.md"]), "post_size": len(log_post)},
         "post_manifest_sha256": post_sha,
     }
+    derived_files = _derived_files_snapshot()
+    if derived_files is not None:
+        transition["derived_files"] = derived_files
     temp = op / f".transition-{uuid.uuid4().hex}"
     try:
         temp.mkdir()
@@ -1429,6 +1443,40 @@ def emit_removal_sha(workspace, page_rel: str, source: str | None = None) -> lis
     return out
 
 
+def _derived_files_snapshot() -> list[str] | None:
+    """Derived-file set frozen into each new transition record.
+
+    生产实现恒返回当前 ``_DERIVED``。回归测试把它 monkeypatch 成 ``None``（同时把
+    ``_DERIVED`` monkeypatch 成 ``_DERIVED_V1``），以便按 P1 之前的真实字节形态物化一份
+    旧 transition——没有 ``derived_files`` 字段、也不含 anki-export。这个 seam 存在的唯一
+    理由是不能为了写测试而手工重算哈希链。
+    """
+    return sorted(set(_DERIVED))
+
+
+def _transition_derived_files(transition: dict) -> set[str]:
+    """返回某个 transition 记录时点应受控的派生产物集合。
+
+    契约兼容方案（R1）：把派生产物集合快照进 transition 的 ``derived_files`` 字段，
+    而不是用当前模块常量 ``_DERIVED`` 去卡历史证据。历史 transition 没有该字段时
+    回退到 ``_DERIVED_V1``（P1 之前、不含 anki-export 的冻结集合）。这样：
+
+    - 老证据在新代码下仍验得过（按其记录时点的集合校验）；
+    - 新证据不会放松（新 transition 显式携带 ``derived_files``，校验用它）；
+    - P2 再往 ``_DERIVED`` 加 source-images.generated.md 时无需再冻结历史版本，
+      每条 transition 已各自快照当时集合。
+
+    刻意不 bump ``CONTRACT_VERSION``：该字段是 transition 的可选自描述扩展，缺省
+    态与 P1 前格式完全同构，请求载荷与 authorization 契约都不变。
+    """
+    value = transition.get("derived_files")
+    if value is None:
+        return set(_DERIVED_V1)
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        raise LegacyRevisionError("transition derived_files must be a list of strings")
+    return set(value)
+
+
 def _verify_transition(op: Path, auth: dict) -> tuple[dict, bytes, dict[str, bytes],
                                                        dict[str, bytes]]:
     transition, transition_raw = _load_canonical_json(
@@ -1437,7 +1485,10 @@ def _verify_transition(op: Path, auth: dict) -> tuple[dict, bytes, dict[str, byt
         "authorization_sha256", "candidate_sha256", "contract_version", "entries",
         "log", "operation_id", "post_manifest_sha256",
     }
-    if (not isinstance(transition, dict) or set(transition) != expected_keys
+    optional_keys = {"derived_files"}
+    if (not isinstance(transition, dict)
+            or not expected_keys.issubset(transition)
+            or set(transition) - expected_keys - optional_keys
             or transition["contract_version"] != CONTRACT_VERSION
             or transition["operation_id"] != op.name
             or transition["authorization_sha256"] != _sha_bytes(
@@ -1449,7 +1500,7 @@ def _verify_transition(op: Path, auth: dict) -> tuple[dict, bytes, dict[str, byt
     if transition["post_manifest_sha256"] != _sha_bytes(post_manifest_raw):
         raise LegacyRevisionError(f"transition/post manifest identity drift: {op}")
     page_paths = {page["path"] for page in auth["pages"]}
-    expected_post = page_paths | set(_DERIVED)
+    expected_post = page_paths | _transition_derived_files(transition)
     if set(post) != expected_post or set(switch) != expected_post | {"log.md"}:
         raise LegacyRevisionError(f"transition controlled file set drift: {op}")
     candidates = _candidate_files(op, auth)

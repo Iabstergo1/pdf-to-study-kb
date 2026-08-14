@@ -9,6 +9,7 @@
 # ── 核心确定性 CLI（零 LLM 必需）──────────────────────────────
 pymupdf>=1.23.0      # PDF 解析 / 页渲染（source-convert 文本后端 + 难页 PNG）
 pyyaml>=6.0          # YAML（registry / workorder / frontmatter）
+markdown-it-py>=4.0  # 静态站点正文 Markdown 渲染（export-site；GFM 表格）
 
 # 公式保真走 route B：纯文本 + 公式风险页整页 PNG，由 ingest 读图写 KaTeX。
 # 核心 CLI 轻量（PyMuPDF 抽取）；PDF 严格验收另需 MinerU 作 structural reviewer（双审，见下方 + CLAUDE.md）。

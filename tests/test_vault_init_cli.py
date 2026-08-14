@@ -1,10 +1,15 @@
 import os
 import subprocess
 import sys
+import importlib.util
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PIPELINE = ROOT / "scripts" / "pipeline.py"
+
+_SPEC = importlib.util.spec_from_file_location("mdpage", ROOT / "scripts" / "mdpage.py")
+mdpage = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(mdpage)
 
 DIRS = ["_meta", "domains", "concepts", "topics", "comparisons", "synthesis",
         "sources", "assets", "Review-Queue"]
@@ -40,3 +45,19 @@ def test_init_vault_idempotent_never_overwrites(tmp_path):
     r = _run(["init-vault"], tmp_path)
     assert r.returncode == 0
     assert overview.read_text(encoding="utf-8") == "HUMAN EDITED\n"  # 绝不覆盖已有文件
+
+
+def test_export_anki_cli(tmp_path):
+    assert _run(["init-vault"], tmp_path).returncode == 0
+    mdpage.write_page(tmp_path / "wiki/domains/misc/concepts/概念甲.md",
+                      {"type": "concept", "status": "published", "managed_by": "pipeline",
+                       "canonical_id": "concept.misc.jia", "canonical_name": "概念甲",
+                       "domain": "misc", "source_refs": [{"source": "note"}]},
+                      "正文。\n\n> [!question] 自测\n> 甲的定义要件是什么？\n"
+                      "> > [!success]- 参考答案\n> > 要件略。\n")
+    r = _run(["export-anki"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    tsv = (tmp_path / "wiki/anki-export.generated.tsv").read_text(encoding="utf-8")
+    assert "甲的定义要件是什么？" in tsv
+    assert "要件略。" in tsv
+    assert "source::note" in tsv

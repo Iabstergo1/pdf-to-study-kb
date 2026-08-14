@@ -177,6 +177,44 @@ def test_extract_question_stems():
     assert page_rules.extract_question_stems("无题正文。\n") == []
 
 
+def test_extract_question_cards():
+    body = ("开头散文。\n\n"
+            "> [!question] 自测\n"
+            "> 为什么（抵赖, 抵赖）不是纳什均衡？\n"
+            "> > [!success]- 参考答案\n"
+            "> > 因为存在单方面偏离动机。\n\n"
+            "> [!question]- 进阶\n"
+            "> 三家企业时结论如何变化？\n")
+    assert page_rules.extract_question_cards(body) == [
+        {"stem": "为什么（抵赖, 抵赖）不是纳什均衡？",
+         "answer": "因为存在单方面偏离动机。"},
+    ]
+    # 有题无解（只有 tip）→ 跳过
+    tip_only = "> [!question] 自测\n> 为什么？\n> > [!tip] 提示\n> > 想想边际。\n"
+    assert page_rules.extract_question_cards(tip_only) == []
+    assert page_rules.extract_question_cards("普通正文。\n") == []
+
+
+def test_extract_question_cards_resolution_kinds():
+    """R3：卡片答案口径必须与 question_resolution 同源——非折叠、跳级、同级 sibling 三种
+    已解答形态都要收到卡，不能只认「直接子节点 ∧ folded」。"""
+    # 非折叠 success（直接子节点，无 `-`）
+    non_folded = ("> [!question] 自测\n> 题干？\n"
+                  "> > [!success] 参考答案\n> > 答案在此。\n")
+    assert page_rules.extract_question_cards(non_folded) == [
+        {"stem": "题干？", "answer": "答案在此。"}]
+    # 跳级：success 经中间 note 成为 question 的后代而非直接子节点
+    nested = ("> [!question] 自测\n> 题干？\n"
+              "> > [!note] 提示\n> > > [!success]- 参考答案\n> > > 答案。\n")
+    assert page_rules.extract_question_cards(nested) == [
+        {"stem": "题干？", "answer": "答案。"}]
+    # 同级 sibling：真空行隔开的紧随 success 块
+    sibling = ("> [!question] 自测\n> 为什么？\n\n"
+               "> [!success]- 答案\n> 因为。\n")
+    assert page_rules.extract_question_cards(sibling) == [
+        {"stem": "为什么？", "answer": "因为。"}]
+
+
 def test_parse_callouts_nodes_and_errors():
     """统一解析器契约：同时返回可定位节点与结构错误（错误不吞节点——quiz 仍能看见第二题）。"""
     # 真实缺陷 fixture（存量清理前的 published 页形状）：两个顶层 question 之间只有一行 >

@@ -21,8 +21,8 @@ REQUIRED_TOP = {"version", "generated_at", "scope", "nodes", "edges", "communiti
                 "learning_paths", "insights", "stats"}
 _DENSE_DEGREE = thresholds.GRAPH_DENSE_DEGREE
 _EXCLUDE_TOP = {"Review-Queue", "_meta", "assets", ".obsidian"}  # .obsidian 见 wiki_gate 同名常量注释
-_DERIVED = {"index.generated.md", "aliases.md", "knowledge-map.generated.canvas",
-            "graph-data.generated.json", "knowledge-graph.generated.html"}
+_DERIVED = {"index.generated.md", "aliases.md", "quiz-index.generated.md",
+            "propositions.generated.md", "source-images.generated.md"}
 _DATA_SCRIPT = re.compile(r'<script id="graph-data" type="application/json">\s*(.*?)\s*</script>', re.S)
 
 

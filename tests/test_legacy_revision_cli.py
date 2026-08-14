@@ -420,6 +420,37 @@ def test_completed_operation_preserves_adoption_and_main_state_contract(tmp_path
         con.close()
 
 
+def test_legacy_evidence_without_derived_files_snapshot_still_verifies(tmp_path, monkeypatch):
+    """R1 回归：P1 之前写下的旧 transition（无 derived_files、无 anki-export）仍须验得过。
+
+    旧 evidence 的派生集合是当时的 6 个文件；新代码若拿当前 7 文件的 ``_DERIVED`` 去卡，
+    会让 cmd_lint / cmd_vault_lint 对不可再生的哈希链证据永久 SystemExit，且无补救通道。
+    这里按旧集合物化一份字节忠实的 operation，再用新代码重跑 ``evidence_findings``。
+    """
+    _adopted_workspace(tmp_path)
+    request = _request(tmp_path)
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import legacy_revision
+
+    # 模拟 P1 之前的物化路径：派生集合只有 6 个文件，transition 不写 derived_files 字段。
+    monkeypatch.setattr(legacy_revision, "_DERIVED", legacy_revision._DERIVED_V1)
+    monkeypatch.setattr(legacy_revision, "_derived_files_snapshot", lambda: None)
+
+    prepared = legacy_revision.run(
+        workspace=tmp_path, source=SOURCE, request_path=request,
+        apply=True, lock_ttl_seconds=1800)
+    assert prepared["phase"] == "prepared"
+    _edit_candidate(tmp_path)
+    completed = legacy_revision.run(
+        workspace=tmp_path, source=SOURCE, request_path=request,
+        apply=True, lock_ttl_seconds=1800)
+    assert completed["phase"] == "completed"
+
+    # 恢复当前派生集合，模拟「新代码」重校验旧 evidence。
+    monkeypatch.undo()
+    assert legacy_revision.evidence_findings(tmp_path) == []
+
+
 @pytest.mark.parametrize("fault", ["transition", "committing", "switch", "log", "completed"])
 def test_each_commit_boundary_crash_converges_with_same_request(tmp_path, monkeypatch, fault):
     _adopted_workspace(tmp_path)

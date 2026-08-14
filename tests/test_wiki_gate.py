@@ -1,5 +1,8 @@
 from pathlib import Path
+import csv
 import importlib.util
+import json
+import re
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -13,6 +16,7 @@ def _load(name):
 
 mdpage = _load("mdpage")
 wiki_gate = _load("wiki_gate")
+state_store = _load("state_store")
 
 
 def _page(vault, rel, meta, body):
@@ -532,6 +536,278 @@ def test_build_quiz_index_collects_published_questions(tmp_path):
     assert (tmp_path / "quiz-index.generated.md").exists()
     text2 = wiki_gate.build_quiz_index(tmp_path)
     assert text2.count("为什么价格压到边际成本？") == 1
+
+
+def test_anki_inline_html_markdown_and_math():
+    text = wiki_gate.anki_inline_html(
+        "成本 $c_i$，**价格** `p`，==重点==，[[domains/x/concepts/a|甲]]。")
+    assert "\\(c_i\\)" in text
+    assert "<b>价格</b>" in text
+    assert "<code>p</code>" in text
+    assert "<mark>重点</mark>" in text
+    assert "甲" in text
+    assert "[[domains" not in text
+
+
+def test_anki_inline_html_escapes_math_content():
+    """R4：散文的 ``<`` 转义后，公式内的 ``<`` 也必须一起转义，否则 Anki `#html:true`
+    会把公式里的 ``<`` 当 HTML 起始标签吞掉后续内容。"""
+    text = wiki_gate.anki_inline_html("当 $p_1<p_2$ 时，A<B")
+    assert text == "当 \\(p_1&lt;p_2\\) 时，A&lt;B"
+
+
+def test_anki_inline_html_flattens_math_newlines():
+    """R4：跨行块级公式先扁平化再还原，调用方后续的 ``\\n``→``<br>`` 不会切开 ``\\[…\\]``。"""
+    text = wiki_gate.anki_inline_html("$$a\nb$$")
+    assert text == "\\[a b\\]"
+
+
+def test_anki_inline_html_wikilink_anchor():
+    """R6：带 ``#`` 锚点的 wikilink 不能原样残留——别名取别名，裸链取去掉锚点后的页名。"""
+    text = wiki_gate.anki_inline_html(
+        "见 [[domains/x/concepts/a.md#小节|甲]] 与 [[domains/x/concepts/b.md#要点]]。")
+    assert "甲" in text
+    assert "b" in text
+    assert "[[" not in text
+    assert "#小节" not in text
+    assert "#要点" not in text
+
+
+def test_anki_inline_html_digit_leading_math_is_converted():
+    # 回归：数字开头的行内公式也必须转换。早期的货币启发式要求 ``$`` 后紧跟非数字，
+    # 误伤了 ``$10^6$`` / ``$2^n$`` 等合法公式；现已撤销该启发式。
+    for src, expected in (
+        ("$10^6$", "\\(10^6\\)"),
+        ("$2/3$", "\\(2/3\\)"),
+        ("$2n-1$", "\\(2n-1\\)"),
+        ("$2^n$", "\\(2^n\\)"),
+    ):
+        assert wiki_gate.anki_inline_html(src) == expected
+    assert wiki_gate.anki_inline_html("成本 $c_i$") == "成本 \\(c_i\\)"
+
+
+def _write_jsonl(path, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+                    encoding="utf-8")
+
+
+def _init_source_state(workspace, source, *, reopened=False):
+    db = workspace / "pipeline-workspace" / "state" / "study-kb.sqlite"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    state_store.init_db(db)
+    state_store.record_work_order(
+        db, source, path=f"pipeline-workspace/workorders/{source}.yaml",
+        registry_hash="hash", write_scope_json='["domains/**"]')
+    if reopened:
+        con = state_store.connect(db)
+        con.execute(
+            "INSERT INTO source_stage_runs(source_id,stage,status,started_at,finished_at,input_hash)"
+            " VALUES (?,?,?,?,?,?)",
+            (source, "reopened", "done", "t", "t", "from:lint/published"))
+        con.commit()
+        con.close()
+    return db
+
+
+def _finish_window(db, source, window_id, write_set):
+    state_store.start_window(db, source, window_id, input_hash="h")
+    state_store.finish_window(db, source, window_id,
+                              write_set_json=json.dumps(write_set))
+
+
+def _source_images_fixture(tmp_path, source="book", *, reopened=False,
+                           no_round_anchor=False, write_set=None):
+    workspace = tmp_path
+    vault = workspace / "wiki"
+    assets = vault / "assets" / source
+    assets.mkdir(parents=True)
+    (assets / "p0001.png").write_bytes(b"png1")
+    (assets / "p0002.png").write_bytes(b"png2")
+    _page(vault, "domains/d/concepts/a.md",
+          {"type": "concept", "status": "published", "managed_by": "pipeline",
+           "canonical_id": "concept.d.a", "canonical_name": "甲",
+           "domain": "d", "source_refs": [{"source": source}]},
+          "概念正文。\n")
+    _page(vault, "sources/book.md",
+          {"type": "source", "status": "published", "managed_by": "pipeline",
+           "source_id": source, "title": "书", "domain": "d", "format": "pdf"},
+          "来源台账页正文。\n")
+    _write_jsonl(workspace / "pipeline-workspace" / "staging" / source / "windows.jsonl", [
+        {"window_id": "w1", "assets": ["assets/p0001.png", "assets/p0002.png"],
+         "page_start": 1, "page_end": 2},
+    ])
+    if no_round_anchor:
+        db = workspace / "pipeline-workspace" / "state" / "study-kb.sqlite"
+        db.parent.mkdir(parents=True, exist_ok=True)
+        state_store.init_db(db)
+    else:
+        db = _init_source_state(workspace, source, reopened=reopened)
+        _finish_window(db, source, "w1",
+                       write_set if write_set is not None else ["domains/d/concepts/a.md"])
+    return workspace, vault
+
+
+def test_build_source_images_page_level_links_are_real_files(tmp_path):
+    workspace, vault = _source_images_fixture(tmp_path)
+    text = wiki_gate.build_source_images(vault, workspace)
+    assert "**page 级**" in text
+    assert "**source 级**" not in text
+    assert "[[domains/d/concepts/a.md|甲]]" in text
+    assert "[p.1](assets/book/p0001.png)" in text
+    assert "[p.2](assets/book/p0002.png)" in text
+    for target in re.findall(r"\]\(([^)]+)\)", text):
+        assert (vault / target).exists(), target
+
+
+def test_build_source_images_reopened_with_current_round_uses_page_level(tmp_path):
+    workspace, vault = _source_images_fixture(tmp_path, reopened=True)
+    text = wiki_gate.build_source_images(vault, workspace)
+    assert "**page 级**" in text
+    assert "**source 级**" not in text
+    assert "[p.1](assets/book/p0001.png)" in text
+    assert "[p.2](assets/book/p0002.png)" in text
+
+
+def test_build_source_images_no_round_anchor_degrades_to_source(tmp_path):
+    workspace, vault = _source_images_fixture(tmp_path, no_round_anchor=True)
+    text = wiki_gate.build_source_images(vault, workspace)
+    assert "**source 级**" in text
+    assert "**page 级**" not in text
+    assert "无轮次 token" in text
+
+
+def test_build_source_images_missing_write_target_falls_back_to_source(tmp_path):
+    # 写集指向的页已不在磁盘上时，该窗原图无法证明页归属，必须落 source 级而不是消失。
+    workspace, vault = _source_images_fixture(
+        tmp_path, write_set=["domains/d/concepts/missing.md"])
+    text = wiki_gate.build_source_images(vault, workspace)
+    assert "**source 级**" in text
+    assert "**page 级**" not in text
+    assert "写集不含现存知识页" in text
+    assert "[p.1](assets/book/p0001.png)" in text
+    assert "[p.2](assets/book/p0002.png)" in text
+
+
+def test_build_source_images_skips_source_without_png(tmp_path):
+    vault = tmp_path / "wiki"
+    (vault / "assets" / "book").mkdir(parents=True)
+    (vault / "assets" / "book" / "readme.txt").write_text("x", encoding="utf-8")
+    text = wiki_gate.build_source_images(vault, tmp_path)
+    assert "## book" not in text
+    assert "难页原图索引" in text
+
+
+def test_build_source_images_pptx_labels_jpg_readably(tmp_path):
+    # PPTX 的 MinerU 资产用内容哈希命名且不含页码，png 与 jpg 都应显示为稳定编号
+    # （图1/图2），64 位哈希只留在 href 里，避免 Obsidian 阅读侧出现十六进制墙。
+    workspace = tmp_path
+    vault = workspace / "wiki"
+    assets = vault / "assets" / "nndl-ppt-test"
+    assets.mkdir(parents=True)
+    (assets / "abc.png").write_bytes(b"png")
+    (assets / "def.jpg").write_bytes(b"jpg")
+    _write_jsonl(workspace / "pipeline-workspace" / "staging" / "nndl-ppt-test" / "windows.jsonl", [
+        {"window_id": "w1", "assets": ["abc.png", "def.jpg"]},
+    ])
+
+    text = wiki_gate.build_source_images(vault, workspace)
+    assert "[图1](assets/nndl-ppt-test/abc.png)" in text
+    assert "[图2](assets/nndl-ppt-test/def.jpg)" in text
+    assert "[abc.png](assets/nndl-ppt-test/abc.png)" not in text
+    assert "[def.jpg](assets/nndl-ppt-test/def.jpg)" not in text
+
+
+def test_build_source_images_non_page_asset_label_is_readable(tmp_path):
+    # 可读序号的判定依据是“资产文件名能否推出页码”，不是来源格式：PDF 扫描件
+    # 也可能有内容哈希命名的 jpg。哈希名显示为图N，pNNN 仍显示 p.N，哈希只留 href。
+    workspace = tmp_path
+    vault = workspace / "wiki"
+    assets = vault / "assets" / "math-econ"
+    assets.mkdir(parents=True)
+    (assets / "p0909.png").write_bytes(b"page")
+    (assets / "e3ecbc2bfe7959fdc05124ba81a653044f26c6aa31b8c026ff346e841abda4fa.jpg").write_bytes(b"hash")
+    text = wiki_gate.build_source_images(vault, workspace)
+    assert "[p.909](assets/math-econ/p0909.png)" in text
+    assert "[图1](assets/math-econ/e3ecbc2bfe7959fdc05124ba81a653044f26c6aa31b8c026ff346e841abda4fa.jpg)" in text
+    assert "[e3ecbc2bfe7959fdc05124ba81a653044f26c6aa31b8c026ff346e841abda4fa.jpg]" not in text
+
+
+def test_build_source_images_is_byte_deterministic(tmp_path):
+    workspace, vault = _source_images_fixture(tmp_path)
+    assert wiki_gate.build_source_images(vault, workspace) == \
+        wiki_gate.build_source_images(vault, workspace)
+    wiki_gate.write_source_images(vault, workspace)
+    assert (vault / "source-images.generated.md").read_text(encoding="utf-8") == \
+        wiki_gate.build_source_images(vault, workspace)
+
+
+def test_build_anki_tsv_published_questions_with_source(tmp_path):
+    q_body = ("概念正文。\n\n> [!question] 自测\n> 为什么价格压到边际成本？\n"
+              "> > [!success]- 参考答案\n> > 因为无差异商品的伯特兰竞争。\n")
+    _page(tmp_path, "domains/game-theory/concepts/伯特兰模型.md",
+          {"type": "concept", "status": "published", "managed_by": "pipeline",
+           "canonical_id": "concept.game-theory.bertrand", "canonical_name": "伯特兰模型",
+           "domain": "game-theory",
+           "source_refs": [{"source": "game-book"}]},
+          q_body)
+    text = wiki_gate.build_anki_tsv(tmp_path)
+    assert text.startswith("#separator:tab\n#html:true\n#notetype:Basic\n#deck:study-kb\n")
+    assert "为什么价格压到边际成本？\t" in text
+    assert "因为无差异商品的伯特兰竞争" in text
+    expected_uri = ("obsidian://open?vault=" + wiki_gate._url_quote(Path(tmp_path).name, safe="")
+                    + "&amp;file=domains%2Fgame-theory%2Fconcepts%2F"
+                      "%E4%BC%AF%E7%89%B9%E5%85%B0%E6%A8%A1%E5%9E%8B.md")
+    assert expected_uri in text
+    assert "domain::game-theory" in text
+    assert "source::game-book" in text
+    wiki_gate.write_anki_tsv(tmp_path)
+    assert (tmp_path / "anki-export.generated.tsv").read_text(encoding="utf-8") == text
+
+
+def test_anki_export_unique_stem_guard_shape(tmp_path):
+    # 题干作为 Anki 首字段去重键，导出器必须逐条输出；唯一题干不触发守卫。
+    body = ("> [!question] 自测\n> 唯一题干？\n> > [!success]- 参考答案\n> > 唯一答案。\n")
+    _page(tmp_path, "domains/d/concepts/a.md",
+          {"type": "concept", "status": "published", "managed_by": "pipeline",
+           "canonical_id": "concept.d.a", "canonical_name": "A", "domain": "d"}, body)
+    cards = wiki_gate.collect_quiz_cards(tmp_path)
+    assert len(cards) == 1 and cards[0]["stem"] == "唯一题干？"
+    tsv = wiki_gate.build_anki_tsv(tmp_path)
+    assert tsv.count("唯一题干？") == 1
+    assert "唯一答案。" in tsv
+
+
+def test_anki_export_duplicate_stem_disambiguates(tmp_path):
+    # Anki Basic 按首字段去重：重复题干若 fail-closed 会让一个含重复题干的既有 vault 永远
+    # 过不了 adopt/reuse/reseal 的字节 no-op 路径（约束⑦同型），故改为确定性消歧 + 软警告。
+    body = ("> [!question] 自测\n> 重复题干？\n> > [!success]- 参考答案\n> > 答案甲。\n")
+    for name, cid in (("a", "concept.d.a"), ("b", "concept.d.b")):
+        _page(tmp_path, f"domains/d/concepts/{name}.md",
+              {"type": "concept", "status": "published", "managed_by": "pipeline",
+               "canonical_id": cid, "canonical_name": name.upper(), "domain": "d"}, body)
+    cards = wiki_gate.collect_quiz_cards(tmp_path)
+    assert wiki_gate.duplicate_question_stems(cards) == ["重复题干？"]
+    tsv = wiki_gate.build_anki_tsv(tmp_path)
+    assert "重复题干？\t" in tsv
+    assert "重复题干？（B）\t" in tsv
+    assert tsv.count("重复题干？") == 2
+
+
+def test_anki_export_roundtrip_preserves_leading_quote(tmp_path):
+    # Anki 的 TSV 导入走 CSV 规则：字段以 U+0022 开头会被当引用字段并剥掉两端引号。
+    # 导出必须按 RFC 4180 转义，否则导入后内容被静默改写。
+    body = ("> [!question] 自测\n> \"提示校准\"解决的是…\n"
+            "> > [!success]- 参考答案\n> > \"提示校准\"指…\n")
+    _page(tmp_path, "domains/d/concepts/a.md",
+          {"type": "concept", "status": "published", "managed_by": "pipeline",
+           "canonical_id": "concept.d.a", "canonical_name": "A", "domain": "d"}, body)
+    tsv = wiki_gate.build_anki_tsv(tmp_path)
+    rows = [r for r in csv.reader(tsv.splitlines(), delimiter="\t")
+            if r and not r[0].startswith("#")]
+    assert len(rows) == 1
+    assert rows[0][0].startswith('"提示校准"')
+    assert rows[0][1].startswith('"提示校准"')
 
 
 def test_build_propositions_index_published_only(tmp_path):

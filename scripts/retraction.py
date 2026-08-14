@@ -26,7 +26,7 @@ import mdpage
 _EXCLUDE_TOP = {"Review-Queue", "_meta", "assets", ".obsidian"}
 _DERIVED = {"index.generated.md", "aliases.md", "quiz-index.generated.md",
             "propositions.generated.md", "graph-data.generated.json",
-            "knowledge-graph.generated.html"}
+            "knowledge-graph.generated.html", "source-images.generated.md"}
 
 
 def _ref_sources(meta: dict) -> set[str]:
