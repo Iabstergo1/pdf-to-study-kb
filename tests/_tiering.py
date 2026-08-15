@@ -79,6 +79,8 @@ FILE_TIERS = {
     "test_source_convert.py": ("fast",),
     "test_state_store.py": ("fast",),
     "test_site_exporter.py": ("fast",),
+    "test_site_data.py": ("fast",),
+    "test_site_layout.py": ("fast",),
     "test_templates.py": ("fast",),
     "test_thresholds.py": ("fast",),
     "test_tiering_guard.py": ("fast",),

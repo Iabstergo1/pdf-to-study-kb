@@ -16,6 +16,7 @@ def _load(name):
 
 site = _load("site_exporter")
 mdpage = _load("mdpage")
+wiki_gate = _load("wiki_gate")
 
 
 def _page(vault, rel, meta, body):
@@ -40,6 +41,7 @@ def test_collect_pages_published_only_and_sorted(tmp_path):
     assert [p["rel"] for p in pages] == [
         "domains/d/concepts/a.md", "domains/d/concepts/b.md"]
     assert all(p["type"] == "concept" for p in pages)
+    assert pages[0]["obsidian_uri"] == wiki_gate.obsidian_uri(vault, pages[0]["rel"])
 
 
 def test_render_table_and_inline_math_preserved(tmp_path):
@@ -112,6 +114,52 @@ def test_math_angle_and_entity_escape_roundtrip(tmp_path):
         escaped = html_mod.escape(source, quote=False)
         assert escaped in html, (source, html)
         assert html_mod.unescape(escaped) == source
+
+
+def test_with_images_keeps_p3_inline_base64_contract(tmp_path):
+    vault = tmp_path / "wiki"
+    vault.mkdir()
+    (vault / "x.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    body = "![插图](x.png)"
+
+    inline = site.render_page_body(body, set(), vault, True)
+    text_only = site.render_page_body(body, set(), vault, False)
+
+    assert inline.startswith('<img alt="插图" src="data:image/png;base64,')
+    assert text_only == "<p>插图</p>\n"
+
+
+def test_site_graph_view_keeps_graph_html_degraded_thresholds(tmp_path):
+    payload = {
+        "nodes": [
+            {"id": f"n{i}", "label": f"N{i}", "type": "concept", "path": f"{i}.md",
+             "summary": "", "community_id": "c", "weight": 1, "aliases": []}
+            for i in range(501)
+        ],
+        "edges": [],
+        "communities": [{"id": "c", "label": "C", "node_ids": ["n0"], "weight": 1}],
+    }
+
+    html = site._graph_view_html(tmp_path / "wiki", payload)
+
+    assert "__GRAPH_DEGRADED__ = true" in html
+    assert 'id="degraded-banner"' in html
+
+
+def test_site_graph_view_routes_to_site_and_uses_wiki_obsidian_uri(tmp_path):
+    vault = tmp_path / "wiki"
+    payload = {
+        "nodes": [{"id": "n", "label": "中文节点", "type": "concept", "path": "a.md",
+                   "summary": "", "community_id": "c", "weight": 1, "aliases": []}],
+        "edges": [],
+        "communities": [{"id": "c", "label": "社区", "node_ids": ["n"], "weight": 1}],
+    }
+
+    html = site._graph_view_html(vault, payload)
+
+    assert "obsidian://open?path=" not in html
+    assert "window.parent.location.hash" in html
+    assert wiki_gate.obsidian_uri(vault, "a.md") in html
 
 
 def test_build_site_deterministic_and_writes_self_contained(tmp_path):

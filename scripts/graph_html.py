@@ -82,6 +82,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 "use strict";
 window.__GRAPH_DEGRADED__ = __DEGRADED_FLAG__;
 window.__VAULT_ROOT__ = __VAULT_ROOT_JSON__;
+window.__SITE_EMBED__ = __SITE_EMBED_FLAG__;
 (function(){
  var SVGNS="http://www.w3.org/2000/svg";
  var raw = JSON.parse(document.getElementById("graph-data").textContent);
@@ -130,6 +131,7 @@ window.__VAULT_ROOT__ = __VAULT_ROOT_JSON__;
  function el(t,a){ var e=document.createElementNS(SVGNS,t); for(var k in a){ e.setAttribute(k,a[k]); } return e; }
  var lineEls=links.map(function(l){ var ln=el("line",{}); ln.setAttribute("class","edge "+(l.e.relation||"related")); l.el=ln; gE.appendChild(ln); return ln; });
  var nodeEls=nodes.map(function(o){ var g=el("g",{}); g.setAttribute("class","node"); g.setAttribute("data-id",o.d.id);
+   g.setAttribute("data-path",o.d.path||"");
    var c=el("circle",{r:radius(o),fill:color(o.d)}); g.appendChild(c);
    var tx=el("text",{x:radius(o)+3,y:4}); tx.textContent=o.d.label||o.d.id; g.appendChild(tx);
    o.el=g; o.circle=c; gN.appendChild(g); return g; });
@@ -151,7 +153,7 @@ window.__VAULT_ROOT__ = __VAULT_ROOT_JSON__;
  function reheat(){ alpha=Math.max(alpha,0.6); }
 
  function esc(x){ return String(x==null?"":x).split("&").join("&amp;").split("<").join("&lt;").split(">").join("&gt;"); }
- function obsURI(d){ var p=(d.path||""); return "obsidian://open?path="+encodeURIComponent((VAULT?VAULT+"/":"")+p); }
+ __OBS_URI_HELPER__
  function setLit(id){ nodes.forEach(function(o){ var on=!id||o.d.id===id||(nb[id]&&nb[id][o.d.id]);
     o.el.setAttribute("class","node"+(id&&!on?" faded":(id&&o.d.id===id?" lit":""))); });
    links.forEach(function(l){ var on=!id||l.s.d.id===id||l.t.d.id===id;
@@ -175,10 +177,15 @@ window.__VAULT_ROOT__ = __VAULT_ROOT_JSON__;
  nodeEls.forEach(function(g,i){ var o=nodes[i];
    g.addEventListener("mouseenter",function(){ if(!selected)setLit(o.d.id); });
    g.addEventListener("mouseleave",function(){ if(!selected)clearLit(); });
-   g.addEventListener("dblclick",function(ev){ ev.stopPropagation(); window.location.href=obsURI(o.d); });
+   g.addEventListener("dblclick",function(ev){ ev.stopPropagation(); if(!window.__SITE_EMBED__){ window.location.href=obsURI(o.d); } });
    g.addEventListener("mousedown",function(ev){ ev.stopPropagation(); drag={o:o}; o.fixed=true; reheat();
      ev.preventDefault(); });
-   g.addEventListener("click",function(ev){ ev.stopPropagation(); if(!moved) select(o); });
+   g.addEventListener("click",function(ev){ ev.stopPropagation(); if(!moved){
+     if(window.__SITE_EMBED__ && window.parent && window.parent.location){
+       window.parent.location.hash = "#/"+encodeURI(o.d.path||"");
+     }
+     select(o);
+   } });
  });
 
  // 拖拽节点 / 平移 / 缩放
@@ -221,18 +228,29 @@ window.__VAULT_ROOT__ = __VAULT_ROOT_JSON__;
 """
 
 
-def to_html(data: dict, vault_root: str = "") -> str:
+def to_html(data: dict, vault_root: str = "", *,
+            max_nodes: int = MAX_HTML_NODES,
+            max_edges: int = MAX_HTML_EDGES,
+            site_embed: bool = False) -> str:
     nodes = data.get("nodes", [])
     edges = data.get("edges", [])
-    degraded = len(nodes) > MAX_HTML_NODES or len(edges) > MAX_HTML_EDGES
+    degraded = len(nodes) > max_nodes or len(edges) > max_edges
     payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     vault_js = json.dumps(vault_root or "").replace("</", "<\\/")
     banner = ('<div class="banner" id="degraded-banner">图规模较大，已进入降级模式：'
               '默认只显示社区代表节点与学习路径。</div>') if degraded else ""
+    obs_helper = (
+        'function obsURI(d){ return d.obsidian_uri || ""; }'
+        if site_embed else
+        'function obsURI(d){ var p=(d.path||""); '
+        'return "obsidian://open?path="+encodeURIComponent((VAULT?VAULT+"/":"")+p); }'
+    )
     html = _TEMPLATE
     html = html.replace("__DEGRADED_BANNER__", banner)
     html = html.replace("__DEGRADED_FLAG__", "true" if degraded else "false")
     html = html.replace("__VAULT_ROOT_JSON__", vault_js)
+    html = html.replace("__SITE_EMBED_FLAG__", "true" if site_embed else "false")
+    html = html.replace("__OBS_URI_HELPER__", obs_helper)
     html = html.replace("__PAYLOAD__", payload)
     return html
 
