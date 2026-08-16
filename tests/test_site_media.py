@@ -59,19 +59,23 @@ def test_stage_image_files_copies_originals_and_creates_deterministic_thumbs(tmp
     source = vault / "assets" / "d" / "p0001.png"
     source.parent.mkdir(parents=True)
     _png(source)
-    output = tmp_path / "site"
+    first_output = tmp_path / "site-first"
+    second_output = tmp_path / "site-second"
     page_assets = {"domains/d/concepts/a.md": [source.relative_to(vault).as_posix()]}
 
-    first = site_media.stage_image_files(vault, output, page_assets)
-    second = site_media.stage_image_files(vault, output, page_assets)
+    first = site_media.stage_image_files(vault, first_output, page_assets)
+    second = site_media.stage_image_files(vault, second_output, page_assets)
 
     assert first["domains/d/concepts/a.md"][0]["original"] == "assets/d/p0001.png"
     assert first["domains/d/concepts/a.md"][0]["thumbnail"] == "assets/thumbs/d/p0001.png"
-    assert (output / "assets" / "d" / "p0001.png").read_bytes() == source.read_bytes()
-    assert (output / "assets" / "thumbs" / "d" / "p0001.png").read_bytes() == (
-        output / "assets" / "thumbs" / "d" / "p0001.png"
-    ).read_bytes()
     assert first == second
+    assert (first_output / "assets" / "d" / "p0001.png").read_bytes() == source.read_bytes()
+    assert (first_output / "assets" / "d" / "p0001.png").read_bytes() == (
+        second_output / "assets" / "d" / "p0001.png"
+    ).read_bytes()
+    assert (first_output / "assets" / "thumbs" / "d" / "p0001.png").read_bytes() == (
+        second_output / "assets" / "thumbs" / "d" / "p0001.png"
+    ).read_bytes()
 
 
 def test_source_panel_html_has_p2_semantics_and_relative_image_links():

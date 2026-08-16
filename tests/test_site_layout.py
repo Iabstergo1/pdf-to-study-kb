@@ -18,6 +18,7 @@ def _load(name):
 
 
 site_layout = _load("site_layout")
+site_data = _load("site_data")
 
 
 def _pages():
@@ -43,7 +44,7 @@ def _fake_katex():
 
 
 def test_explorer_tree_groups_domain_type_and_page_order():
-    tree = site_layout.build_explorer_tree(_pages())
+    tree = site_data.build_explorer_tree(_pages())
 
     assert tree[0]["domain"] == "总览"
     assert tree[0]["types"] == [{
@@ -60,7 +61,7 @@ def test_explorer_tree_groups_domain_type_and_page_order():
 
 
 def test_ordered_paths_and_adjacent_paths_follow_explorer_order():
-    ordered = site_layout.ordered_paths(_pages())
+    ordered = site_data.ordered_paths(_pages())
 
     assert ordered == [
         "overview.md",
@@ -68,18 +69,18 @@ def test_ordered_paths_and_adjacent_paths_follow_explorer_order():
         "domains/d/concepts/a.md",
         "domains/d/concepts/b.md",
     ]
-    assert site_layout.adjacent_paths("overview.md", ordered) == (
+    assert site_data.adjacent_paths("overview.md", ordered) == (
         None, "topics/Topic.md")
-    assert site_layout.adjacent_paths("domains/d/concepts/a.md", ordered) == (
+    assert site_data.adjacent_paths("domains/d/concepts/a.md", ordered) == (
         "topics/Topic.md", "domains/d/concepts/b.md")
-    assert site_layout.adjacent_paths("topics/Topic.md", ordered) == (
+    assert site_data.adjacent_paths("topics/Topic.md", ordered) == (
         "overview.md", "domains/d/concepts/a.md")
 
 
 def test_breadcrumb_contains_domain_type_and_page():
     page = _pages()[1]
 
-    breadcrumb = site_layout.breadcrumb(page)
+    breadcrumb = site_data.breadcrumb(page)
 
     assert [item["label"] for item in breadcrumb] == ["d", "concept", "B"]
     assert [item["kind"] for item in breadcrumb] == ["domain", "type", "page"]

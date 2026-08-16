@@ -144,9 +144,9 @@ python scripts/pipeline.py adopt-vault --source <src> --title "<title>" --domain
 
 ```powershell
 $env:PYTHONDONTWRITEBYTECODE=1
-python -B scripts/pipeline.py reuse-source --source mysql --title "MySQL是怎样运行的" --domain sql `
-  --path "C:\books\mysql.pdf" --sha256 <64位SHA256> `
-  --origin-root "<origin-vault-root>" --origin-source mysql --mapping "C:\tmp\mysql-mapping.json"
+python -B scripts/pipeline.py reuse-source --source my-source --title "示例数据库教材" --domain database-systems `
+  --path "C:\books\my-source.pdf" --sha256 <64位SHA256> `
+  --origin-root "<origin-vault-root>" --origin-source my-source --mapping "C:\tmp\my-source-mapping.json"
 # 核对打印出的 concepts / topics / mapped-targets / zero-mapping-targets 后，加 --apply
 ```
 
@@ -155,8 +155,8 @@ python -B scripts/pipeline.py reuse-source --source mysql --title "MySQL是怎�
 既有 v1 一般无需迁移；**只有后来出现了 v1 无法声明的合法 topic 归因**时，才使用独立的 `reseal-source`，普通 `reuse-source` 永远不会自动进入替换分支。命令只接受 source、新 v2 mapping 与旧 manifest SHA；domain/title/PDF/origin 全由完整的旧证据导出，concept mapping、计数及 `target_pages` 必须逐字段不变。先 dry-run，确认后加 `--apply`：
 
 ```powershell
-python -B scripts/pipeline.py reseal-source --source mysql `
-  --mapping "C:\tmp\mysql-mapping-v2.json" --from-manifest-sha256 <旧manifest的64位SHA256>
+python -B scripts/pipeline.py reseal-source --source my-source `
+  --mapping "C:\tmp\my-source-mapping-v2.json" --from-manifest-sha256 <旧manifest的64位SHA256>
 ```
 
 apply 在 vault 锁内先把确定性 transition 与新证据完整暂存，再把 state 降为 `reused/running`，随后归档整棵 v1 evidence、激活 v2 evidence、仅在 source 页仍等于旧 canonical 字节时替换、重建派生层，最后一次 SQLite 事务更新 `reused` stage / `reuse_evidence` artifact 的 SHA 并恢复 published。任一步崩溃都不会留下“published 指向另一代文件”；用同一命令重跑会沿唯一 operation id 前滚收敛（若 OS 级硬退出留下 stale vault lock，先按既有 `unlock` 协议回收）。旧证据保存在 `pipeline-workspace/reuse-reseals/<src>/<operation-id>/old-evidence/`，transition 记录新旧 SHA，精确重跑是全树 byte/mtime no-op。旧 evidence、origin/PDF、source 页或状态已有损坏时，reseal 拒绝，不能拿它覆盖事故现场。
@@ -327,7 +327,7 @@ pdf-to-study-kb/
 | `rebuild-propositions` | 从 published 页的具名命题重建 `propositions.generated.md` 命题总表（结论句+回链，名字即锚点不编号；收尾 lint 自动重建，域内重名软警告） | — |
 | `rebuild-source-images` | 从窗口难页图 ⋈ 当前轮窗口写集重建 `source-images.generated.md` 难页原图索引（page 级=写该页时所读窗口的难页原图，可能含同窗邻近上下文；source 级=无法证明具体页归属、整源显式标注；普通 markdown 链接、不嵌图；收尾 lint 自动重建） | — |
 | `export-anki` | 把全库自测题（题干+success 后代答案+回链）导成 `anki-export.generated.tsv`，Anki 原生导入即可排程；首字段题干作去重键，跨页重复题干确定性消歧并软警告 | — |
-| `export-site` | 把 published 正文导成 `pipeline-workspace/exports/site/study-kb.html` 单文件离线站点（域/类型 Explorer、本页 TOC、面包屑、上一页/下一页、反链/悬停预览/全库与局部图谱/自测题/命题/深浅色、标题+正文搜索/结果片段/快捷键/上下键跳转、域/类型/来源筛选、别名检索、阅读进度记忆、callout/表格/公式/代码/响应式；默认不打包图片，`--with-images` 改为输出 `site/` 目录并相对路径引用原图/缩略图，不再 base64 内联；手动分发动作，**不接发布钩子**） | `--with-images` |
+| `export-site` | 把 published 正文导成 `pipeline-workspace/exports/site/study-kb.html` 单文件离线站点（导航域 Explorer（总览/跨域综合/真实域）、本页 TOC、面包屑、上一页/下一页、反链/悬停预览/全库与局部图谱（500 节点/1200 边降级阈值）/自测题/命题/深浅色、标题+正文搜索/结果片段/快捷键/上下键跳转、域/类型/来源筛选、别名检索、阅读进度记忆、callout/表格/公式/代码/响应式；默认不打包图片，`--with-images` 改为输出 `site/` 目录并相对路径引用原图/缩略图，不再 base64 内联；手动分发动作，**不接发布钩子**） | `--with-images` |
 | `apply-obsidian-style` | 落地学习库观感 CSS snippet + merge `appearance.json`（幂等，纯配置层零内容改动） | — |
 
 ### 预处理（零 LLM，顺序固定，幂等跳过）
@@ -615,15 +615,17 @@ OS 级调度提供的是收敛式重试，而非“一次完成”的保证：�
 
 ## 🧭 网页阅读模式
 
-`export-site` 是第二个一等阅读入口，输出单个自包含 HTML：
+`export-site` 是第二个一等阅读入口，默认输出单个自包含 HTML；`--with-images`
+改为输出可整体复制的目录：
 
 ```powershell
 python scripts/pipeline.py export-site              # 默认：单文件，不带图片
 python scripts/pipeline.py export-site --with-images # site/ 目录 + 原图/缩略图
 ```
 
-站点内提供域/类型 Explorer、本页 TOC、面包屑、上一页/下一页、反向链接、悬停预览、
-完整图谱与局部图谱、自测题/命题视图、标题+正文分权重搜索、域/类型/来源筛选、
+站点内提供导航域 Explorer（总览 / 跨域综合 / 真实域）、本页 TOC、面包屑、上一页/下一页、
+反向链接、悬停预览、全库图谱与局部图谱（大图沿用 500 节点 / 1200 边降级阈值）、
+自测题/命题视图、标题+正文分权重搜索、域/类型/来源筛选、
 别名检索、阅读进度记忆和深浅色模式。无需托管或 GitHub Pages，直接复制 HTML 或整个
 `site/` 目录分发。演示截图/录屏占位留待后续补充。
 

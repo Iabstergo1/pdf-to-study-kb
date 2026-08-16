@@ -15,6 +15,7 @@ def _load(name):
 
 
 site = _load("site_exporter")
+site_render = _load("site_render")
 mdpage = _load("mdpage")
 wiki_gate = _load("wiki_gate")
 
@@ -49,7 +50,8 @@ def test_collect_pages_published_only_and_sorted(tmp_path):
 
 def test_render_table_and_inline_math_preserved(tmp_path):
     vault = tmp_path / "wiki"
-    html = site.render_page_body("|a|b|\n|-|-|\n|1|2|\n\n成本 $c_i$", set(), vault, False)
+    html = site_render.render_page_body(
+        "|a|b|\n|-|-|\n|1|2|\n\n成本 $c_i$", set(), vault, False)
     assert "<table>" in html
     assert "<td>1</td>" in html
     assert "$c_i$" in html
@@ -58,7 +60,7 @@ def test_render_table_and_inline_math_preserved(tmp_path):
 def test_render_callout_folded_uses_details(tmp_path):
     vault = tmp_path / "wiki"
     body = "> [!question] 自测\n> 题干？\n> > [!success]- 答案\n> > 答。\n"
-    html = site.render_page_body(body, set(), vault, False)
+    html = site_render.render_page_body(body, set(), vault, False)
     assert 'class="callout callout-question"' in html
     assert "<details" in html
     assert "答案" in html
@@ -68,8 +70,9 @@ def test_render_callout_folded_uses_details(tmp_path):
 def test_wikilink_existing_and_missing(tmp_path):
     vault = tmp_path / "wiki"
     page_set = {"domains/d/concepts/a.md"}
-    html = site.render_page_body("见 [[domains/d/concepts/a.md|甲]] 与 [[missing.md|乙]]",
-                                 page_set, vault, False)
+    html = site_render.render_page_body(
+        "见 [[domains/d/concepts/a.md|甲]] 与 [[missing.md|乙]]",
+        page_set, vault, False)
     assert '<a href="#/domains/d/concepts/a.md">甲</a>' in html
     assert "乙" in html
 
@@ -80,7 +83,7 @@ def test_table_wikilink_escaped_pipe_renders_table(tmp_path):
     body = ("| 维度 | 甲 |\n"
             "|---|---|\n"
             "| 查找 | [[domains/d/concepts/a.md\\|甲]] |\n")
-    html = site.render_page_body(body, page_set, vault, False)
+    html = site_render.render_page_body(body, page_set, vault, False)
     assert "<table>" in html
     assert '<a href="#/domains/d/concepts/a.md">甲</a>' in html
     assert "<td>甲</td>" not in html
@@ -95,7 +98,7 @@ def test_math_asterisk_backslash_and_brace_survive_markdown(tmp_path):
         "$\\left\\{x\\right\\}$",
     ]
     for source in cases:
-        html = site.render_page_body(source, page_set, vault, False)
+        html = site_render.render_page_body(source, page_set, vault, False)
         # 还原到 HTML 时会转义 `&`/`<`/`>`；实体解码后必须逐字符回到源公式。
         assert source in html_mod.unescape(html), (source, html)
         assert "*<em>" not in html
@@ -110,7 +113,7 @@ def test_math_angle_and_entity_escape_roundtrip(tmp_path):
         "$$q_i(p_i,p_j)=\\begin{cases}D(p_i) & p_i<p_j\\\\ \\tfrac12 D(p_i) & p_i=p_j\\\\ 0 & p_i>p_j\\end{cases}$$",
     ]
     body = "\n\n".join(formulas)
-    html = site.render_page_body(body, set(), vault, False)
+    html = site_render.render_page_body(body, set(), vault, False)
     assert "<em>" not in html
     for source in formulas:
         # 经 HTML 实体解码后必须逐字符还原源公式；不能有 < > & 被 HTML 解析器吞掉。
@@ -125,8 +128,8 @@ def test_with_images_no_longer_inlines_body_images(tmp_path):
     (vault / "x.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
     body = "![插图](x.png)"
 
-    inline = site.render_page_body(body, set(), vault, True)
-    text_only = site.render_page_body(body, set(), vault, False)
+    inline = site_render.render_page_body(body, set(), vault, True)
+    text_only = site_render.render_page_body(body, set(), vault, False)
 
     assert inline == "<p>插图</p>\n"
     assert text_only == "<p>插图</p>\n"
@@ -189,8 +192,8 @@ def test_build_site_deterministic_and_writes_self_contained(tmp_path):
           {"type": "concept", "status": "published", "domain": "d", "title": "甲"},
           "正文 $c_i$。\n")
     assets = _fake_katex()
-    one = site.build_site(vault, workspace=tmp_path, katex_assets=assets)
-    two = site.build_site(vault, workspace=tmp_path, katex_assets=assets)
+    one = site.build_site(vault, katex_assets=assets)
+    two = site.build_site(vault, katex_assets=assets)
     assert one == two
     assert "data:font/woff2;base64,AA==" in one
     result = site.write_site(vault, workspace=tmp_path, katex_assets=assets)

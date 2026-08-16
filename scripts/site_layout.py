@@ -1,8 +1,10 @@
 """Offline-site layout and interaction layer for the P4 reading UI.
 
-This module owns the page shell, Explorer model, breadcrumbs, in-page TOC,
-previous/next ordering, theme state, and responsive drawer behaviour. It does
-not parse Markdown or callouts: content rendering is injected as
+This module owns the page shell, in-page TOC, theme state, graph embedding, and
+responsive drawer behaviour. Explorer classification, ordering, breadcrumbs,
+backlinks, and filter options are delegated to :mod:`site_data`; this module
+only renders that shared navigation model. It does not parse Markdown or
+callouts: content rendering is injected as
 ``render_page_body``, so ``page_rules.parse_callouts`` and the exporter's
 protect -> process -> restore math pipeline remain the only content parsers.
 
@@ -13,7 +15,9 @@ That annotation pass is deliberately layout-only; it never re-parses Markdown.
 Graph-view HTML is UTF-8 encoded in Python before base64. Browser-side restore
 must therefore decode ``atob``'s latin-1 binary string back to UTF-8 bytes with
 ``TextDecoder``; assigning the binary string directly corrupts every non-ASCII
-character. This restore step owns the target encoding contract.
+character. The base64 text itself is ASCII and is inserted as a script text
+node, so this boundary needs no HTML escaping; it owns only the character
+encoding contract.
 """
 from __future__ import annotations
 
@@ -53,29 +57,6 @@ def _heading_text(html: str) -> str:
     parser.feed(html)
     parser.close()
     return parser.value()
-
-
-def _domain_label(page: dict) -> str:
-    return site_data.classify_page(page)["label"]
-
-
-def build_explorer_tree(pages: list[dict]) -> list[dict]:
-    """Group pages as domain -> type -> page, with the overview branch first."""
-    return site_data.build_explorer_tree(pages)
-
-
-def ordered_paths(pages: list[dict]) -> list[str]:
-    """Flatten the Explorer tree into the navigation order used by A7."""
-    return site_data.ordered_paths(pages)
-
-
-def adjacent_paths(path: str, ordered: list[str]) -> tuple[str | None, str | None]:
-    return site_data.adjacent_paths(path, ordered)
-
-
-def breadcrumb(page: dict) -> list[dict]:
-    """Return domain / type / page entries with deterministic tree targets."""
-    return site_data.breadcrumb(page)
 
 
 def prepare_body(body_html: str, prefix: str) -> tuple[str, list[dict]]:
@@ -386,7 +367,6 @@ _APP_JS = r"""
   var nodeByPath = {};
   var searchDocs = [];
   var lastPath = "";
-  var progressTimer = null;
   var lastScrollSave = 0;
   var articles = Array.prototype.slice.call(main.querySelectorAll("article.page"));
   articles.forEach(function(a){ byPath[a.getAttribute("data-path")] = a; });
@@ -1093,7 +1073,7 @@ def render_html(
     """Build the complete single-file reading interface from rendered pages."""
     vault_path = Path(vault)
     page_set = {page["rel"] for page in pages}
-    ordered = ordered_paths(pages)
+    ordered = site_data.ordered_paths(pages)
     path_to_page = {page["rel"]: page for page in pages}
     backlinks = site_data.build_backlinks(pages, page_set)
     graph_payload = graph_payload or {"nodes": [], "edges": [], "communities": []}
@@ -1106,7 +1086,7 @@ def render_html(
         page = path_to_page[rel]
         body_html = render_page_body(page["body"], page_set, vault_path, with_images)
         body_html, toc = prepare_body(body_html, f"p{index}")
-        previous, following = adjacent_paths(page["rel"], ordered)
+        previous, following = site_data.adjacent_paths(page["rel"], ordered)
         previous_entry = (
             {"path": previous, "title": path_to_page[previous]["title"]}
             if previous is not None else None
@@ -1115,7 +1095,7 @@ def render_html(
             {"path": following, "title": path_to_page[following]["title"]}
             if following is not None else None
         )
-        crumbs = breadcrumb(page)
+        crumbs = site_data.breadcrumb(page)
         branch = site_data.classify_page(page)
         rel_esc = _html_escape(page["rel"], quote=True)
         title_esc = _html_escape(page["title"])
@@ -1173,7 +1153,7 @@ def render_html(
 
     payload = {
         "pages": payload_pages,
-        "tree": build_explorer_tree(pages),
+        "tree": site_data.build_explorer_tree(pages),
         "filters": site_data.build_filter_options(pages),
         "graph": graph_payload,
         "quiz": quiz_items,

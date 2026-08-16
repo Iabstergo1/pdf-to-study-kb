@@ -1,8 +1,7 @@
 """overview 导航完备性：`overview-source-unlinked` 门禁 + `sync-overview-sources` 补救通道。
 
-立法依据（overview 导航缺口）：该缺口跨多个来源复现，
-最后一次实测 22 个来源里 **15 个**在
-overview.md 中没有任何入口——读者只能靠文件树发现它们。
+立法依据（overview 导航缺口）：该缺口跨多个来源复现——读者在入口页找不到
+来源台账，只能靠文件树发现它们。
 
 机制上它必然反复：**overview.md 只有一条写入通道**——ingest 的 `write_scope`
 （`workorder.py`）。`revise-adopted` 的 `_safe_rel` 显式拒它，`kb-save` 是 new-page-only。

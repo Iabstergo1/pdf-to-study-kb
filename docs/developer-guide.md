@@ -315,7 +315,7 @@ pdf-to-study-kb/
 | **重建命题总表** | `rebuild-propositions` | `cmd_rebuild_propositions` → `wiki_gate.collect_propositions`/`build_propositions_index`/`write_propositions_index` | published 页 `**命题（名）**：…` | `propositions.generated.md`（按 domain 分组、名字即锚点、v1 不编号）；域内重名走 `duplicate_proposition_names` 软警告 | 写派生文件；lint 收尾自动重建、publish-isolated | 同上 | 准确 |
 | **重建难页原图索引** | `rebuild-source-images` | `cmd_rebuild_source_images` → `wiki_gate.build_source_images`/`write_source_images` | `windows.jsonl` `assets` ⋈ SQLite 当轮 finished `write_set_json` + `wiki/assets/<src>/*.png` / `*.jpg` / `*.jpeg`（文件名含 `pNNN` 的显示 `p.N`；其余按稳定排序编号为 `图N`） | `source-images.generated.md`（page 级=写该页时所读窗口的难页原图，可能含同窗邻近上下文；source 级=无法证明具体页归属、整源显式横幅；none 不出条目；普通 markdown 链接，不嵌图） | 写派生文件；lint 收尾自动重建、publish-isolated；**不进** `derived_violations`（输入含 staging/SQLite，非纯 vault 重算） | `test_wiki_gate.py`、`test_vault_init_cli.py` | 准确 |
 | **导出 Anki 自测卡片** | `export-anki` | `cmd_export_anki` → `wiki_gate.collect_quiz_cards`/`build_anki_tsv`/`write_anki_tsv`（答案提取走 `page_rules.extract_question_cards`，判定与 `question_resolution` 同源） | published 页 `[!question]` 题干 + `success` 后代答案（含非折叠/跳级/sibling） | `anki-export.generated.tsv`（`#html:true`，单牌组 study-kb，domain/source 进 tags；题干作首字段去重键，跨页重复题干确定性消歧 + 软警告） | 写派生文件；lint 收尾自动重建、publish-isolated | `test_wiki_gate.py`、`test_vault_init_cli.py`、`test_page_rules.py` | 准确 |
-| **导出静态站点** | `export-site [--with-images]` | `cmd_export_site` → `site_exporter.build_site`/`write_site`；正文渲染 `site_render.py`、阅读壳 `site_layout.py`、关联/聚合数据 `site_data.py`、P2 图源与缩略图 `site_media.py` | published 页正文 + `graph-data.generated.json` + P2 `source-images.generated.md` 数据（`page_rules.parse_callouts` + markdown-it + 内嵌 KaTeX） | 默认 `pipeline-workspace/exports/site/study-kb.html`（自包含、离线、域/类型 Explorer、本页 TOC、面包屑、上一页/下一页、反链、悬停预览、全库/局部图谱、自测题/命题、深浅色、标题+正文搜索/结果片段/快捷键/上下键跳转、域/类型/来源筛选、别名检索、阅读进度记忆、可搜索、响应式）；`--with-images` 输出 `site/` 目录，`assets/` 含原图与 PyMuPDF 缩略图，相对路径引用，不再 base64 内联 | 手动分发动作；**不接发布钩子、不进任何 `_DERIVED`、不进 `derived_violations`、不进 retract rebuilds** | `test_site_exporter.py`、`test_site_layout.py`、`test_site_data.py`、`test_site_media.py` | 准确 |
+| **导出静态站点** | `export-site [--with-images]` | `cmd_export_site` → `site_exporter.write_site`（纯渲染检查用 `site_exporter.build_site`）；正文渲染 `site_render.py`、阅读壳 `site_layout.py`、关联/聚合数据 `site_data.py`、P2 图源与缩略图 `site_media.py` | published 页正文 + `graph-data.generated.json` + P2 `source-images.generated.md` 数据（`page_rules.parse_callouts` + markdown-it + 内嵌 KaTeX） | 默认 `pipeline-workspace/exports/site/study-kb.html`（自包含、离线、导航域 Explorer（总览/跨域综合/真实域）、本页 TOC、面包屑、上一页/下一页、反链、悬停预览、全库/局部图谱（500 节点/1200 边降级阈值）、自测题/命题、深浅色、标题+正文搜索/结果片段/快捷键/上下键跳转、域/类型/来源筛选、别名检索、阅读进度记忆、可搜索、响应式）；`--with-images` 输出 `site/` 目录，`assets/` 含原图与 PyMuPDF 缩略图，相对路径引用，不再 base64 内联 | 手动分发动作；**不接发布钩子、不进任何 `_DERIVED`、不进 `derived_violations`、不进 retract rebuilds** | `test_site_exporter.py`、`test_site_layout.py`、`test_site_data.py`、`test_site_media.py` | 准确 |
 
 ### 3.3 预处理命令
 
@@ -480,7 +480,8 @@ SHA-256。origin 与 target workspace 必须是互不包含的直接路径；ori
 
 **两个维度的完备性要求刻意不同**：**mapping 覆盖的 origin concept 集合必须与 origin
 实际拥有的集合相等**——这一条即蕴含不遗漏、不多余、各映射一次，因此 target 张数与非空/零映射比例
-不再另设门禁（曾把一次 MySQL 迁移的 37/3/8=6+2 写死进通用命令，任何别的来源必然失败）。
+不再另设门禁（曾把某次迁移的概念/主题/目标数量与映射比例写死进通用命令，
+任何别的来源必然失败）。
 **topic 维度只要求引用到的 origin topic 真实存在且不被重复引用，不要求全覆盖**：强制全覆盖会逼人
 为每张 origin topic 在目标库造一张页，正是核心约束 7 要禁的"门禁制造内容"。
 `--expect-concepts` / `--expect-topics` 是可选的形状确认，默认关闭。
@@ -1079,8 +1080,8 @@ ingest 阶段 E 义务，kb-save 会话批豁免） / `placeholder-unfilled`（�
 （2026-07-08 新增，防"lint 失败回滚吃掉 overview 就地编辑、重跑无人复查"） /
 **`overview-source-unlinked`**（2026-08-08 新增，2026-08-10 收窄射程：**本轮来源自己**的 published
 台账页必须能从 `overview.md` 到达。
-立法依据是该缺口跨三本书复现——mysql / llm-fundamentals / deep-learning，最后一次实测 22 个来源里
-**15 个**在 overview 中无任何入口。机制上它必然反复：`overview.md` **只有 ingest 的 `write_scope`
+立法依据是该缺口跨多个来源复现——读者在入口页找不到来源台账，只能靠文件树发现它们。
+机制上它必然反复：`overview.md` **只有 ingest 的 `write_scope`
 一条写入通道**（`revise-adopted` 的 `_safe_rel` 显式拒它、`kb-save` 是 new-page-only），
 ingest 之后没有维护手段。因此本条**只在阶段 E 生效**，并配 `sync-overview-sources --apply`
 作为随时可用的机械补救——**门禁与补救通道必须同时存在**，否则就是核心约束⑦ 说的
@@ -1142,10 +1143,14 @@ content-routing.md`）按 5 分类（理论/方法/案例/参考/观点）判断
 Anki，本项目不新开个人学习状态持久化层。
 
 **`export-site` 是手动分发动作，不是 vault 派生层**（P3 `site_exporter.py` 于 2026-08-14，
-P4 批次 A/B-1 拆为 `site_render.py` / `site_layout.py` / `site_data.py`）：把 published 正文渲染成
+P4 批次 A/B-1 拆为 `site_render.py` / `site_layout.py` / `site_data.py`，
+B-2 增加 `site_media.py`）：把 published 正文渲染成
 单个自包含离线 HTML（callout 用 `page_rules.parse_callouts`、Markdown 用 `markdown-it-py`、公式用
-内嵌 KaTeX；阅读壳提供域/类型 Explorer、本页 TOC、面包屑、上一页/下一页、反链、悬停预览、
-全库/局部图谱、自测题/命题、深浅色、标题+正文搜索/结果片段/快捷键/上下键跳转、域/类型/来源筛选、
+内嵌 KaTeX；阅读壳提供导航域 Explorer（总览 / 跨域综合 / 真实域 → 类型 → 页面）、
+本页 TOC、面包屑、上一页/下一页、反链、悬停预览、
+全库/局部图谱（沿用图谱渲染器的 500 节点 / 1200 边降级阈值）、自测题/命题、深浅色、
+标题+正文搜索/结果片段/快捷键/上下键跳转、域/类型/来源筛选（域与 Explorer 共用
+`navigation_domain`：总览 / 跨域综合 / 真实域）、
 别名检索、阅读进度记忆和窄屏抽屉），默认不打包图片；`--with-images` 改为输出
 `site/` 目录，`assets/` 含原图与 PyMuPDF 缩略图、HTML 相对路径引用，不再 base64 内联。
 原书难页栏只出现在 P2 page 级归因的 concept / topic / comparison / synthesis

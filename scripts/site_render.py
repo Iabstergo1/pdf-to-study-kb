@@ -8,7 +8,9 @@ Math is protected before Markdown rendering and restored afterwards. Restoring
 must HTML-escape ``<`` / ``>`` / ``&`` (while preserving existing entities),
 because the restored TeX is parsed as HTML before KaTeX reads it — an unescaped
 ``<`` would be swallowed as a tag start. This is the same class as P1-R4:
-target-format escaping at restore time must not be forgotten.
+target-format escaping at restore time must not be forgotten. This module stays
+at the Unicode-text layer; the site's byte-encoding boundary is
+``site_exporter.write_site``, which always writes UTF-8 with LF-only newlines.
 """
 from __future__ import annotations
 
@@ -89,9 +91,9 @@ def _replace_wikilinks(text: str, page_set: set[str]) -> str:
     return "".join(out)
 
 
-def _replace_images(text: str, page_set: set[str], vault: Path, with_images: bool) -> str:
-    # B-2: --with-images no longer inlines body images. Source-page media is
-    # staged as separate files; D-1 means published bodies have no images anyway.
+def _replace_images(text: str) -> str:
+    # Directory-mode media is staged by site_media, never rendered from Markdown
+    # image syntax. D-1 also means published bodies have no such images anyway.
     def repl(match: re.Match) -> str:
         alt = match.group(1) or "图"
         return alt
@@ -143,11 +145,11 @@ def _escape_math_html(raw: str) -> str:
     return out
 
 
-def _render_markdown(text: str, page_set: set[str], vault: Path, with_images: bool) -> str:
+def _render_markdown(text: str, page_set: set[str]) -> str:
     if _MD is None:
         raise RuntimeError("markdown-it-py is required for export-site")
     text = _replace_wikilinks(text, page_set)
-    text = _replace_images(text, page_set, vault, with_images)
+    text = _replace_images(text)
     text, protected = _protect_math(text)
     html = _MD.render(text)
     return _restore_math(html, protected)
@@ -184,17 +186,17 @@ def _compute_spans(lines: list[str], nodes: list[dict]) -> tuple[dict[int, int],
 
 def _render_callout(index: int, lines: list[str], nodes: list[dict],
                     by_line: dict[int, int], spans: dict[int, int],
-                    ctx: tuple[set[str], Path, bool]) -> str:
+                    ctx: set[str]) -> str:
     node = nodes[index]
     start = node["line"] - 1
     end = spans[index]
-    page_set, vault, with_images = ctx
+    page_set = ctx
     parts: list[str] = []
     buffer: list[str] = []
 
     def flush() -> None:
         if buffer:
-            parts.append(_render_markdown("\n".join(buffer), page_set, vault, with_images))
+            parts.append(_render_markdown("\n".join(buffer), page_set))
             buffer.clear()
 
     idx = start + 1
@@ -222,18 +224,25 @@ def _render_callout(index: int, lines: list[str], nodes: list[dict],
 
 
 def render_page_body(body: str, page_set: set[str], vault: Path, with_images: bool) -> str:
+    """Render one page body.
+
+    ``vault`` / ``with_images`` are kept in the injected renderer signature used
+    by the site shell. Published bodies never contain source images, and
+    directory-mode source media is staged separately by :mod:`site_media`, so
+    this function does not consume either argument.
+    """
     nodes, _errors = page_rules.parse_callouts(body)
     if not nodes:
-        return _render_markdown(body, page_set, vault, with_images)
+        return _render_markdown(body, page_set)
     lines = body.splitlines()
     by_line, spans = _compute_spans(lines, nodes)
-    ctx = (page_set, vault, with_images)
+    ctx = page_set
     parts: list[str] = []
     buffer: list[str] = []
 
     def flush() -> None:
         if buffer:
-            parts.append(_render_markdown("\n".join(buffer), page_set, vault, with_images))
+            parts.append(_render_markdown("\n".join(buffer), page_set))
             buffer.clear()
 
     idx = 0

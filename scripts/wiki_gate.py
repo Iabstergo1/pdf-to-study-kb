@@ -511,7 +511,7 @@ def overview_unclickable_routes(vault) -> list[str]:
     静默且没有任何信号（navigation-review-verdict-2026-08-10 §2.2 实证）。判据本身
     （含箭头且 wikilink 少于箭头）只会命中路线形态的行，不需要标题当锚，故改扫全篇编号列表项。
 
-    实测本库：修复前 51 步里仅 2 步可点，本判据可命中 12 条路线中的 9 条；修复后静默。
+    实测发现：修复前大量步骤点不动，本判据能命中多数路线；修复后静默。
     """
     vault = Path(vault)
     ov = vault / "overview.md"
@@ -653,8 +653,8 @@ def lint_pages(vault, pages: list[dict], *, phase_e: bool = True,
     # 这是它**唯一**的写入通道——revise-adopted 的 _safe_rel 拒它、kb-save 是 new-page-only。
     # 对 kb-save 批次设这条门就是"要求编辑却不给编辑通道"，正犯核心约束⑦。
     # 补救办法机械且完备：`sync-overview-sources --apply`，或在阶段 E 重写 overview 时带上。
-    # 立法依据：该缺口跨来源复现三次，
-    # 最后一次实测 22 个来源里 15 个在 overview 中没有任何入口。
+    # 立法依据：该缺口跨多个来源复现——读者在入口页找不到来源台账，
+    # 只能靠文件树发现它们。
     #
     # **射程只到本轮来源**（navigation-review-verdict-2026-08-10 F4）：缺口的成因是
     # "每次 ingest 忘掉自己那本"，射程就该精确对齐成因。旧射程扫全库，于是第 N 本书会被
@@ -1037,6 +1037,9 @@ def build_anki_tsv(vault, cards=None) -> str:
     重复信息由 duplicate_question_stems 暴露给调用方打软警告，与 duplicate_proposition_names
     的既有处理一致——fail-closed 会让一个含重复题干的既有 vault 永远过不了 adopt/reuse/reseal
     的字节 no-op 路径，且这是跨来源劫持（约束⑦同型）。单牌组 study-kb，domain/source 放 tags。
+    内容侧契约：题干/答案先由 :func:`anki_inline_html` 做目标 HTML 转义，再由
+    :func:`_tsv_field` 做 RFC 4180 引号/制表符/换行转义；:func:`write_anki_tsv`
+    固定以 UTF-8 + LF-only 写盘，这是 TSV 的字节确定性边界。
     """
     cards = collect_quiz_cards(vault) if cards is None else cards
     lines = ["#separator:tab", "#html:true", "#notetype:Basic", "#deck:study-kb",

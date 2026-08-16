@@ -3,10 +3,15 @@
 P4 Batch A splits the P3 single module by responsibility:
 
 * :mod:`site_render` owns Markdown/callout/image/math rendering and KaTeX assets.
-* :mod:`site_layout` owns the three-column reading shell, Explorer model,
-  breadcrumbs, TOC, theme state, prev/next ordering, and responsive drawers.
-* This module owns vault discovery and the public ``build_site`` / ``write_site``
-  API used by ``pipeline.py``.
+* :mod:`site_data` owns Explorer classification, ordering, breadcrumbs,
+  backlinks, graph sanitization, quiz/proposition items, and filter options.
+* :mod:`site_layout` owns the HTML/CSS/JS reading shell and calls the shared
+  :mod:`site_data` model for navigation structure.
+* :mod:`site_media` owns P2 source-page media parsing, staging, thumbnails, and
+  the source-pages panel.
+* This module owns vault discovery, asset orchestration, and the pure
+  ``build_site`` helper plus the filesystem-writing ``write_site`` API used by
+  ``pipeline.py``.
 
 ``export-site`` remains a manual distribution action, not a vault derived layer:
 it is not in any ``_DERIVED`` set, not in ``derived_violations``, not wired into
@@ -29,11 +34,6 @@ import site_layout
 import site_media
 import site_render
 import wiki_gate
-
-
-# Compatibility surface for existing callers and tests.
-render_page_body = site_render.render_page_body
-load_katex = site_render.load_katex
 
 
 def _string_list(value) -> list[str]:
@@ -148,34 +148,38 @@ def _render_html(pages: list[dict], vault: Path, with_images: bool,
     )
 
 
-def build_site(vault: str | Path, workspace: str | Path | None = None, *,
-               with_images: bool = False, vendor_dir: str | Path | None = None,
+def build_site(vault: str | Path, *,
+               vendor_dir: str | Path | None = None,
                katex_assets: dict | None = None) -> str:
-    """Build the self-contained site HTML (pure: reads only, no timestamps)."""
+    """Build the default self-contained HTML without touching the output tree.
+
+    This is the pure rendering helper used by tests and byte-determinism checks.
+    Directory-mode media is only assembled by :func:`write_site`; a pure HTML
+    builder must not return relative image links to files it did not stage.
+    """
     vault = Path(vault)
-    workspace = Path(workspace) if workspace is not None else vault.parent
     pages = _vault_pages(vault)
     if katex_assets is None:
-        katex_assets = load_katex(vendor_dir)
-    source_media = None
-    if with_images:
-        mapping = _page_asset_mapping(vault, workspace)
-        source_media = site_media.describe_source_media(
-            mapping, only_rels=_source_panel_rels(pages)
-        )
+        katex_assets = site_render.load_katex(vendor_dir)
     return _render_html(
-        pages, vault, with_images, katex_assets, source_media=source_media
+        pages, vault, False, katex_assets
     )
 
 
 def write_site(vault: str | Path, workspace: str | Path | None = None, *,
                with_images: bool = False, vendor_dir: str | Path | None = None,
                katex_assets: dict | None = None) -> SiteResult:
+    """Write the default single file or the ``--with-images`` directory.
+
+    Both forms are deterministic and write UTF-8 with LF-only newlines. This
+    module is the final byte-encoding boundary for the site; renderers above it
+    operate on Unicode text only.
+    """
     vault = Path(vault)
     workspace = Path(workspace) if workspace is not None else vault.parent
     pages = _vault_pages(vault)
     if katex_assets is None:
-        katex_assets = load_katex(vendor_dir)
+        katex_assets = site_render.load_katex(vendor_dir)
     out = workspace / "pipeline-workspace" / "exports" / "site" / "study-kb.html"
     out.parent.mkdir(parents=True, exist_ok=True)
     source_media = None

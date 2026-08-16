@@ -2,8 +2,9 @@
 
 力导向布局（vanilla JS、零依赖、无构建链、无 CDN、不 fetch、不读 Markdown）：节点力学排布、可拖拽/
 滚轮缩放/拖动画布、悬停高亮邻居、点击节点出详情并用 `obsidian://open?path=` 直接跳到对应 Obsidian
-笔记（双击亦跳转）。社区配色 + 图例 + 搜索 + 社区过滤 + 学习路径高亮。>500 节点降级（只渲染社区代表
-节点 + 学习路径）。内嵌 JSON 对 `</` 安全转义，避免提前闭合 `</script>`。
+笔记（双击亦跳转）。社区配色 + 图例 + 搜索 + 社区过滤 + 学习路径高亮。超过 500 节点或
+1200 条边时降级（只渲染社区代表节点 + 学习路径）。内嵌 JSON 对 `</` 安全转义，避免提前闭合
+`</script>`。
 """
 from __future__ import annotations
 
@@ -232,6 +233,13 @@ def to_html(data: dict, vault_root: str = "", *,
             max_nodes: int = MAX_HTML_NODES,
             max_edges: int = MAX_HTML_EDGES,
             site_embed: bool = False) -> str:
+    """Render the standalone or site-embedded graph shell.
+
+    ``max_nodes`` / ``max_edges`` are explicit knobs for the degradation
+    contract. Production callers intentionally pass no overrides so standalone
+    and site-embedded views share one threshold policy; tests may use large
+    fixtures without weakening that contract.
+    """
     nodes = data.get("nodes", [])
     edges = data.get("edges", [])
     degraded = len(nodes) > max_nodes or len(edges) > max_edges

@@ -90,8 +90,8 @@ def test_derived_name_lists_are_pinned_with_reasons():
 # ── review-coverage 的按来源整源认证统计 ───────────────────────────────────────
 #
 # 它回答的是"哪本书整本没人逐页读过"——按页算的覆盖率看不出这件事。
-# 实测（2026-08-12 复盘）：768 个内容页里 483 页来自 6 个做过整源认证的来源，
-# 而 17 个来源从未做过整源认证。判据只认台账条目自己的 `scope` 字段，不猜。
+# 实测复盘：按页算的覆盖率看不出"哪本书整本没验过"，按来源统计才暴露整源认证缺口。
+# 判据只认台账条目自己的 `scope` 字段，不猜。
 
 
 def _src_page(vault, rel, sources, ptype="concept"):
@@ -106,8 +106,9 @@ def _src_page(vault, rel, sources, ptype="concept"):
 def test_source_coverage_counts_unique_pages_not_per_source_sum(tmp_path):
     """跨源共享页不得按来源相加——那会让"没人读过的页数"虚高。
 
-    实测触发点：deep-learning 的概念页常带 4 个 `source_refs`（教材+课件+论文合并），
-    按来源相加得 442，去重后实为 285。一个虚高的数字与本项目要消灭的误导数同类。
+    实测触发点：一张概念页常带多个 `source_refs`（教材+课件+论文合并），
+    按来源相加会明显虚高，去重后才反映真实页面数。一个虚高的数字与
+    本项目要消灭的误导数同类。
     """
     import pipeline
     vault = tmp_path / "wiki"

@@ -178,17 +178,17 @@ v2 在顶层多一个 `topic_targets`（形状与 `targets` 对称：`target` + 
 
 ```powershell
 $env:PYTHONDONTWRITEBYTECODE=1
-python -B scripts/pipeline.py reuse-source --source mysql --title "MySQL是怎样运行的" --domain sql `
-  --path "C:\books\mysql.pdf" --sha256 <64位SHA256> `
-  --origin-root "<origin-vault-root>" --origin-source mysql --mapping "C:\tmp\mysql-mapping.json"
+python -B scripts/pipeline.py reuse-source --source my-source --title "示例数据库教材" --domain database-systems `
+  --path "C:\books\my-source.pdf" --sha256 <64位SHA256> `
+  --origin-root "<origin-vault-root>" --origin-source my-source --mapping "C:\tmp\my-source-mapping.json"
 ```
 
 - **占位符**：`<origin-vault-root>` 是**那个只读 vault 的根目录**（即含 `wiki/` 与 `pipeline-workspace/` 的目录），不是当前 vault，也不一定是本仓库。
 - **启动契约**：dry-run 与 apply 都先设 `PYTHONDONTWRITEBYTECODE=1` 并用 `python -B`，因为 origin vault 可能与 CLI 代码仓库同根；否则 Python import 可能更新 origin 的 `scripts/__pycache__`。origin state DB 必须是非 WAL rollback-journal 模式，且预先没有 `-wal/-shm` sidecar。
 - **默认行为**：byte-zero-write；PDF SHA、origin 的 read-only SQLite published state、canonical source 页、全部 concept/topic 页哈希、mapping 覆盖集与 origin 概念集相等、concept 与 topic 两个维度的目标归因边界任一不符即拒绝。
 - **可选形状确认**：`--expect-concepts N` / `--expect-topics N` 默认不设；只在你事先知道该拿到几张页时用来多加一道确认，不匹配即 fail-closed。
-- **目标归因前置**：非空映射目标必须已含 `source_refs: source: mysql`；两张零映射页必须不含 mysql，命令绝不替用户补写或伪造归因。
-- **确认后执行**：加 `--apply`。目标 vault 锁内写 `pipeline-workspace/reuses/mysql/` 的 manifest、原始 mapping、origin state、origin/target 首次快照和 canonical `wiki/sources/mysql.md`；派生层全成功后才登记 `external-vault-reuse`、`reused/published`。
+- **目标归因前置**：非空映射目标必须已含 `source_refs: source: my-source`；两张零映射页必须不含该来源，命令绝不替用户补写或伪造归因。
+- **确认后执行**：加 `--apply`。目标 vault 锁内写 `pipeline-workspace/reuses/my-source/` 的 manifest、原始 mapping、origin state、origin/target 首次快照和 canonical `wiki/sources/my-source.md`；派生层全成功后才登记 `external-vault-reuse`、`reused/published`。
 - **重复与漂移**：精确重跑先逐项验证 registry/index/graph/quiz/propositions 派生文件，再作全树 byte/mtime no-op；缺失/损坏会在目标锁内重建。后续 SQL 来源修改 target 页只报 `post-reuse-target-live-drift`，历史 target snapshot 不变。origin **生产状态六表**（`sources`/`source_stage_runs`/`artifacts`/`work_orders`/`ingest_progress`/`window_reads`）与 PDF/mapping/evidence/source/state 漂移 fail-closed；origin 的 `review_proposals` 诊断账本变化只报 `post-reuse-origin-diagnostics-drift` 并放行——它会因为你对别的来源跑 lint 而自然增长，不代表被复用的内容有任何变化。成功后可删除临时 mapping，重放时把 `--mapping` 指向 evidence 自带的 `mapping.json`。
 - **台账边界**：本 vault 的 `work_orders`、`ingest_progress`、`window_reads` 对该来源始终为 0；origin 全程只读。
 
@@ -198,8 +198,8 @@ python -B scripts/pipeline.py reuse-source --source mysql --title "MySQL是怎�
 
 ```powershell
 $env:PYTHONDONTWRITEBYTECODE=1
-python -B scripts/pipeline.py reseal-source --source mysql `
-  --mapping "C:\tmp\mysql-mapping-v2.json" --from-manifest-sha256 <旧manifest的64位SHA256>
+python -B scripts/pipeline.py reseal-source --source my-source `
+  --mapping "C:\tmp\my-source-mapping-v2.json" --from-manifest-sha256 <旧manifest的64位SHA256>
 # 核对 operation、新旧 manifest/mapping SHA 与 topic target 数后再加 --apply
 ```
 
@@ -371,7 +371,7 @@ python scripts/pipeline.py export-site                 # 默认：不打包图�
 python scripts/pipeline.py export-site --with-images   # 输出目录形态，包含原图与缩略图
 ```
 
-- **产物**：`pipeline-workspace/exports/site/study-kb.html` —— **单个自包含 HTML**。
+- **默认产物**：`pipeline-workspace/exports/site/study-kb.html` —— **单个自包含 HTML**。
   KaTeX（公式）与字体全部内嵌 base64，**无 CDN、不发任何网络请求**，断网可读。
 - **怎么用**：浏览器直接打开；复制这一个文件到手机/U 盘/发给别人即可阅读，对方不需要装任何东西。
 - **`--with-images` 已从 base64 内联改为目录形态**：输出 `site/` 整个目录，
@@ -381,9 +381,10 @@ python scripts/pipeline.py export-site --with-images   # 输出目录形态，�
   只有 P2 page 级归因的页面才显示；source 台账页不显示。语义与
   `source-images.generated.md` 一致：这些图是“写该页时所读窗口的难页原图”，
   可能包含同窗邻近上下文，**不等同于关于该页概念的插图**。
-- **包含**：全部 published 页正文、按「域 → 类型 → 页面」分层的可折叠 Explorer、本页 TOC
-  （滚动高亮当前小节）、域 / 类型 / 页名面包屑、按 Explorer 顺序的上一页 / 下一页、
-  反向链接面板、wikilink 悬停摘要、全库图谱视图、本页局部图谱、「在 Obsidian 中打开」、
+- **包含**：全部 published 页正文、按导航域分层的可折叠 Explorer（总览 / 跨域综合 /
+  真实域 → 类型 → 页面）、本页 TOC（滚动高亮当前小节）、域 / 类型 / 页名面包屑、
+  按 Explorer 顺序的上一页 / 下一页、反向链接面板、wikilink 悬停摘要、
+  全库图谱视图（超过 500 节点或 1200 边时沿用降级模式）、本页局部图谱、「在 Obsidian 中打开」、
   自测题库与命题总表聚合视图、标题+正文分权重搜索、结果片段与键盘操作、域/类型/来源筛选、
   别名检索、阅读进度记忆、跟随系统并可手动切换的深色 / 浅色模式、全文搜索、折叠自测题、表格 / 代码 /
   行内与块级公式、响应式（窄屏 Explorer 与 TOC 折叠为抽屉）。
@@ -439,8 +440,8 @@ python scripts/pipeline.py export-site --with-images   # 输出目录形态，�
 | `init-vault` | 建 `wiki/` 脚手架（幂等） | — | — | `python scripts/pipeline.py init-vault` |
 | `adopt-vault` | 接管既有 vault；默认 byte-zero-write dry-run，legacy 内容门禁债 warning-only，安全/ZIP/证据/source/state/台账完整性 hard-block；`--apply` 在锁内落证据并重建派生层，成功后才登记 `adopted/published`；精确重跑 byte no-op，接管后 live 演进只报 drift warning，历史证据/状态漂移 fail-closed | `--source --title --domain --baseline-archive --baseline-sha256` | `--apply` | `... adopt-vault --source legacy-kb --title "既有库" --domain general --baseline-archive "C:\backups\wiki.zip" --baseline-sha256 <SHA256>` |
 | `revise-adopted` | 对 adopted legacy 页建立 sidecar 写前证据、可编辑候选、全 vault overlay lint 与可恢复切换；默认只读，首次 apply 只准备，候选编辑后再次 apply 才提交；写入授权不改变 `source_refs`，外部依据进入 `citations` | `--source --request` | `--apply` `--abort` `--recover {forward,rollback}` `--expect-live-manifest <json>` | `... revise-adopted --source legacy-kb --request revision-request.yaml` |
-| `reuse-source` | 从只读 published vault 登记选择性来源复用；核验 PDF/origin state/source 页与全部 concept/topic 页、mapping（v1/v2）覆盖集与 origin 概念集相等、concept 与 topic 两维的零映射目标不得有该归因；apply 冻结 evidence，派生成功后才登记 `reused/published`；精确重跑 byte no-op，target live 演进 warning-only，origin/mapping/evidence/source/state 漂移 fail-closed | `--source --title --domain --path --sha256 --origin-root --origin-source --mapping` | `--expect-concepts --expect-topics --apply` | `... reuse-source --source mysql --title "MySQL" --domain sql --path "C:\books\mysql.pdf" --sha256 <SHA256> --origin-root "<origin-vault-root>" --origin-source mysql --mapping "C:\tmp\mysql.json"` |
-| `reseal-source` | 仅在完整 reuse v1 证据上补 mapping v2 topic 维度；metadata/PDF/origin/concept mapping/计数/target baseline 不可变；apply 归档 v1 并以 running 中间态替换 evidence/source/派生/state，崩溃可前滚、精确重跑 no-op | `--source --mapping --from-manifest-sha256` | `--apply` | `... reseal-source --source mysql --mapping "C:\tmp\mysql-v2.json" --from-manifest-sha256 <旧SHA256>` |
+| `reuse-source` | 从只读 published vault 登记选择性来源复用；核验 PDF/origin state/source 页与全部 concept/topic 页、mapping（v1/v2）覆盖集与 origin 概念集相等、concept 与 topic 两维的零映射目标不得有该归因；apply 冻结 evidence，派生成功后才登记 `reused/published`；精确重跑 byte no-op，target live 演进 warning-only，origin/mapping/evidence/source/state 漂移 fail-closed | `--source --title --domain --path --sha256 --origin-root --origin-source --mapping` | `--expect-concepts --expect-topics --apply` | `... reuse-source --source my-source --title "示例教材" --domain sample --path "C:\books\my-source.pdf" --sha256 <SHA256> --origin-root "<origin-vault-root>" --origin-source my-source --mapping "C:\tmp\my-source.json"` |
+| `reseal-source` | 仅在完整 reuse v1 证据上补 mapping v2 topic 维度；metadata/PDF/origin/concept mapping/计数/target baseline 不可变；apply 归档 v1 并以 running 中间态替换 evidence/source/派生/state，崩溃可前滚、精确重跑 no-op | `--source --mapping --from-manifest-sha256` | `--apply` | `... reseal-source --source my-source --mapping "C:\tmp\my-source-v2.json" --from-manifest-sha256 <旧SHA256>` |
 | `unlock` | 回收 stale vault 锁（活锁拒绝） | — | `--ttl 1800` | `python scripts/pipeline.py unlock` |
 | `fail` | 把崩溃残留的 running 阶段标 failed | `--source --stage --error` | — | `... fail --source X --stage converted --error "原因"` |
 | `rebuild-registry` | 从概念页重建 `_registry.yaml`（aliases.md 已退休，残留自动清理） | — | — | `... rebuild-registry` |
@@ -450,7 +451,7 @@ python scripts/pipeline.py export-site --with-images   # 输出目录形态，�
 | `rebuild-propositions` | 从 published 页的具名命题（`**命题（名）**：…`）重建命题总表 `propositions.generated.md`（全库结论清单+回链；收尾 lint 自动重建） | — | — | `... rebuild-propositions` |
 | `rebuild-source-images` | 从窗口难页图 ⋈ 当前轮窗口写集重建 `source-images.generated.md` 难页原图索引（page 级=写该页时所读窗口的难页原图，可能含同窗邻近上下文；source 级=无法证明具体页归属、整源显式标注；普通 markdown 链接不嵌图；收尾 lint 自动重建） | — | — | `... rebuild-source-images` |
 | `export-anki` | 把全库自测题（题干+success 后代答案+回链）导成 `anki-export.generated.tsv`，Anki 原生导入即可排程；首字段题干作去重键，跨页重复题干确定性消歧并软警告 | — | — | `... export-anki` |
-| `export-site` | 把 published 正文导成 `pipeline-workspace/exports/site/study-kb.html` 单文件离线站点（域/类型 Explorer、本页 TOC、面包屑、上一页/下一页、反链/悬停预览/全库与局部图谱/自测题/命题/深浅色、标题+正文搜索/结果片段/快捷键/上下键跳转、域/类型/来源筛选、别名检索、阅读进度记忆、callout/表格/公式/代码/响应式；默认不打包图片，`--with-images` 改为输出 `site/` 目录并相对路径引用原图/缩略图，不再 base64 内联；手动分发动作，**不接发布钩子**） | — | `--with-images` | `... export-site` |
+| `export-site` | 把 published 正文导成 `pipeline-workspace/exports/site/study-kb.html` 单文件离线站点（导航域 Explorer（总览/跨域综合/真实域）、本页 TOC、面包屑、上一页/下一页、反链/悬停预览/全库与局部图谱（500 节点/1200 边降级阈值）/自测题/命题/深浅色、标题+正文搜索/结果片段/快捷键/上下键跳转、域/类型/来源筛选、别名检索、阅读进度记忆、callout/表格/公式/代码/响应式；默认不打包图片，`--with-images` 改为输出 `site/` 目录并相对路径引用原图/缩略图，不再 base64 内联；手动分发动作，**不接发布钩子**） | — | `--with-images` | `... export-site` |
 | `apply-obsidian-style` | 落地学习库 CSS 观感片段（纯配置，幂等） | — | — | `... apply-obsidian-style` |
 
 **预处理（零 LLM，顺序固定，幂等跳过）：**
