@@ -315,7 +315,7 @@ pdf-to-study-kb/
 | **重建命题总表** | `rebuild-propositions` | `cmd_rebuild_propositions` → `wiki_gate.collect_propositions`/`build_propositions_index`/`write_propositions_index` | published 页 `**命题（名）**：…` | `propositions.generated.md`（按 domain 分组、名字即锚点、v1 不编号）；域内重名走 `duplicate_proposition_names` 软警告 | 写派生文件；lint 收尾自动重建、publish-isolated | 同上 | 准确 |
 | **重建难页原图索引** | `rebuild-source-images` | `cmd_rebuild_source_images` → `wiki_gate.build_source_images`/`write_source_images` | `windows.jsonl` `assets` ⋈ SQLite 当轮 finished `write_set_json` + `wiki/assets/<src>/*.png` / `*.jpg` / `*.jpeg`（文件名含 `pNNN` 的显示 `p.N`；其余按稳定排序编号为 `图N`） | `source-images.generated.md`（page 级=写该页时所读窗口的难页原图，可能含同窗邻近上下文；source 级=无法证明具体页归属、整源显式横幅；none 不出条目；普通 markdown 链接，不嵌图） | 写派生文件；lint 收尾自动重建、publish-isolated；**不进** `derived_violations`（输入含 staging/SQLite，非纯 vault 重算） | `test_wiki_gate.py`、`test_vault_init_cli.py` | 准确 |
 | **导出 Anki 自测卡片** | `export-anki` | `cmd_export_anki` → `wiki_gate.collect_quiz_cards`/`build_anki_tsv`/`write_anki_tsv`（答案提取走 `page_rules.extract_question_cards`，判定与 `question_resolution` 同源） | published 页 `[!question]` 题干 + `success` 后代答案（含非折叠/跳级/sibling） | `anki-export.generated.tsv`（`#html:true`，单牌组 study-kb，domain/source 进 tags；题干作首字段去重键，跨页重复题干确定性消歧 + 软警告） | 写派生文件；lint 收尾自动重建、publish-isolated | `test_wiki_gate.py`、`test_vault_init_cli.py`、`test_page_rules.py` | 准确 |
-| **导出静态站点** | `export-site [--with-images]` | `cmd_export_site` → `site_exporter.build_site`/`write_site`；正文渲染 `site_render.py`、阅读壳 `site_layout.py`、关联/聚合数据 `site_data.py`、P2 图源与缩略图 `site_media.py` | published 页正文 + `graph-data.generated.json` + P2 `source-images.generated.md` 数据（`page_rules.parse_callouts` + markdown-it + 内嵌 KaTeX） | 默认 `pipeline-workspace/exports/site/study-kb.html`（自包含、离线、域/类型 Explorer、本页 TOC、面包屑、上一页/下一页、反链、悬停预览、全库/局部图谱、自测题/命题、深浅色、可搜索、响应式）；`--with-images` 输出 `site/` 目录，`assets/` 含原图与 PyMuPDF 缩略图，相对路径引用，不再 base64 内联 | 手动分发动作；**不接发布钩子、不进任何 `_DERIVED`、不进 `derived_violations`、不进 retract rebuilds** | `test_site_exporter.py`、`test_site_layout.py`、`test_site_data.py`、`test_site_media.py` | 准确 |
+| **导出静态站点** | `export-site [--with-images]` | `cmd_export_site` → `site_exporter.build_site`/`write_site`；正文渲染 `site_render.py`、阅读壳 `site_layout.py`、关联/聚合数据 `site_data.py`、P2 图源与缩略图 `site_media.py` | published 页正文 + `graph-data.generated.json` + P2 `source-images.generated.md` 数据（`page_rules.parse_callouts` + markdown-it + 内嵌 KaTeX） | 默认 `pipeline-workspace/exports/site/study-kb.html`（自包含、离线、域/类型 Explorer、本页 TOC、面包屑、上一页/下一页、反链、悬停预览、全库/局部图谱、自测题/命题、深浅色、标题+正文搜索/结果片段/快捷键/上下键跳转、域/类型/来源筛选、别名检索、阅读进度记忆、可搜索、响应式）；`--with-images` 输出 `site/` 目录，`assets/` 含原图与 PyMuPDF 缩略图，相对路径引用，不再 base64 内联 | 手动分发动作；**不接发布钩子、不进任何 `_DERIVED`、不进 `derived_violations`、不进 retract rebuilds** | `test_site_exporter.py`、`test_site_layout.py`、`test_site_data.py`、`test_site_media.py` | 准确 |
 
 ### 3.3 预处理命令
 
@@ -1145,7 +1145,8 @@ Anki，本项目不新开个人学习状态持久化层。
 P4 批次 A/B-1 拆为 `site_render.py` / `site_layout.py` / `site_data.py`）：把 published 正文渲染成
 单个自包含离线 HTML（callout 用 `page_rules.parse_callouts`、Markdown 用 `markdown-it-py`、公式用
 内嵌 KaTeX；阅读壳提供域/类型 Explorer、本页 TOC、面包屑、上一页/下一页、反链、悬停预览、
-全库/局部图谱、自测题/命题、深浅色和窄屏抽屉），默认不打包图片；`--with-images` 改为输出
+全库/局部图谱、自测题/命题、深浅色、标题+正文搜索/结果片段/快捷键/上下键跳转、域/类型/来源筛选、
+别名检索、阅读进度记忆和窄屏抽屉），默认不打包图片；`--with-images` 改为输出
 `site/` 目录，`assets/` 含原图与 PyMuPDF 缩略图、HTML 相对路径引用，不再 base64 内联。
 原书难页栏只出现在 P2 page 级归因的 concept / topic / comparison / synthesis
 知识页，source 台账页不显示。它**不接发布钩子、不进任何

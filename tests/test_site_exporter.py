@@ -32,7 +32,8 @@ def _fake_katex():
 def test_collect_pages_published_only_and_sorted(tmp_path):
     vault = tmp_path / "wiki"
     _page(vault, "domains/d/concepts/b.md",
-          {"type": "concept", "status": "published", "domain": "d", "title": "B"}, "正文B。")
+          {"type": "concept", "status": "published", "domain": "d", "title": "B",
+           "aliases": ["B别名"], "source_refs": ["book-a"]}, "正文B。")
     _page(vault, "domains/d/concepts/a.md",
           {"type": "concept", "status": "published", "domain": "d", "title": "A"}, "正文A。")
     _page(vault, "domains/d/concepts/draft.md",
@@ -42,6 +43,8 @@ def test_collect_pages_published_only_and_sorted(tmp_path):
         "domains/d/concepts/a.md", "domains/d/concepts/b.md"]
     assert all(p["type"] == "concept" for p in pages)
     assert pages[0]["obsidian_uri"] == wiki_gate.obsidian_uri(vault, pages[0]["rel"])
+    assert pages[1]["aliases"] == ["B别名"]
+    assert pages[1]["source_refs"] == ["book-a"]
 
 
 def test_render_table_and_inline_math_preserved(tmp_path):

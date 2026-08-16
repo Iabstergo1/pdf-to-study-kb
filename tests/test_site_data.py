@@ -159,3 +159,24 @@ def test_quiz_and_proposition_payload_uses_page_rules_results():
         "name": "甲",
         "statement": "结论甲。",
     }]
+
+
+def test_filter_options_use_navigation_domain_model():
+    pages = [
+        {"rel": "overview.md", "title": "总览", "domain": "", "type": "overview",
+         "source_refs": ["s"]},
+        {"rel": "domains/d/concepts/a.md", "title": "A", "domain": "d",
+         "type": "concept", "source_refs": ["s"]},
+        {"rel": "topics/T.md", "title": "T", "domain": "topics",
+         "type": "topic", "source_refs": ["s"]},
+    ]
+
+    filters = site_data.build_filter_options(pages)
+
+    assert filters["domains"] == [
+        {"value": "overview", "label": "总览"},
+        {"value": "cross-domain", "label": "跨域综合"},
+        {"value": "domain:d", "label": "d"},
+    ]
+    assert filters["types"] == ["concept", "overview", "topic"]
+    assert filters["sources"] == ["s"]

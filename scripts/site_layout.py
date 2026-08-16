@@ -164,6 +164,21 @@ background:var(--panel);border-radius:7px;font-size:12px;cursor:pointer}
 #search{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:8px;
 font-size:14px;background:var(--panel);color:var(--text);margin-bottom:12px}
 #search:focus{outline:2px solid var(--accent);outline-offset:1px}
+.filter-row{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:12px}
+.filter-row select{min-width:0;width:100%;height:30px;padding:0 6px;border:1px solid var(--line);
+border-radius:7px;background:var(--panel);color:var(--text);font-size:12px}
+.search-results{max-height:52vh;overflow:auto;margin:0 0 12px;border-top:1px solid var(--line);
+padding-top:8px}
+.search-result{display:block;width:100%;text-align:left;border:0;background:none;
+border-radius:7px;padding:8px;cursor:pointer;color:var(--text)}
+.search-result:hover,.search-result.active{background:var(--accent-soft)}
+.search-result-title{font-weight:650;font-size:13.5px;line-height:1.4;overflow-wrap:anywhere}
+.search-result-meta{color:var(--muted);font-size:11px;margin:3px 0;overflow-wrap:anywhere}
+.search-result-snippet{color:var(--muted);font-size:12.5px;line-height:1.5;
+overflow-wrap:anywhere;max-height:60px;overflow:hidden}
+.search-result mark{background:var(--accent-soft-strong);color:var(--text);padding:0 1px;
+border-radius:2px}
+.searching #nav{display:none}
 #nav{min-width:0}
 .tree-domain,.tree-type,.nav-item{display:flex;width:100%;text-align:left;background:none;
 border:0;padding:7px 8px;border-radius:7px;color:var(--text);cursor:pointer;gap:7px;
@@ -360,11 +375,19 @@ _APP_JS = r"""
   var backlinksList = document.getElementById("backlinks-list");
   var localGraph = document.getElementById("local-graph");
   var search = document.getElementById("search");
+  var searchResults = document.getElementById("search-results");
+  var domainFilter = document.getElementById("domain-filter");
+  var typeFilter = document.getElementById("type-filter");
+  var sourceFilter = document.getElementById("source-filter");
   var main = document.getElementById("main");
   var preview = document.getElementById("preview-popover");
   var byPath = {};
   var byTitle = {};
   var nodeByPath = {};
+  var searchDocs = [];
+  var lastPath = "";
+  var progressTimer = null;
+  var lastScrollSave = 0;
   var articles = Array.prototype.slice.call(main.querySelectorAll("article.page"));
   articles.forEach(function(a){ byPath[a.getAttribute("data-path")] = a; });
   pages.forEach(function(p){ byPath[p.path] = byPath[p.path] || null; byTitle[p.path] = p.title; });
@@ -380,8 +403,110 @@ _APP_JS = r"""
     if(byPath["overview.md"]) return "overview.md";
     return pages.length ? pages[0].path : "";
   }
+  function normalize(value){ return String(value||"").toLowerCase(); }
+  function activeFilters(){
+    return {
+      domain: normalize(domainFilter.value),
+      type: normalize(typeFilter.value),
+      source: normalize(sourceFilter.value)
+    };
+  }
+  function passesFilters(page){
+    var filters = activeFilters();
+    if(filters.domain && normalize(page.navigation_domain)!==filters.domain) return false;
+    if(filters.type && normalize(page.type)!==filters.type) return false;
+    if(filters.source && !(page.source_refs||[]).some(function(s){
+      return normalize(s)===filters.source;
+    })) return false;
+    return true;
+  }
   function matchesFilter(p, q){
-    return (p.title+" "+p.domain+" "+p.type+" "+p.path).toLowerCase().indexOf(q)>=0;
+    if(!passesFilters(p)) return false;
+    var hay = (p.title+" "+(p.aliases||[]).join(" ")+" "+p.domain+" "+
+      p.navigation_domain_label+" "+p.type+" "+p.path+" "+
+      (p.source_refs||[]).join(" ")).toLowerCase();
+    return hay.indexOf(q)>=0;
+  }
+  function buildSearchDocs(){
+    searchDocs = pages.filter(function(p){
+      return p.path.indexOf("__view:")!==0 && byPath[p.path];
+    }).map(function(p){
+      var body = byPath[p.path].querySelector(".page-body");
+      return {
+        page: p,
+        title: normalize(p.title),
+        aliases: (p.aliases||[]).map(normalize),
+        bodyText: body ? body.textContent : "",
+        body: normalize(body ? body.textContent : ""),
+        hay: normalize(p.title+" "+(p.aliases||[]).join(" ")+" "+
+          p.domain+" "+p.navigation_domain_label+" "+p.type+" "+p.path+" "+
+          (p.source_refs||[]).join(" "))
+      };
+    });
+  }
+  function countMatches(hay, q){
+    var count=0, index=hay.indexOf(q);
+    while(index>=0){ count++; index=hay.indexOf(q,index+q.length); }
+    return count;
+  }
+  function scoreDoc(doc, q){
+    var title = countMatches(doc.title, q)*1000;
+    var aliases = doc.aliases.reduce(function(sum,a){ return sum+countMatches(a,q)*500; },0);
+    var body = countMatches(doc.body, q)*1;
+    var hay = countMatches(doc.hay, q)*0.25;
+    return title+aliases+body+hay;
+  }
+  function highlighted(snippet, q){
+    var out="", lower=snippet.toLowerCase(), index=lower.indexOf(q), cursor=0;
+    while(index>=0){
+      out += esc(snippet.slice(cursor,index));
+      out += "<mark>"+esc(snippet.slice(index,index+q.length))+"</mark>";
+      cursor=index+q.length;
+      index=lower.indexOf(q,cursor);
+    }
+    out += esc(snippet.slice(cursor));
+    return out;
+  }
+  function snippetFor(doc, q){
+    var body = doc.bodyText || "";
+    var match = doc.body.indexOf(q);
+    var start = match>=0 ? Math.max(0,match-50) : 0;
+    var raw = body.slice(start,start+150);
+    if(match<0 && (doc.title.indexOf(q)>=0 || doc.aliases.some(function(a){return a.indexOf(q)>=0;}))) {
+      raw = body.slice(0,150);
+    }
+    return highlighted(raw.trim(), q);
+  }
+  function renderSearchResults(){
+    var q = normalize(search.value.trim());
+    document.getElementById("explorer").classList.toggle("searching", Boolean(q));
+    if(!q){
+      searchResults.hidden = true;
+      searchResults.innerHTML="";
+      renderExplorer("");
+      return;
+    }
+    var ranked = searchDocs.filter(function(doc){ return passesFilters(doc.page); })
+      .map(function(doc){ return {doc:doc, score:scoreDoc(doc,q)}; })
+      .filter(function(item){ return item.score>0; })
+      .sort(function(a,b){ return b.score-a.score || (a.doc.page.path<b.doc.page.path?-1:1); });
+    if(!ranked.length){
+      searchResults.innerHTML='<div class="empty-panel">没有匹配页面</div>';
+      searchResults.hidden=false;
+      return;
+    }
+    searchResults.innerHTML = ranked.map(function(item,index){
+      var p = item.doc.page;
+      return '<button class="search-result" data-index="'+index+'" data-path="'+esc(p.path)+'">'
+        + '<span class="search-result-title">'+esc(p.title)+'</span>'
+        + '<span class="search-result-meta">'+esc(p.navigation_domain_label)+' · '+esc(p.type)+' · '
+        + esc((p.source_refs||[]).join(" / "))+'</span>'
+        + '<span class="search-result-snippet">'+snippetFor(item.doc,q)+'</span></button>';
+    }).join("");
+    searchResults.hidden=false;
+    Array.prototype.forEach.call(searchResults.querySelectorAll(".search-result"), function(btn){
+      btn.addEventListener("click", function(){ location.hash="#/"+btn.getAttribute("data-path"); });
+    });
   }
   function openKeys(path){
     var page = pages.find(function(p){ return p.path===path; }) || pages[0];
@@ -392,34 +517,36 @@ _APP_JS = r"""
     return out;
   }
   function renderExplorer(filter){
-    var path = currentPath() || defaultPath();
+    var path = currentPath() || lastPath || defaultPath();
     var q = (filter||"").trim().toLowerCase();
-    var open = q ? null : openKeys(path);
+    var filterActive = Boolean(domainFilter.value || typeFilter.value || sourceFilter.value);
+    var open = (q || filterActive) ? null : openKeys(path);
     var html = "";
     tree.forEach(function(domain){
       var domainHtml = "";
       domain.types.forEach(function(typeGroup){
         var pageRows = "";
         typeGroup.pages.forEach(function(page){
-          var full = byTitle[page.path] ? {
+          var full = pages.find(function(p){ return p.path===page.path; }) || {
             path: page.path, title: byTitle[page.path],
             domain: domain.domain_key, type: typeGroup.type
-          } : page;
-          if(q && !matchesFilter(full, q)) return;
+          };
+          var matched = matchesFilter(full, q);
+          if((q || filterActive) && !matched) return;
           pageRows += '<button class="nav-item" data-path="'+esc(page.path)+'"'
             + (page.path===path ? ' aria-current="page"' : "")+'>'
             + esc(page.title)+'<span class="badge">'+esc(typeGroup.type)+'</span></button>';
         });
         if(!pageRows) return;
         var typeKey = domain.domain_key+"|type:"+typeGroup.type;
-        var typeOpen = !q && open[typeKey];
+        var typeOpen = !q && open && open[typeKey];
         domainHtml += '<button class="tree-type'+(typeOpen?' open':'')+'" data-tree-target="'+esc(typeKey)+'">'
           + '<span class="tree-twisty">▸</span><span>'+esc(typeGroup.type)+'</span></button>'
           + '<div class="tree-children'+(typeOpen?' open':'')+'">'+pageRows+'</div>';
       });
       if(!domainHtml) return;
       var domainKey = domain.domain_key;
-      var domainOpen = !q && open[domainKey];
+      var domainOpen = !q && open && open[domainKey];
       html += '<div class="nav-group"><button class="tree-domain'+(domainOpen?' open':'')+'" data-tree-target="'+esc(domainKey)+'">'
         + '<span class="tree-twisty">▸</span><span>'+esc(domain.domain)+'</span></button>'
         + '<div class="tree-children'+(domainOpen?' open':'')+'">'+domainHtml+'</div></div>';
@@ -632,12 +759,72 @@ _APP_JS = r"""
     preview.style.left = left+"px"; preview.style.top = top+"px";
   }
   function hidePreview(){ preview.hidden = true; }
+  function loadProgress(){
+    try{
+      var raw = localStorage.getItem("study-kb-reading-progress");
+      var data = raw ? JSON.parse(raw) : null;
+      if(data && typeof data.path==="string" && typeof data.scrollY==="number") return data;
+    }catch(e){}
+    return null;
+  }
+  function saveProgress(path, scrollY){
+    if(!path) return;
+    try{
+      localStorage.setItem("study-kb-reading-progress",
+        JSON.stringify({path:path, scrollY:Math.max(0,scrollY||0)}));
+    }catch(e){}
+  }
+  function throttledProgressSave(){
+    var path = currentPath() || lastPath || defaultPath();
+    var now = Date.now();
+    if(now-lastScrollSave<250) return;
+    lastScrollSave = now;
+    saveProgress(path, window.scrollY);
+  }
+  function buildFilterOptions(){
+    var filters = payload.filters || {domains:[],types:[],sources:[]};
+    [["domain-filter",filters.domains.map(function(item){return item.value;})],
+     ["type-filter",filters.types],
+     ["source-filter",filters.sources]]
+      .forEach(function(group){
+        var select = document.getElementById(group[0]);
+        group[1].forEach(function(value){
+          var option = document.createElement("option");
+          option.value = value;
+          option.textContent = value || "未分类";
+          select.appendChild(option);
+        });
+      });
+    filters.domains.forEach(function(item){
+      var select = document.getElementById("domain-filter");
+      var option = Array.prototype.find.call(select.options, function(opt){return opt.value===item.value;});
+      if(option) option.textContent = item.label;
+    });
+  }
+  function moveSearchResult(delta){
+    var results = Array.prototype.slice.call(searchResults.querySelectorAll(".search-result"));
+    if(!results.length) return;
+    var current = results.findIndex(function(item){return item.classList.contains("active");});
+    var next = Math.min(results.length-1, Math.max(0, current+delta));
+    if(current<0 && delta<0) next = results.length-1;
+    if(current<0 && delta>0) next = 0;
+    results.forEach(function(item){item.classList.remove("active");});
+    results[next].classList.add("active");
+    results[next].scrollIntoView({block:"nearest"});
+  }
+  function chooseSearchResult(){
+    var active = searchResults.querySelector(".search-result.active");
+    if(active) location.hash = "#/"+active.getAttribute("data-path");
+  }
   function route(){
-    var path = currentPath() || defaultPath();
+    var requestedPath = currentPath();
+    var saved = requestedPath ? null : loadProgress();
+    var path = requestedPath || (saved && byPath[saved.path] ? saved.path : defaultPath());
     var el = byPath[path];
     if(!el && path) path = defaultPath(), el = byPath[path];
+    lastPath = path;
     articles.forEach(function(a){ a.hidden = (a!==el); });
-    renderExplorer(search.value);
+    renderSearchResults();
     renderToc(path);
     if(path.indexOf("__view:")===0){
       renderCollectionView(path);
@@ -651,7 +838,7 @@ _APP_JS = r"""
     attachPreviews();
     if(el) document.title = el.getAttribute("data-title") + " · 学习知识库";
     main.scrollTop = 0;
-    window.scrollTo(0,0);
+    window.scrollTo(0, saved && saved.path===path ? saved.scrollY : 0);
     closeDrawers();
   }
   function openDrawer(which){
@@ -661,8 +848,12 @@ _APP_JS = r"""
   function closeDrawers(){ document.body.classList.remove("explorer-open","toc-open"); }
 
   search.addEventListener("input", function(){
-    renderExplorer(search.value);
-    if(!search.value.trim()) route();
+    renderSearchResults();
+  });
+  [domainFilter,typeFilter,sourceFilter].forEach(function(select){
+    select.addEventListener("change", function(){
+      renderSearchResults();
+    });
   });
   document.getElementById("explorer-toggle").addEventListener("click", function(){
     openDrawer("explorer");
@@ -737,14 +928,38 @@ _APP_JS = r"""
     });
   }
 
+  search.addEventListener("keydown", function(ev){
+    if(ev.key==="ArrowDown"){ ev.preventDefault(); moveSearchResult(1); }
+    else if(ev.key==="ArrowUp"){ ev.preventDefault(); moveSearchResult(-1); }
+    else if(ev.key==="Enter"){ ev.preventDefault(); chooseSearchResult(); }
+    else if(ev.key==="Escape"){ search.value=""; renderSearchResults(); search.blur(); }
+  });
+  window.addEventListener("keydown", function(ev){
+    var tag = (ev.target && ev.target.tagName ? ev.target.tagName : "").toLowerCase();
+    if(tag==="input" || tag==="textarea" || tag==="select") return;
+    if(ev.key==="/" || (ev.ctrlKey && (ev.key==="k" || ev.key==="K"))){
+      ev.preventDefault();
+      search.focus();
+      search.select();
+    }
+  });
   window.addEventListener("hashchange", route);
   window.addEventListener("scroll", updateActiveToc, {passive:true});
+  window.addEventListener("scroll", throttledProgressSave, {passive:true});
+  window.addEventListener("pagehide", function(){
+    saveProgress(currentPath() || lastPath || defaultPath(), window.scrollY);
+  });
+  window.addEventListener("beforeunload", function(){
+    saveProgress(currentPath() || lastPath || defaultPath(), window.scrollY);
+  });
   window.addEventListener("resize", function(){
     if(window.innerWidth>900) closeDrawers();
   });
   preview.addEventListener("mouseleave", hidePreview);
   document.addEventListener("click", hidePreview);
-  renderExplorer("");
+  buildFilterOptions();
+  buildSearchDocs();
+  renderSearchResults();
   route();
   renderMath(main);
 })();
@@ -778,6 +993,12 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     aria-label="切换深浅色模式"><span class="theme-glyph">浅</span></button>
   </div>
   <input id="search" type="search" placeholder="搜索标题 / 域 / 类型">
+  <div class="filter-row">
+   <select id="domain-filter" aria-label="按域筛选"><option value="">全部域</option></select>
+   <select id="type-filter" aria-label="按类型筛选"><option value="">全部类型</option></select>
+   <select id="source-filter" aria-label="按来源筛选"><option value="">全部来源</option></select>
+  </div>
+  <div id="search-results" class="search-results" hidden></div>
   <div class="view-switcher" aria-label="站点视图">
    <button id="graph-open" class="view-switcher-btn" type="button">图谱</button>
    <button id="quiz-open" class="view-switcher-btn" type="button">自测题</button>
@@ -931,6 +1152,8 @@ def render_html(
             "next": following,
             "backlinks": backlinks.get(page["rel"], []),
             "obsidian_uri": page.get("obsidian_uri") or "",
+            "aliases": page.get("aliases") or [],
+            "source_refs": page.get("source_refs") or [],
         })
 
     articles.extend([
@@ -951,6 +1174,7 @@ def render_html(
     payload = {
         "pages": payload_pages,
         "tree": build_explorer_tree(pages),
+        "filters": site_data.build_filter_options(pages),
         "graph": graph_payload,
         "quiz": quiz_items,
         "propositions": proposition_items,

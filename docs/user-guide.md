@@ -384,7 +384,8 @@ python scripts/pipeline.py export-site --with-images   # 输出目录形态，�
 - **包含**：全部 published 页正文、按「域 → 类型 → 页面」分层的可折叠 Explorer、本页 TOC
   （滚动高亮当前小节）、域 / 类型 / 页名面包屑、按 Explorer 顺序的上一页 / 下一页、
   反向链接面板、wikilink 悬停摘要、全库图谱视图、本页局部图谱、「在 Obsidian 中打开」、
-  自测题库与命题总表聚合视图、跟随系统并可手动切换的深色 / 浅色模式、全文搜索、折叠自测题、表格 / 代码 /
+  自测题库与命题总表聚合视图、标题+正文分权重搜索、结果片段与键盘操作、域/类型/来源筛选、
+  别名检索、阅读进度记忆、跟随系统并可手动切换的深色 / 浅色模式、全文搜索、折叠自测题、表格 / 代码 /
   行内与块级公式、响应式（窄屏 Explorer 与 TOC 折叠为抽屉）。
 - **与前两个不同：它不接发布钩子，只在你手动跑时重建。**
   它是重量级分发动作（数 MB），每次 lint 都重建纯属浪费。落完新书想更新站点，手动跑一次即可。
@@ -449,7 +450,7 @@ python scripts/pipeline.py export-site --with-images   # 输出目录形态，�
 | `rebuild-propositions` | 从 published 页的具名命题（`**命题（名）**：…`）重建命题总表 `propositions.generated.md`（全库结论清单+回链；收尾 lint 自动重建） | — | — | `... rebuild-propositions` |
 | `rebuild-source-images` | 从窗口难页图 ⋈ 当前轮窗口写集重建 `source-images.generated.md` 难页原图索引（page 级=写该页时所读窗口的难页原图，可能含同窗邻近上下文；source 级=无法证明具体页归属、整源显式标注；普通 markdown 链接不嵌图；收尾 lint 自动重建） | — | — | `... rebuild-source-images` |
 | `export-anki` | 把全库自测题（题干+success 后代答案+回链）导成 `anki-export.generated.tsv`，Anki 原生导入即可排程；首字段题干作去重键，跨页重复题干确定性消歧并软警告 | — | — | `... export-anki` |
-| `export-site` | 把 published 正文导成 `pipeline-workspace/exports/site/study-kb.html` 单文件离线站点（域/类型 Explorer、本页 TOC、面包屑、上一页/下一页、反链/悬停预览/全库与局部图谱/自测题/命题/深浅色、callout/表格/公式/代码/搜索/响应式；默认不打包图片，`--with-images` 改为输出 `site/` 目录并相对路径引用原图/缩略图，不再 base64 内联；手动分发动作，**不接发布钩子**） | — | `--with-images` | `... export-site` |
+| `export-site` | 把 published 正文导成 `pipeline-workspace/exports/site/study-kb.html` 单文件离线站点（域/类型 Explorer、本页 TOC、面包屑、上一页/下一页、反链/悬停预览/全库与局部图谱/自测题/命题/深浅色、标题+正文搜索/结果片段/快捷键/上下键跳转、域/类型/来源筛选、别名检索、阅读进度记忆、callout/表格/公式/代码/响应式；默认不打包图片，`--with-images` 改为输出 `site/` 目录并相对路径引用原图/缩略图，不再 base64 内联；手动分发动作，**不接发布钩子**） | — | `--with-images` | `... export-site` |
 | `apply-obsidian-style` | 落地学习库 CSS 观感片段（纯配置，幂等） | — | — | `... apply-obsidian-style` |
 
 **预处理（零 LLM，顺序固定，幂等跳过）：**

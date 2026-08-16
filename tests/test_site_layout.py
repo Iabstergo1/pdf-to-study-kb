@@ -167,6 +167,8 @@ def test_render_html_payload_has_toc_breadcrumbs_and_prev_next(tmp_path):
         {"label": "A", "kind": "page", "target": "domains/d/concepts/a.md"},
     ]
     assert payload["pages"][2]["toc"][0]["id"] == "p2-h0"
+    assert payload["pages"][0]["aliases"] == []
+    assert payload["pages"][0]["source_refs"] == []
     assert payload["tree"][0]["domain"] == "总览"
 
 
@@ -253,3 +255,42 @@ def test_graph_view_base64_uses_utf8_text_decoder_on_the_browser_side(tmp_path):
         re.DOTALL,
     ).group(1).strip()
     assert base64.b64decode(encoded).decode("utf-8") == graph_html
+
+
+def test_render_html_has_c_search_filters_aliases_and_progress(tmp_path):
+    pages = [{
+        "rel": "domains/d/concepts/a.md", "title": "A", "domain": "d",
+        "type": "concept", "body": "正文", "aliases": ["甲"],
+        "source_refs": ["book-a"],
+    }]
+
+    html = site_layout.render_html(
+        pages,
+        vault=tmp_path / "wiki",
+        with_images=False,
+        katex_assets=_fake_katex(),
+        render_page_body=lambda body, page_set, vault, with_images: "<p>正文</p>",
+    )
+    match = re.search(
+        r'<script id="pages-data" type="application/json">(.*?)</script>',
+        html,
+        re.DOTALL,
+    )
+    payload = json.loads(match.group(1))
+
+    assert payload["pages"][0]["aliases"] == ["甲"]
+    assert payload["pages"][0]["source_refs"] == ["book-a"]
+    assert payload["filters"]["domains"] == [{
+        "value": "domain:d", "label": "d"
+    }]
+    assert payload["filters"]["types"] == ["concept"]
+    assert payload["filters"]["sources"] == ["book-a"]
+    assert 'id="search-results"' in html
+    assert 'id="domain-filter"' in html
+    assert 'id="type-filter"' in html
+    assert 'id="source-filter"' in html
+    assert "ctrlKey" in html
+    assert "study-kb-reading-progress" in html
+    assert "score" in html
+    assert "open && open[typeKey]" in html
+    assert "open && open[domainKey]" in html

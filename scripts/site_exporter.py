@@ -36,6 +36,27 @@ render_page_body = site_render.render_page_body
 load_katex = site_render.load_katex
 
 
+def _string_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return [str(value)]
+
+
+def _source_refs(value) -> list[str]:
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else [value]
+    out = []
+    for item in items:
+        if isinstance(item, dict) and item.get("source"):
+            out.append(str(item["source"]))
+        else:
+            out.append(str(item))
+    return out
+
+
 def _vault_pages(vault: Path) -> list[dict]:
     """Published non-derived pages, sorted by vault-relative path."""
     out: list[dict] = []
@@ -51,7 +72,9 @@ def _vault_pages(vault: Path) -> list[dict]:
         ptype = str(meta.get("type") or "")
         out.append({"rel": rel, "title": title, "domain": domain,
                     "type": ptype, "body": body,
-                    "obsidian_uri": wiki_gate.obsidian_uri(vault, rel)})
+                    "obsidian_uri": wiki_gate.obsidian_uri(vault, rel),
+                    "aliases": _string_list(meta.get("aliases")),
+                    "source_refs": _source_refs(meta.get("source_refs"))})
     return out
 
 

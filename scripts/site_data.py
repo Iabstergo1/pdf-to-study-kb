@@ -226,3 +226,35 @@ def build_proposition_items(pages: list[dict]) -> list[dict]:
                 "statement": statement,
             })
     return items
+
+
+def build_filter_options(pages: list[dict]) -> dict:
+    """Return C2 filter values using the same navigation-domain model as Explorer."""
+    domains: dict[str, str] = {}
+    types: set[str] = set()
+    sources: set[str] = set()
+    for page in pages:
+        if page["rel"].startswith("__view:"):
+            continue
+        branch = classify_page(page)
+        domains[branch["key"]] = branch["label"]
+        types.add(str(page.get("type") or ""))
+        sources.update(str(item) for item in (page.get("source_refs") or []))
+
+    def domain_order(item):
+        key, _label = item
+        if key == OVERVIEW_BRANCH:
+            return 0
+        if key == CROSS_DOMAIN_BRANCH:
+            return 1
+        return 2
+
+    ordered_domains = [
+        {"value": key, "label": domains[key]}
+        for key, _label in sorted(domains.items(), key=domain_order)
+    ]
+    return {
+        "domains": ordered_domains,
+        "types": sorted(types),
+        "sources": sorted(sources),
+    }

@@ -327,7 +327,7 @@ pdf-to-study-kb/
 | `rebuild-propositions` | 从 published 页的具名命题重建 `propositions.generated.md` 命题总表（结论句+回链，名字即锚点不编号；收尾 lint 自动重建，域内重名软警告） | — |
 | `rebuild-source-images` | 从窗口难页图 ⋈ 当前轮窗口写集重建 `source-images.generated.md` 难页原图索引（page 级=写该页时所读窗口的难页原图，可能含同窗邻近上下文；source 级=无法证明具体页归属、整源显式标注；普通 markdown 链接、不嵌图；收尾 lint 自动重建） | — |
 | `export-anki` | 把全库自测题（题干+success 后代答案+回链）导成 `anki-export.generated.tsv`，Anki 原生导入即可排程；首字段题干作去重键，跨页重复题干确定性消歧并软警告 | — |
-| `export-site` | 把 published 正文导成 `pipeline-workspace/exports/site/study-kb.html` 单文件离线站点（域/类型 Explorer、本页 TOC、面包屑、上一页/下一页、反链/悬停预览/全库与局部图谱/自测题/命题/深浅色、callout/表格/公式/代码/搜索/响应式；默认不打包图片，`--with-images` 改为输出 `site/` 目录并相对路径引用原图/缩略图，不再 base64 内联；手动分发动作，**不接发布钩子**） | `--with-images` |
+| `export-site` | 把 published 正文导成 `pipeline-workspace/exports/site/study-kb.html` 单文件离线站点（域/类型 Explorer、本页 TOC、面包屑、上一页/下一页、反链/悬停预览/全库与局部图谱/自测题/命题/深浅色、标题+正文搜索/结果片段/快捷键/上下键跳转、域/类型/来源筛选、别名检索、阅读进度记忆、callout/表格/公式/代码/响应式；默认不打包图片，`--with-images` 改为输出 `site/` 目录并相对路径引用原图/缩略图，不再 base64 内联；手动分发动作，**不接发布钩子**） | `--with-images` |
 | `apply-obsidian-style` | 落地学习库观感 CSS snippet + merge `appearance.json`（幂等，纯配置层零内容改动） | — |
 
 ### 预处理（零 LLM，顺序固定，幂等跳过）
@@ -610,6 +610,22 @@ OS 级调度提供的是收敛式重试，而非“一次完成”的保证：�
 > [!TIP]
 > **frontmatter 是承重的**（Dataview 字段 + lint 全靠它），不能删。若觉得它显示在正文开头影响阅读：Obsidian → **Settings → Editor → "Properties in document" 选 "Hidden"**——文件照旧、阅读时不显示。
 > **关系图（Graph）过于密集**通常源于"汇总页对每个概念都建立 wikilink"形成的中心化 hub；写页规范已要求仅连接真实的强关系（见 ingest skill 阶段 D），汇总页只保留核心的若干链接，其余以普通文本表述。
+
+---
+
+## 🧭 网页阅读模式
+
+`export-site` 是第二个一等阅读入口，输出单个自包含 HTML：
+
+```powershell
+python scripts/pipeline.py export-site              # 默认：单文件，不带图片
+python scripts/pipeline.py export-site --with-images # site/ 目录 + 原图/缩略图
+```
+
+站点内提供域/类型 Explorer、本页 TOC、面包屑、上一页/下一页、反向链接、悬停预览、
+完整图谱与局部图谱、自测题/命题视图、标题+正文分权重搜索、域/类型/来源筛选、
+别名检索、阅读进度记忆和深浅色模式。无需托管或 GitHub Pages，直接复制 HTML 或整个
+`site/` 目录分发。演示截图/录屏占位留待后续补充。
 
 ---
 
