@@ -368,12 +368,19 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 
 ```powershell
 python scripts/pipeline.py export-site                 # 默认：不打包图片
-python scripts/pipeline.py export-site --with-images   # 打包 assets（体积暴涨，会打印警告）
+python scripts/pipeline.py export-site --with-images   # 输出目录形态，包含原图与缩略图
 ```
 
 - **产物**：`pipeline-workspace/exports/site/study-kb.html` —— **单个自包含 HTML**。
   KaTeX（公式）与字体全部内嵌 base64，**无 CDN、不发任何网络请求**，断网可读。
 - **怎么用**：浏览器直接打开；复制这一个文件到手机/U 盘/发给别人即可阅读，对方不需要装任何东西。
+- **`--with-images` 已从 base64 内联改为目录形态**：输出 `site/` 整个目录，
+  `study-kb.html + assets/`。`assets/` 下同时放原图与 PyMuPDF 生成的缩略图，
+  HTML 用相对路径引用；复制整个 `site/` 目录后仍可离线看图。
+- **原书难页栏**：concept / topic / comparison / synthesis 四类知识页中，
+  只有 P2 page 级归因的页面才显示；source 台账页不显示。语义与
+  `source-images.generated.md` 一致：这些图是“写该页时所读窗口的难页原图”，
+  可能包含同窗邻近上下文，**不等同于关于该页概念的插图**。
 - **包含**：全部 published 页正文、按「域 → 类型 → 页面」分层的可折叠 Explorer、本页 TOC
   （滚动高亮当前小节）、域 / 类型 / 页名面包屑、按 Explorer 顺序的上一页 / 下一页、
   反向链接面板、wikilink 悬停摘要、全库图谱视图、本页局部图谱、「在 Obsidian 中打开」、
@@ -442,7 +449,7 @@ python scripts/pipeline.py export-site --with-images   # 打包 assets（体积�
 | `rebuild-propositions` | 从 published 页的具名命题（`**命题（名）**：…`）重建命题总表 `propositions.generated.md`（全库结论清单+回链；收尾 lint 自动重建） | — | — | `... rebuild-propositions` |
 | `rebuild-source-images` | 从窗口难页图 ⋈ 当前轮窗口写集重建 `source-images.generated.md` 难页原图索引（page 级=写该页时所读窗口的难页原图，可能含同窗邻近上下文；source 级=无法证明具体页归属、整源显式标注；普通 markdown 链接不嵌图；收尾 lint 自动重建） | — | — | `... rebuild-source-images` |
 | `export-anki` | 把全库自测题（题干+success 后代答案+回链）导成 `anki-export.generated.tsv`，Anki 原生导入即可排程；首字段题干作去重键，跨页重复题干确定性消歧并软警告 | — | — | `... export-anki` |
-| `export-site` | 把 published 正文导成 `pipeline-workspace/exports/site/study-kb.html` 单文件离线站点（域/类型 Explorer、本页 TOC、面包屑、上一页/下一页、反链/悬停预览/全库与局部图谱/自测题/命题/深浅色、callout/表格/公式/代码/搜索/响应式；默认不打包图片，`--with-images` 显式打包并打印体积警告；手动分发动作，**不接发布钩子**） | — | `--with-images` | `... export-site` |
+| `export-site` | 把 published 正文导成 `pipeline-workspace/exports/site/study-kb.html` 单文件离线站点（域/类型 Explorer、本页 TOC、面包屑、上一页/下一页、反链/悬停预览/全库与局部图谱/自测题/命题/深浅色、callout/表格/公式/代码/搜索/响应式；默认不打包图片，`--with-images` 改为输出 `site/` 目录并相对路径引用原图/缩略图，不再 base64 内联；手动分发动作，**不接发布钩子**） | — | `--with-images` | `... export-site` |
 | `apply-obsidian-style` | 落地学习库 CSS 观感片段（纯配置，幂等） | — | — | `... apply-obsidian-style` |
 
 **预处理（零 LLM，顺序固定，幂等跳过）：**

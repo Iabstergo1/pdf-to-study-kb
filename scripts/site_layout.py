@@ -28,6 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import site_data
+import site_media
 
 
 _HEADING_RE = re.compile(r"<h([1-6])\b[^>]*>(.*?)</h\1>", re.DOTALL | re.IGNORECASE)
@@ -182,6 +183,14 @@ align-items:flex-start;min-width:0}
 font-size:10px;background:var(--panel-muted);color:var(--muted)}
 .nav-item.active .badge{background:rgba(255,255,255,.2);color:#fff}
 #local-graph-slot,#backlinks{margin-top:22px;border-top:1px solid var(--line);padding-top:16px}
+.source-pages-panel{margin-top:34px;border-top:1px solid var(--line);padding-top:18px}
+.source-pages-note{font-size:12.5px;line-height:1.6;color:var(--muted);margin:6px 0 12px}
+.source-pages-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));
+gap:10px}
+.source-page-thumb{display:block;border:1px solid var(--line);border-radius:8px;
+overflow:hidden;background:var(--panel-muted);min-height:84px}
+.source-page-thumb img{width:100%;height:112px;object-fit:contain;display:block;
+background:var(--panel-muted)}
 #local-graph{height:210px;position:relative;overflow:hidden;border:1px solid var(--line);
 border-radius:8px;background:var(--panel-muted)}
 #local-graph svg{width:100%;height:100%;display:block}
@@ -858,6 +867,7 @@ def render_html(
     graph_view_html: str = "",
     quiz_items: list[dict] | None = None,
     proposition_items: list[dict] | None = None,
+    source_media: dict[str, list[dict]] | None = None,
 ) -> str:
     """Build the complete single-file reading interface from rendered pages."""
     vault_path = Path(vault)
@@ -904,7 +914,9 @@ def render_html(
             f'{_html_escape(page["type"])}{obsidian_html}</div>'
             f'</header><div class="page-body">{body_html}</div>'
             f'{_render_page_nav(previous_entry, following_entry)}'
-            f'<div data-slot="source-pages" aria-hidden="true"></div></article>'
+            f'<div data-slot="source-pages" aria-hidden="true">'
+            f'{site_media.render_source_panel((source_media or {}).get(page["rel"], []))}'
+            f'</div></article>'
         )
         payload_pages.append({
             "path": page["rel"],

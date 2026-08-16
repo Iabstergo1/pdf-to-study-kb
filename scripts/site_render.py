@@ -89,29 +89,12 @@ def _replace_wikilinks(text: str, page_set: set[str]) -> str:
     return "".join(out)
 
 
-def _image_data_uri(vault: Path, src: str) -> str | None:
-    if src.startswith(("http://", "https://", "data:")):
-        return None
-    candidate = (vault / src).resolve()
-    if not candidate.is_file():
-        return None
-    ext = candidate.suffix.lower()
-    mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
-            "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml"}.get(
-        ext.lstrip("."), "application/octet-stream")
-    b64 = base64.b64encode(candidate.read_bytes()).decode("ascii")
-    return f"data:{mime};base64,{b64}"
-
-
 def _replace_images(text: str, page_set: set[str], vault: Path, with_images: bool) -> str:
+    # B-2: --with-images no longer inlines body images. Source-page media is
+    # staged as separate files; D-1 means published bodies have no images anyway.
     def repl(match: re.Match) -> str:
         alt = match.group(1) or "图"
-        if not with_images:
-            return alt
-        uri = _image_data_uri(vault, match.group(2))
-        if uri is None:
-            return alt
-        return f'<img alt="{_html_escape(alt, quote=True)}" src="{uri}">'
+        return alt
 
     return _IMAGE.sub(repl, text)
 

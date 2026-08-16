@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -25,6 +26,7 @@ import mdpage
 import graph_html
 import site_data
 import site_layout
+import site_media
 import site_render
 import wiki_gate
 
@@ -82,8 +84,28 @@ def _graph_view_html(vault: Path, graph_payload: dict) -> str:
     )
 
 
+def _source_panel_rels(pages: list[dict]) -> set[str]:
+    knowledge_types = {"concept", "topic", "comparison", "synthesis"}
+    return {page["rel"] for page in pages if page.get("type") in knowledge_types}
+
+
+def _page_asset_mapping(vault: Path, workspace: Path) -> dict[str, list[str]]:
+    markdown = wiki_gate.build_source_images(vault, workspace)
+    return site_media.load_page_assets(markdown)
+
+
+def _reset_site_assets(site_dir: Path) -> None:
+    root = site_dir.resolve()
+    assets_dir = (root / "assets").resolve()
+    if assets_dir.parent != root:
+        raise RuntimeError(f"unexpected assets directory: {assets_dir}")
+    if assets_dir.exists():
+        shutil.rmtree(assets_dir)
+
+
 def _render_html(pages: list[dict], vault: Path, with_images: bool,
-                 katex_assets: dict) -> str:
+                 katex_assets: dict,
+                 source_media: dict[str, list[dict]] | None = None) -> str:
     graph_payload = _graph_payload(vault)
     quiz_items = site_data.build_quiz_items(
         pages, site_render.render_page_body, vault=vault, with_images=with_images
@@ -99,6 +121,7 @@ def _render_html(pages: list[dict], vault: Path, with_images: bool,
         graph_view_html=_graph_view_html(vault, graph_payload),
         quiz_items=quiz_items,
         proposition_items=proposition_items,
+        source_media=source_media,
     )
 
 
@@ -107,10 +130,19 @@ def build_site(vault: str | Path, workspace: str | Path | None = None, *,
                katex_assets: dict | None = None) -> str:
     """Build the self-contained site HTML (pure: reads only, no timestamps)."""
     vault = Path(vault)
+    workspace = Path(workspace) if workspace is not None else vault.parent
     pages = _vault_pages(vault)
     if katex_assets is None:
         katex_assets = load_katex(vendor_dir)
-    return _render_html(pages, vault, with_images, katex_assets)
+    source_media = None
+    if with_images:
+        mapping = _page_asset_mapping(vault, workspace)
+        source_media = site_media.describe_source_media(
+            mapping, only_rels=_source_panel_rels(pages)
+        )
+    return _render_html(
+        pages, vault, with_images, katex_assets, source_media=source_media
+    )
 
 
 def write_site(vault: str | Path, workspace: str | Path | None = None, *,
@@ -121,8 +153,22 @@ def write_site(vault: str | Path, workspace: str | Path | None = None, *,
     pages = _vault_pages(vault)
     if katex_assets is None:
         katex_assets = load_katex(vendor_dir)
-    html = _render_html(pages, vault, with_images, katex_assets)
     out = workspace / "pipeline-workspace" / "exports" / "site" / "study-kb.html"
     out.parent.mkdir(parents=True, exist_ok=True)
+    source_media = None
+    if with_images:
+        _reset_site_assets(out.parent)
+        mapping = _page_asset_mapping(vault, workspace)
+        source_media = site_media.stage_image_files(
+            vault,
+            out.parent,
+            mapping,
+            only_rels=_source_panel_rels(pages),
+        )
+    else:
+        _reset_site_assets(out.parent)
+    html = _render_html(
+        pages, vault, with_images, katex_assets, source_media=source_media
+    )
     out.write_text(html, encoding="utf-8", newline="\n")
     return SiteResult(path=out, page_count=len(pages))

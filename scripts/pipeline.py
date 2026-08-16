@@ -1325,7 +1325,8 @@ def cmd_export_site(args):
                                       with_images=args.with_images)
     size = result.path.stat().st_size
     if args.with_images:
-        print(f"[WARN] 已启用 --with-images；产物可能包含大量 base64 图片，体积 = {size} bytes")
+        total = sum(p.stat().st_size for p in result.path.parent.rglob("*") if p.is_file())
+        print(f"[WARN] 已启用 --with-images；站点目录体积 = {total} bytes")
     print(f"[OK] export-site -> {result.page_count} 页 -> {result.path} ({size} bytes)")
 
 

@@ -327,7 +327,7 @@ pdf-to-study-kb/
 | `rebuild-propositions` | 从 published 页的具名命题重建 `propositions.generated.md` 命题总表（结论句+回链，名字即锚点不编号；收尾 lint 自动重建，域内重名软警告） | — |
 | `rebuild-source-images` | 从窗口难页图 ⋈ 当前轮窗口写集重建 `source-images.generated.md` 难页原图索引（page 级=写该页时所读窗口的难页原图，可能含同窗邻近上下文；source 级=无法证明具体页归属、整源显式标注；普通 markdown 链接、不嵌图；收尾 lint 自动重建） | — |
 | `export-anki` | 把全库自测题（题干+success 后代答案+回链）导成 `anki-export.generated.tsv`，Anki 原生导入即可排程；首字段题干作去重键，跨页重复题干确定性消歧并软警告 | — |
-| `export-site` | 把 published 正文导成 `pipeline-workspace/exports/site/study-kb.html` 单文件离线站点（域/类型 Explorer、本页 TOC、面包屑、上一页/下一页、反链/悬停预览/全库与局部图谱/自测题/命题/深浅色、callout/表格/公式/代码/搜索/响应式；默认不打包图片，`--with-images` 显式打包并打印体积警告；手动分发动作，**不接发布钩子**） | `--with-images` |
+| `export-site` | 把 published 正文导成 `pipeline-workspace/exports/site/study-kb.html` 单文件离线站点（域/类型 Explorer、本页 TOC、面包屑、上一页/下一页、反链/悬停预览/全库与局部图谱/自测题/命题/深浅色、callout/表格/公式/代码/搜索/响应式；默认不打包图片，`--with-images` 改为输出 `site/` 目录并相对路径引用原图/缩略图，不再 base64 内联；手动分发动作，**不接发布钩子**） | `--with-images` |
 | `apply-obsidian-style` | 落地学习库观感 CSS snippet + merge `appearance.json`（幂等，纯配置层零内容改动） | — |
 
 ### 预处理（零 LLM，顺序固定，幂等跳过）

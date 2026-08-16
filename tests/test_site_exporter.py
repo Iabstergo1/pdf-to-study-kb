@@ -116,7 +116,7 @@ def test_math_angle_and_entity_escape_roundtrip(tmp_path):
         assert html_mod.unescape(escaped) == source
 
 
-def test_with_images_keeps_p3_inline_base64_contract(tmp_path):
+def test_with_images_no_longer_inlines_body_images(tmp_path):
     vault = tmp_path / "wiki"
     vault.mkdir()
     (vault / "x.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
@@ -125,7 +125,7 @@ def test_with_images_keeps_p3_inline_base64_contract(tmp_path):
     inline = site.render_page_body(body, set(), vault, True)
     text_only = site.render_page_body(body, set(), vault, False)
 
-    assert inline.startswith('<img alt="插图" src="data:image/png;base64,')
+    assert inline == "<p>插图</p>\n"
     assert text_only == "<p>插图</p>\n"
 
 
@@ -162,6 +162,21 @@ def test_site_graph_view_routes_to_site_and_uses_wiki_obsidian_uri(tmp_path):
     assert wiki_gate.obsidian_uri(vault, "a.md") in html
 
 
+def test_source_panel_types_are_knowledge_types_not_source_ledgers():
+    pages = [
+        {"rel": "concept.md", "type": "concept"},
+        {"rel": "topic.md", "type": "topic"},
+        {"rel": "comparison.md", "type": "comparison"},
+        {"rel": "synthesis.md", "type": "synthesis"},
+        {"rel": "source.md", "type": "source"},
+        {"rel": "overview.md", "type": "overview"},
+    ]
+
+    assert site._source_panel_rels(pages) == {
+        "concept.md", "topic.md", "comparison.md", "synthesis.md"
+    }
+
+
 def test_build_site_deterministic_and_writes_self_contained(tmp_path):
     vault = tmp_path / "wiki"
     _page(vault, "overview.md",
@@ -178,3 +193,18 @@ def test_build_site_deterministic_and_writes_self_contained(tmp_path):
     result = site.write_site(vault, workspace=tmp_path, katex_assets=assets)
     assert result.path.read_text(encoding="utf-8") == one
     assert result.page_count == 2
+
+
+def test_default_write_site_removes_stale_assets_directory(tmp_path):
+    vault = tmp_path / "wiki"
+    _page(vault, "overview.md",
+          {"type": "overview", "status": "published", "domain": "root", "title": "总览"},
+          "正文。")
+    site.write_site(vault, workspace=tmp_path, katex_assets=_fake_katex())
+    assets = tmp_path / "pipeline-workspace" / "exports" / "site" / "assets"
+    assets.mkdir(parents=True, exist_ok=True)
+    (assets / "stale.png").write_bytes(b"stale")
+
+    site.write_site(vault, workspace=tmp_path, katex_assets=_fake_katex())
+
+    assert not assets.exists()
