@@ -47,7 +47,7 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 | `source_reuse.py` | published origin vault 的只读状态/来源文件/概念与主题页核验、mapping v1/v2 解析与覆盖集相等性、concept 与 topic 两维的目标归因边界、不可变 origin/target evidence 与 live target drift 分层 | `ReuseError`、`build_plan`、`write_evidence`、`write_source_page` |
 | `evidence_fs.py` | 两条零 LLM 旁路共用的证据落盘底座：路径边界、canonical JSON、流式哈希、vault 锁前置检查（纯函数、无业务语义；`AdoptionError`/`ReuseError` 都继承它的基类但互不为别名） | `EvidenceBoundaryError`、`sha256_file`、`json_bytes`、`resolved_inside`、`assert_direct_contained`、`reject_lock` |
 | `locks.py` | 单 vault 写锁（scope 固定 `"vault"`） | `acquire/release/heartbeat/is_stale/break_stale` |
-| `source_profile.py` | L1 逐页 profile + `needs_vision` 判定（公式/图/表/扫描信号）+ 可摄取格式单一真值 | `profile_source`、`profile_page`、`needs_vision_reasons`、`vision_tier`、`is_scanned_source`、`render_pages_png`、`INGESTABLE_FORMATS`、`PROFILER_VERSION="5"` |
+| `source_profile.py` | L1 逐页 profile + `needs_vision` 判定（公式/图/表/扫描信号）+ 可摄取格式单一真值 | `profile_source`、`profile_page`、`needs_vision_reasons`、`vision_tier`、`is_scanned_source`、`render_pages_png`、`count_markdown_image_refs`、`mask_markdown_code_spans`、`INGESTABLE_FORMATS`、`PROFILER_VERSION="6"` |
 | `source_convert.py` | L1 dispatcher：选后端 → 调后端 → 落 artifact | `convert`、`select_backend`、`classify_source`、`converted_input_hash` |
 | `source_backends/` | 三个解析后端 | `pymupdf_backend`、`markdown_backend`、`mineru_backend`、`mineru_runner` |
 | `source_artifacts.py` | L2 数据契约（blocks/parse_report/reconciliation 形状 + 序列化） | `SourceBlock`、`build_parse_report`、`build_reconciliation_report`、`ARTIFACT_VERSION="6"` |
@@ -701,7 +701,9 @@ byte/mtime no-op。
 
 ### 4.4 文档 / PDF / Markdown 转换流程
 
-1. `profile`：`profile_source` 按 fmt 分支——`md` 视为单页；`pdf` 用 PyMuPDF 逐页（先廉价预扫，整本扫描件早退）；
+1. `profile`：`profile_source` 按 fmt 分支——`md` 视为单页（`image_count` 由 `count_markdown_image_refs`
+   真实计数，标准 `![]()` / Obsidian `![[]]` 两种语法都计入，代码块/行内代码内的假引用已用
+   `mask_markdown_code_spans` 过滤，不再硬编码 0）；`pdf` 用 PyMuPDF 逐页（先廉价预扫，整本扫描件早退）；
    `docx/pptx` 返回空 pages（无轻量后端，auto 据 fmt 直接选 mineru）。每页算 `formula_symbols / n_draw /
    n_tables / image_count / needs_vision_reason / vision_tier`。
 2. `source-convert`：`select_backend(fmt, pages, backend, policy)` 选 `pymupdf / markdown / mineru`；
@@ -710,7 +712,15 @@ byte/mtime no-op。
    → `_sync_assets` 把难页 PNG 同步进 `wiki/assets/<src>/`。
    - **PyMuPDF 后端**：每页一个 `type=text` 块；难页 `get_pixmap(matrix=Matrix(3,3))` 渲整页 PNG + 写
      `asset_path/risk_flags`；`chapters_from_toc(doc.get_toc())` 切章。
-   - **Markdown 后端**：原文即 source.md；按 `_sections` 出 section 块。
+   - **Markdown 后端**：原文即 source.md；按 `_sections` 出 section 块。本地图片引用（标准
+     `![alt](path)` / Obsidian `![[path]]`，代码块内的假引用已过滤，支持一层平衡括号与
+     `path "title"` 写法）按原始 md 文件所在目录解析，扩展名在 `_sync_assets`/`build_source_images`
+     的下游同步白名单（png/jpg/jpeg）内才复制进 `assets/`（目标名 = 解析后绝对路径 sha256 前
+     12 位 + 原文件名，防止不同目录同名文件互相覆盖）；`asset_path` 挂到图片所属 section 的
+     既有块，不新建块（`windowing._pack_blocks` 假设块列表按文档顺序扁平排列，插入嵌套/重叠的
+     额外块会让它把该 section 的窗口范围错误收缩）。一个 section 有多张本地图时只挂第一张，
+     其余打 `multiple-local-images` risk_flag 并计入 `parse_report.warnings`；外链不下载，
+     本地解析不到或扩展名不在白名单内同样计入 warnings。
    - **MinerU 后端**：`_run_mineru` 在子进程跑 `mineru_runner`（`do_parse(backend="pipeline")`）→
      `normalize_content_list` 归一块（table→`t{n}`、image→`f{n}`，跨页续表共享 element_id）→
      `parse_middle_json` 算 per-page 识别置信度（低分页打 `ocr_low_confidence`）→ `render_source_md`
@@ -894,11 +904,12 @@ lint 违规 `frontmatter-incomplete`）。
 
 | 常量 | 当前值 | 折进哪个阶段缓存键 |
 |------|--------|---------------------|
-| `source_profile.PROFILER_VERSION` | `"5"` | profiled、converted |
+| `source_profile.PROFILER_VERSION` | `"6"` | profiled、converted |
 | `source_artifacts.ARTIFACT_VERSION` | `"6"` | converted |
 | `windowing.WINDOWING_VERSION` | `"5"` | windowed |
 | `chaptering.CHAPTERING_VERSION` | `"1"` | （章节切分） |
-| `mineru_backend.MINERU_ADAPTER_VERSION` | `"4"` | converted |
+| `mineru_backend.MINERU_ADAPTER_VERSION` | `"5"` | converted |
+| `markdown_backend.MARKDOWN_BACKEND_VERSION` | `"1"` | converted |
 | `thresholds.fingerprint()` | 动态（18 个 `_CACHE_KEYED` 阈值的 sha256 短指纹） | profiled、converted（env 覆盖阈值即失效缓存） |
 
 ---

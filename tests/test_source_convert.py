@@ -67,6 +67,22 @@ def test_profile_source_md_single_page(tmp_path):
     assert len(pages) == 1 and pages[0]["page"] == 1 and "needs_vision" in pages[0]
 
 
+def test_count_markdown_image_refs_counts_both_syntaxes():
+    text = "![alt](a.png) and ![[b.png]] and ![ext](https://x.com/c.png)"
+    assert source_profile.count_markdown_image_refs(text) == 3
+
+
+def test_count_markdown_image_refs_zero_when_none():
+    assert source_profile.count_markdown_image_refs("plain text, no images") == 0
+
+
+def test_profile_source_md_counts_real_images(tmp_path):
+    src = tmp_path / "n.md"
+    src.write_text("# T\n\n![a](fig1.png)\n\n![b](fig2.png)\n", encoding="utf-8")
+    pages = source_profile.profile_source(src, fmt="md")
+    assert pages[0]["image_count"] == 2
+
+
 source_convert = _load("source_convert")
 
 
@@ -340,6 +356,227 @@ def test_markdown_backend_section_blocks(tmp_path):
     assert res.report["routing_advice"]["recommended_backend"] == "markdown"
     assert res.report["section_count"] >= 2
     assert res.needs_vision_pages == []
+
+
+def test_markdown_backend_copies_local_image_and_links_block(tmp_path):
+    # asset_path 挂在已有的 section 块上（不新建重叠 block——windowing._pack_blocks 假设块
+    # 按文档顺序扁平排列，嵌套/重叠块会让它把 section 的窗口范围错误收缩，已用集成脚本验证过）。
+    import importlib
+    mb = importlib.import_module("source_backends.markdown_backend")
+    src_dir = tmp_path / "note_dir"
+    src_dir.mkdir()
+    img = src_dir / "fig.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 20)
+    src = src_dir / "n.md"
+    src.write_text("# A\n\n![公式](fig.png)\n\nbody\n", encoding="utf-8")
+    out_dir = tmp_path / "o"
+    res = mb.convert(src, out_dir=out_dir, input_hash="h")
+    a_block = next(b for b in res.blocks if b.heading_path == "A")
+    assert a_block.asset_path.startswith("assets/") and a_block.asset_path.endswith("fig.png")
+    copied = out_dir / a_block.asset_path
+    assert copied.is_file()
+    assert copied.read_bytes() == img.read_bytes()
+    assert "image" in a_block.risk_flags
+    assert a_block.page == 1
+    assert len(res.blocks) == 1  # 没有新增块，section 数不变
+
+
+def test_markdown_backend_same_basename_different_dirs_no_overwrite(tmp_path):
+    # 高优先级修复：两个不同目录下同名 fig.png（内容不同）不得互相覆盖。
+    import importlib
+    mb = importlib.import_module("source_backends.markdown_backend")
+    dir_a = tmp_path / "chapter1"
+    dir_a.mkdir()
+    (dir_a / "fig.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"A" * 20)
+    dir_b = tmp_path / "chapter1" / "sub"
+    dir_b.mkdir()
+    (dir_b / "fig.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"B" * 20)
+    src = dir_a / "n.md"
+    src.write_text("# A\n\n![一](fig.png)\n\n## B\n\n![二](sub/fig.png)\n", encoding="utf-8")
+    out_dir = tmp_path / "o"
+    res = mb.convert(src, out_dir=out_dir, input_hash="h")
+    a_block = next(b for b in res.blocks if b.heading_path == "A")
+    b_block = next(b for b in res.blocks if b.heading_path == "B")
+    assert a_block.asset_path != b_block.asset_path
+    a_bytes = (out_dir / a_block.asset_path).read_bytes()
+    b_bytes = (out_dir / b_block.asset_path).read_bytes()
+    assert a_bytes != b_bytes
+    assert a_bytes == (dir_a / "fig.png").read_bytes()
+    assert b_bytes == (dir_b / "fig.png").read_bytes()
+
+
+def test_markdown_backend_rejects_unsynced_image_extension(tmp_path):
+    # 中优先级修复：下游 _sync_assets / build_source_images 只处理 png/jpg/jpeg，
+    # markdown 后端不该复制其他格式给人"已可追溯"的假象——跳过并计入 warnings。
+    import importlib
+    mb = importlib.import_module("source_backends.markdown_backend")
+    src_dir = tmp_path / "note_dir_svg"
+    src_dir.mkdir()
+    (src_dir / "diagram.svg").write_text("<svg></svg>", encoding="utf-8")
+    src = src_dir / "n.md"
+    src.write_text("# A\n\n![图](diagram.svg)\n\nbody\n", encoding="utf-8")
+    out_dir = tmp_path / "o"
+    res = mb.convert(src, out_dir=out_dir, input_hash="h")
+    assert not (out_dir / "assets").exists()
+    assert all(b.asset_path is None for b in res.blocks)
+    assert any("diagram.svg" in w for w in res.report.get("warnings", []))
+
+
+def test_markdown_backend_ignores_fenced_code_image_syntax(tmp_path):
+    # 低优先级修复：代码块里演示 markdown 语法的文字不是真图片引用，即使同目录恰好有同名文件。
+    import importlib
+    mb = importlib.import_module("source_backends.markdown_backend")
+    src_dir = tmp_path / "note_dir_code"
+    src_dir.mkdir()
+    (src_dir / "fake.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 20)
+    src = src_dir / "n.md"
+    src.write_text("# A\n\n```markdown\n![示例](fake.png)\n```\n\nbody\n", encoding="utf-8")
+    out_dir = tmp_path / "o"
+    res = mb.convert(src, out_dir=out_dir, input_hash="h")
+    assert not (out_dir / "assets").exists()
+    assert all(b.asset_path is None for b in res.blocks)
+
+
+def test_markdown_backend_ignores_inline_code_image_syntax(tmp_path):
+    import importlib
+    mb = importlib.import_module("source_backends.markdown_backend")
+    src_dir = tmp_path / "note_dir_inline_code"
+    src_dir.mkdir()
+    (src_dir / "fake.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 20)
+    src = src_dir / "n.md"
+    src.write_text("# A\n\n行内代码 `![示例](fake.png)` 举例\n\nbody\n", encoding="utf-8")
+    out_dir = tmp_path / "o"
+    res = mb.convert(src, out_dir=out_dir, input_hash="h")
+    assert all(b.asset_path is None for b in res.blocks)
+
+
+def test_markdown_backend_handles_parenthesized_filename(tmp_path):
+    import importlib
+    mb = importlib.import_module("source_backends.markdown_backend")
+    src_dir = tmp_path / "note_dir_paren"
+    src_dir.mkdir()
+    (src_dir / "fig(1).png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 20)
+    src = src_dir / "n.md"
+    src.write_text("# A\n\n![图](fig(1).png)\n\nbody\n", encoding="utf-8")
+    out_dir = tmp_path / "o"
+    res = mb.convert(src, out_dir=out_dir, input_hash="h")
+    a_block = next(b for b in res.blocks if b.heading_path == "A")
+    assert a_block.asset_path is not None
+    assert not any("fig(1" in w for w in res.report.get("warnings", []))
+
+
+def test_count_markdown_image_refs_ignores_code_spans():
+    text = "见 ```\n![假](fake.png)\n``` 或行内 `![假2](fake2.png)`，真实的是 ![真](real.png)"
+    assert source_profile.count_markdown_image_refs(text) == 1
+
+
+def test_markdown_backend_handles_titled_image_link(tmp_path):
+    # 回归：标准 CommonMark 的 `path "title"` 写法不能因为路径解析改动就失配。
+    import importlib
+    mb = importlib.import_module("source_backends.markdown_backend")
+    src_dir = tmp_path / "note_dir_title"
+    src_dir.mkdir()
+    (src_dir / "fig.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 20)
+    src = src_dir / "n.md"
+    src.write_text('# A\n\n![图](fig.png "cap")\n\nbody\n', encoding="utf-8")
+    out_dir = tmp_path / "o"
+    res = mb.convert(src, out_dir=out_dir, input_hash="h")
+    a_block = next(b for b in res.blocks if b.heading_path == "A")
+    assert a_block.asset_path is not None and a_block.asset_path.endswith("fig.png")
+    assert source_profile.count_markdown_image_refs('![图](fig.png "cap")') == 1
+
+
+def test_markdown_backend_handles_space_in_filename(tmp_path):
+    # 回归：路径含空格（无 title）是合法且常见的本地文件名，不能被当成不匹配。
+    import importlib
+    mb = importlib.import_module("source_backends.markdown_backend")
+    src_dir = tmp_path / "note_dir_space"
+    src_dir.mkdir()
+    (src_dir / "my image.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 20)
+    src = src_dir / "n.md"
+    src.write_text("# A\n\n![图](my image.png)\n\nbody\n", encoding="utf-8")
+    out_dir = tmp_path / "o"
+    res = mb.convert(src, out_dir=out_dir, input_hash="h")
+    a_block = next(b for b in res.blocks if b.heading_path == "A")
+    assert a_block.asset_path is not None and a_block.asset_path.endswith("my image.png")
+    assert source_profile.count_markdown_image_refs("![图](my image.png)") == 1
+
+
+def test_markdown_backend_section_tail_survives_image(tmp_path):
+    # 回归：section 里图片后面还有正文，section 的 char_end 不能被图片位置"缩水"。
+    import importlib
+    mb = importlib.import_module("source_backends.markdown_backend")
+    src_dir = tmp_path / "note_dir_tail"
+    src_dir.mkdir()
+    (src_dir / "fig.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 20)
+    src = src_dir / "n.md"
+    src.write_text("# A\n\n![公式](fig.png)\n\n尾部正文在这里\n\n## B\n\nB 的内容\n",
+                    encoding="utf-8")
+    out_dir = tmp_path / "o"
+    res = mb.convert(src, out_dir=out_dir, input_hash="h")
+    a_block = next(b for b in res.blocks if b.heading_path == "A")
+    assert "尾部正文在这里" in a_block.text
+    assert res.source_md[a_block.char_start:a_block.char_end] == a_block.text
+
+
+def test_markdown_backend_external_image_not_copied(tmp_path):
+    import importlib
+    mb = importlib.import_module("source_backends.markdown_backend")
+    src = tmp_path / "n.md"
+    src.write_text("# A\n\n![云图](https://example.com/fig.png)\n\nbody\n", encoding="utf-8")
+    out_dir = tmp_path / "o"
+    res = mb.convert(src, out_dir=out_dir, input_hash="h")
+    assert not (out_dir / "assets").exists()
+    assert all(b.asset_path is None for b in res.blocks)
+
+
+def test_markdown_backend_missing_local_image_warns(tmp_path):
+    import importlib
+    mb = importlib.import_module("source_backends.markdown_backend")
+    src = tmp_path / "n.md"
+    src.write_text("# A\n\n![丢失](missing.png)\n\nbody\n", encoding="utf-8")
+    out_dir = tmp_path / "o"
+    res = mb.convert(src, out_dir=out_dir, input_hash="h")
+    assert all(b.asset_path is None for b in res.blocks)
+    assert any("missing.png" in w for w in res.report.get("warnings", []))
+
+
+def test_markdown_backend_wikilink_embed_image_copied(tmp_path):
+    import importlib
+    mb = importlib.import_module("source_backends.markdown_backend")
+    src_dir = tmp_path / "note_dir2"
+    src_dir.mkdir()
+    img = src_dir / "diagram.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"1" * 20)
+    src = src_dir / "n.md"
+    src.write_text("# A\n\n![[diagram.png]]\n\nbody\n", encoding="utf-8")
+    out_dir = tmp_path / "o"
+    res = mb.convert(src, out_dir=out_dir, input_hash="h")
+    a_block = next(b for b in res.blocks if b.heading_path == "A")
+    assert a_block.asset_path.startswith("assets/") and a_block.asset_path.endswith("diagram.png")
+    assert (out_dir / a_block.asset_path).read_bytes() == img.read_bytes()
+
+
+def test_markdown_backend_second_image_in_same_section_warned_not_linked(tmp_path):
+    # 同一 section 里第二张本地图片：字节仍复制（不丢），但 asset_path 只挂第一张
+    # （SourceBlock.asset_path 是单值字段），第二张计入 warnings，不静默。
+    import importlib
+    mb = importlib.import_module("source_backends.markdown_backend")
+    src_dir = tmp_path / "note_dir3"
+    src_dir.mkdir()
+    (src_dir / "fig1.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"1" * 20)
+    (src_dir / "fig2.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"2" * 20)
+    src = src_dir / "n.md"
+    src.write_text("# A\n\n![一](fig1.png)\n\n正文\n\n![二](fig2.png)\n", encoding="utf-8")
+    out_dir = tmp_path / "o"
+    res = mb.convert(src, out_dir=out_dir, input_hash="h")
+    a_block = next(b for b in res.blocks if b.heading_path == "A")
+    assert a_block.asset_path.endswith("fig1.png")
+    copied_names = {p.name for p in (out_dir / "assets").glob("*.png")}
+    assert any(n.endswith("fig1.png") for n in copied_names)
+    assert any(n.endswith("fig2.png") for n in copied_names)
+    assert any("fig2.png" in w for w in res.report.get("warnings", []))
+    assert "multiple-local-images" in a_block.risk_flags
 
 
 def test_pymupdf_backend_page_blocks_and_invariant(tmp_path):

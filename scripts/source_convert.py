@@ -157,14 +157,15 @@ def classify_source(fmt, profile_pages, *, backend, policy) -> dict:
 
 def converted_input_hash(raw_path, *, backend: str = "auto", policy: str = "conservative") -> str:
     """converted 阶段缓存键（单一真值，pipeline 与 convert 共用）：raw sha + PROFILER_VERSION +
-    ARTIFACT_VERSION + 请求的 backend + policy + MINERU_ADAPTER_VERSION——使切换 backend/policy
-    不复用彼此产物（state_store 不误判 converted up-to-date）。"""
-    from source_backends import mineru_backend
+    ARTIFACT_VERSION + 请求的 backend + policy + MINERU_ADAPTER_VERSION + MARKDOWN_BACKEND_VERSION
+    ——使切换 backend/policy 不复用彼此产物（state_store 不误判 converted up-to-date）。"""
+    from source_backends import mineru_backend, markdown_backend
     raw = Path(raw_path).read_bytes()
     return (hashlib.sha256(raw).hexdigest() + ":" + source_profile.PROFILER_VERSION
             + ":" + source_artifacts.ARTIFACT_VERSION
             + ":" + str(backend) + ":" + str(policy)
             + ":" + mineru_backend.MINERU_ADAPTER_VERSION
+            + ":" + markdown_backend.MARKDOWN_BACKEND_VERSION
             + ":" + thresholds.fingerprint())   # 覆盖检测/路由阈值即失效缓存、强制重算
 
 

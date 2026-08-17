@@ -20,7 +20,8 @@ import thresholds  # 检测阈值单一真值（env 可覆盖；调用点用 thr
 # 确定性 profiler 版本：needs_vision/公式信号启发式每次实质改动就 +1。
 # 折进 profile/convert 阶段的 input_hash，使启发式升级自动失效缓存、强制对任意来源重算
 # （否则 should_run_stage 只看 PDF sha，改了启发式也会 [skip]）。v2: 强/弱信号分层 + 代码页抑制。
-PROFILER_VERSION = "5"  # v5: 矩阵/matrix(通用结构词)+结构证据补符号化矩阵 + 整本扫描件 fail-closed(is_scanned_source)。
+PROFILER_VERSION = "6"  # v5: 矩阵/matrix(通用结构词)+结构证据补符号化矩阵 + 整本扫描件 fail-closed(is_scanned_source)。
+# v6: md 源 image_count 从硬编码 0 改真实计数（count_markdown_image_refs，排除代码块假引用）。
 
 # 可摄取来源格式的单一真值：add-source --fmt 的 choices、以及 reuse-source 判定 origin
 # 是否为一次正常 ingest 都读它。legacy-vault / external-vault-reuse 是旁路终态格式，
@@ -61,6 +62,27 @@ _CODE_HINT = re.compile(
     r">>>|\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\[ntr]|0x[0-9a-fA-F]+|"
     r"\b(?:def|class|import|from|return|lambda|self|None|True|False|print|yield|"
     r"except|finally|async|await|elif|assert)\b")
+
+# Markdown 图片引用：标准语法 ![alt](target) 与 Obsidian 内嵌语法 ![[target]]（两者独立计数，
+# 不互相排斥同一处匹配）。仅用于 needs_vision 的 image_count 信号，不判断本地/外链。
+# 标准语法的 target：默认吃到闭括号前的一切（含空格、引号 title），但遇到一层平衡括号
+# （`fig(1).png` 这类常见文件名）整体消费，不在其内部的 `)` 处提前截断。
+_MD_IMAGE_STD = re.compile(r"!\[[^\]]*\]\(((?:\([^()]*\)|[^)])+)\)")
+_MD_IMAGE_EMBED = re.compile(r"!\[\[([^\]]+)\]\]")
+
+_MD_FENCED_CODE = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
+_MD_INLINE_CODE = re.compile(r"`[^`\n]+`")
+
+
+def mask_markdown_code_spans(text: str) -> str:
+    """把围栏代码块与行内代码替换成等长空白（保留字符位置，供调用方按原始偏移定位）。
+    代码示例里演示 markdown 语法的文字（如 ``![假](fake.png)``）不是真实图片引用，
+    图片/公式检测都应先过这一层，否则会把代码样例误判成需要视觉证据的内容。"""
+    def _blank(m):
+        return re.sub(r"[^\n]", " ", m.group(0))
+    text = _MD_FENCED_CODE.sub(_blank, text)
+    text = _MD_INLINE_CODE.sub(_blank, text)
+    return text
 
 
 def looks_like_code(text: str) -> bool:
@@ -107,6 +129,14 @@ def is_scanned_source(pages: list, *, zero_text_ratio: float | None = None,
 def count_equation_lines(text: str) -> int:
     """域无关方程行计数：含等号且其后有数字/运算符的行（拍平公式页常残留多行）。"""
     return len(_EQ_LINE.findall(text))
+
+
+def count_markdown_image_refs(text: str) -> int:
+    """Markdown 源文本里的图片引用数（标准 `![]()` + Obsidian `![[]]`，本地/外链都计入，
+    代码块/行内代码里的假引用已排除）。供 md 源的 needs_vision image_count 信号；不做本地
+    文件解析（那是 markdown_backend 的事）。"""
+    text = mask_markdown_code_spans(text)
+    return len(_MD_IMAGE_STD.findall(text)) + len(_MD_IMAGE_EMBED.findall(text))
 
 
 _NUM = re.compile(r"\d+")
@@ -248,7 +278,8 @@ def profile_source(src_path, *, fmt: str) -> list[dict]:
     from pathlib import Path
     src = Path(src_path)
     if fmt == "md":
-        return [profile_page(1, src.read_text(encoding="utf-8"), image_count=0)]
+        text = src.read_text(encoding="utf-8")
+        return [profile_page(1, text, image_count=count_markdown_image_refs(text))]
     if fmt == "pdf":
         import fitz  # PyMuPDF（已装）
         doc = fitz.open(str(src))
