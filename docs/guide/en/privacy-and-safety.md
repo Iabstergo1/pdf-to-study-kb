@@ -8,6 +8,8 @@ Keys and authorization files live in the user configuration directory: %APPDATA%
 
 ## Material sent to models
 
+Git excludes source files under `books/`, `wiki/`, `pipeline-workspace/`, dependencies and build outputs by default. The repository ships code, empty-vault templates, offline rendering assets and synthetic test data, without the developer's books or knowledge base. Back up local data and the user configuration directory separately. Study JSON exports contain personal learning records, not source material or a full vault backup.
+
 Model calls occur when you explicitly start an image test, arbitration, AI ingest or an assistant workflow. Text and images read through the file tools go to the selected provider. Its service terms govern its handling of data. Deterministic preparation, maintenance commands and export do not call an LLM.
 
 ## Writes and recovery

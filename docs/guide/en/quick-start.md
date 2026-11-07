@@ -9,6 +9,7 @@ Use Node.js 22.19 or newer and Python 3.12. Reuse an existing study-kb Conda env
 ```powershell
 conda create -n study-kb python=3.12
 conda run -n study-kb python -m pip install -r requirements.txt
+conda activate study-kb
 ```
 
 Strict PDF review, scans, Word and PowerPoint parsing require MinerU. The Environment page provides instructions and never installs software for you.
@@ -38,6 +39,6 @@ If the browser does not open, copy the **complete URL** after `Study KB:` in the
 
 Knowledge assistant provides queries, saving, content review, queue review, semantic checks, retrospectives, reading analysis, pipeline diagnosis and skill evolution. Continue a query or hand it to Save. Questions and change approvals stay in the execution record across page navigation. Save creates candidates first, then asks before publication checks. Published source cards offer content review and targeted content rework.
 
-Maintenance tools expose all 59 Python CLI commands with their actual parameter descriptions, including vault adoption, cross-vault reuse, resealing, source relocation and concept promotion. Preview-based changes require a successful preview with identical arguments; apply and direct state changes require typing the exact target. Adoption operates on the existing wiki in the current workspace. Reuse needs an origin path and mapping file; it does not create mappings or merge content for you.
+Maintenance tools expose classified Python CLI commands with their actual parameter descriptions, including vault adoption, cross-vault reuse, resealing, source relocation and concept promotion. Use Reports & review for structured content-review registration and human batch acceptance. Preview-based changes require a successful preview with identical arguments; apply and direct state changes require typing the exact target. Adoption operates on the existing wiki in the current workspace. Reuse needs an origin path and mapping file; it does not create mappings or merge content for you.
 
 Skill evolution requires a clean Git checkout, creates an isolated branch for one skill in both trees, runs checks and stages a candidate. Only after reviewing the complete diff and typing its ID does adoption rerun checks, commit the isolated branch and fast-forward the project. The app does not commit your existing changes. Restart Node after code updates; the new version warns when a running server's code has changed.

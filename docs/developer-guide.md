@@ -2,12 +2,22 @@
 
 网页应用位于 `web/`：Fastify/Zod 服务调用 Python CLI，React/Vite/Tailwind 提供界面，pi 1.0.3 适配代码集中在服务端 `llm/`、`ingest/` 与 `skills/`。`npm ci` 使用锁定的 pi 子包版本；`npm test` 运行服务、Skill 工作流与隔离入库测试，`npm run check` 检查 TypeScript，`npm run build` 构建界面。Python 业务规则没有搬进 Node。维护表单来自 CLI 的只读 `--describe-commands`；新增命令须在服务端显式分类。
 
+### 从空克隆开发与验证
+
+先按[快速开始](guide/zh/quick-start.md)创建并激活 Python 环境。`wiki/`、`books/` 中的资料和 `pipeline-workspace/` 都是使用者本机数据；无需复制开发者数据库或已有知识页。网页“环境检查”可初始化空库，上传入口也会在需要时初始化。原型 `web/spike/` 仅用于历史能力验证，正式入口为 `web/server/src/index.ts`。
+
+在仓库根目录执行 `python -m pytest tests -q -m fast` 作日常检查，`python -m pytest tests -q` 作全量检查。测试会创建隔离工作区，不要给 pytest 设置指向真实资料库的 `STUDY_KB_ROOT`。网页测试需先在 `web/` 执行 `npm ci`；Windows 下设置 `$env:STUDY_KB_PYTHON = (Get-Command python).Source`，POSIX 下设置 `export STUDY_KB_PYTHON="$(command -v python)"`，然后执行 `npm run check`、`npm test`、`npm run build`。正式测试使用模拟模型与本地协议服务；真实登录、图像验证和书籍审查需要单独人工触发，可能消耗额度。原型测试另在 `web/spike/` 执行 `npm ci` 和 `npm test`。
+
+阅读证据与报告由 `reader_data.py` 提供；`user_study.py` 保存复习排期、事件、阅读位置及个人批注。`content_review.py` 通过 CLI 的 `begin/read/register/status/checks/close/accept` 固定审查范围、记录读取时版本、事务登记报告和问题，复查追加记录，人工验收保留历史。Markdown/JSON 报告可从 SQLite 重建；旧 YAML 只兼容读取，不补造历史版本。前后端分别见 `web/server/src/study.ts` 与 `web/client/src/{reports,study,reference}.tsx`。SQL 结构变更应更新 `state_store.SCHEMA` 并验证旧库兼容；业务规则不能复制进 Node。
+
+推送前执行 `python scripts/check_publishable.py --strict`，并检查 `git diff --cached --name-only` 不包含本机资料、凭据或运行数据。该检查扫描 Git 跟踪文件；工程报告留在忽略目录中，不作为面向新用户的安装依赖。
+
 `export-site --format json [--out DIR] [--with-images]` 调用 `site_exporter.write_site_data`，与 HTML 导出共用 `site_layout.build_content` 的正文和导航数据。JSON 默认目录为 `pipeline-workspace/exports/site-data/`，含 `site.json`、逐页 JSON、图谱、自测、命题和图谱 HTML。`arbitration-status --json` 返回候选数、决策数、待处理数/页码与 `needs_human` 图片信息。`ingest-stats --json` 的 `source.path` 是已有 raw_source artifact 的路径，用于恢复网页预处理表单；`windows.planned` 是已生成的窗口数（产物缺失时为 null），`windows.total` 保留原来的已启动窗口统计。
 
 > 本文面向开发者，描述本仓库的架构、模块职责、数据契约、命令层与测试。
 > 所有结论以**源码为准**。
 > 面向使用者的操作说明见 [用户使用说明](user-guide.md)。
-> 版本锚点：当前工作树（2026-08-02 增量核对）；**60 个 CLI 子命令**（含 `adopt-vault` 基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用、`reseal-source` 证据重封、`rebuild-source-images` 难页原图索引、`export-anki` 自测题导出与 `export-site` 静态站点导出）/ 11 个技能。测试数量以 `pytest --collect-only -q` 为准——本轮两次证明精确计数写进文档当场就腐烂，故不再保留任何快照。
+> 版本锚点：当前实现（2026-11-07 核对）；**60 个 CLI 子命令**（含 `adopt-vault` 基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用、`reseal-source` 证据重封、`rebuild-source-images` 难页原图索引、`export-anki` 自测题导出与 `export-site` 静态站点导出）/ 11 个技能。测试数量以 `pytest --collect-only -q` 为准——本轮两次证明精确计数写进文档当场就腐烂，故不再保留任何快照。
 > 2026-07-11 六阶段重构后的新机制（§7 已更新，其余章节以源码为准）：统一 callout 解析器
 > `page_rules.parse_callouts`（唯一语法入口，错误不吞节点）、渲染安全唯一实现 + **vault preflight
 > 事务隔离**（published 旧伤阻断 promote 但不回滚当前批）、`vault-lint` 全库健康门禁、归属≠记账
@@ -44,8 +54,8 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 
 | 模块 | 职责 | 关键符号 |
 |------|------|----------|
-| `pipeline.py` | CLI 分发 + 各阶段编排（每个 `cmd_*` 一个子命令，共 55 个） | `main()`、`cmd_*` 函数族、`_workspace_root()`、`_vault_dir()`、`_staging_dir()` |
-| `state_store.py` | 单一业务 SQLite 状态机（**8 张表**）+ 原子阶段 API + 轮次 token | `STAGES`、`NEXT`、`start_stage/complete_stage/fail_stage`、`should_run_stage`、`adopt_source`、`reuse_source`、`reopen_source`、`reset_source`、`RESETTABLE_TARGETS`、`resolve_review_proposals`、`source_stats`、`*_window`、`round_anchor`、`window_reads_in_round`、`export_source_rows`、`purge_source_ledgers` |
+| `pipeline.py` | CLI 分发 + 各阶段编排（60 个子命令） | `main()`、`cmd_*` 函数族、`_workspace_root()`、`_vault_dir()`、`_staging_dir()` |
+| `state_store.py` | 业务状态、个人学习与内容审查共用 SQLite（17 张业务表）+ 原子阶段 API + 轮次 token | `SCHEMA`、`STAGES`、`NEXT`、`start_stage/complete_stage/fail_stage`、`round_anchor`、`window_reads_in_round` |
 | `vault_adoption.py` | 既有 vault 的只读接管计划、ZIP/页面集合核验、不可变逐页证据、canonical source 页与历史基线/接管后 live drift 分层 | `AdoptionError`、`build_plan`、`write_evidence`、`write_source_page` |
 | `legacy_revision.py` | adopted legacy 页的请求校验、授权/pre/candidate/post sidecar、全 vault overlay lint、哈希链事件与可恢复切换；普通 lint/vault-lint 共用证据核验 | `LegacyRevisionError`、`run`、`evidence_findings`、`CONTRACT_VERSION` |
 | `source_reuse.py` | published origin vault 的只读状态/来源文件/概念与主题页核验、mapping v1/v2 解析与覆盖集相等性、concept 与 topic 两维的目标归因边界、不可变 origin/target evidence 与 live target drift 分层 | `ReuseError`、`build_plan`、`write_evidence`、`write_source_page` |
@@ -212,7 +222,7 @@ pdf-to-study-kb/
 │
 ├── scripts/                     # ⭐ 全部业务逻辑（零 LLM）
 │   ├── pipeline.py              # 唯一 CLI 入口（60 子命令）
-│   ├── state_store.py           # 状态机 SQLite（8 张表：sources/source_stage_runs/artifacts/
+│   ├── state_store.py           # 共用 SQLite（17 张业务表，流水线表含 sources/source_stage_runs/artifacts/
 │   │                            #   work_orders/source_locks/review_proposals/ingest_progress/
 │   │                            #   window_reads）
 │   ├── vault_adoption.py        # 既有 vault 只读计划 + 不可变证据 + 漂移拒绝
@@ -277,7 +287,7 @@ pdf-to-study-kb/
 │   #   （原 source/lesson/topic/comparison/synthesis 五个模板已删——D-4 后不再有强制小节标题，
 │   #    这些模板早已只剩测试对象、无运行时读取者）
 │
-└── tests/                       # 确定性测试 = 可执行规格（46 个测试文件，
+└── tests/                       # 确定性测试 = 可执行规格（文件集合以 tests/ 为准，
                                   #   含 test_graph_{model,analysis,data,html,lint,v2_e2e}
                                   #   + 运营层三件 test_ops_metrics_cli/test_doctor_cli/test_staging_clean_cli）
 ```
@@ -787,7 +797,7 @@ risk_flags / source_refs / chapter_ids`，注入 `source_id` + 据 page_start �
 
 ### 5.1 状态机 SQLite（`pipeline-workspace/state/study-kb.sqlite`）
 
-由 `state_store.SCHEMA` 创建，**8 张表**（`_ensure_round_columns` 对旧库幂等补 `round` 列）。
+由 `state_store.SCHEMA` 创建，17 张业务表：下面列出 8 张流水线表；个人学习另有 `study_cards/study_reviews/study_notes/study_state`，内容审查另有 `content_review_runs/content_review_reads/content_review_findings/content_review_acceptances/proposal_decisions`。`_ensure_round_columns` 对旧库幂等补 `round` 列。
 **谁创建**：`add-source` 起各 `cmd_*`；**稳定产物**（机器状态真值）。
 **轮次 token 语义（2026-07-18 P1）**：`work_orders.round` 由 `record_work_order` 每次 +1（workorder/
 reopen/重预处理换轮，lint 失败重试不换轮）；`window_reads.round` / `ingest_progress.round` 在落账时
@@ -801,7 +811,7 @@ reopen/重预处理换轮，lint 失败重试不换轮）；`window_reads.round`
 | `artifacts` | `id, source_id, kind, path, sha256, created_at` | `_raw_path`、workorder |
 | `work_orders` | `source_id, path, registry_hash, write_scope_json, created_at, round`（轮次 token，record 时 +1） | ingest-start、check-write、`round_anchor`（window-done/lint 轮次判定） |
 | `source_locks` | `scope, holder, pid, started_at, heartbeat_at` | 并发互斥、unlock、`reset-source` 拒绝持锁 source |
-| `review_proposals` | `id, source_id, target_path, kind, diff_path, reason, created_at, status(open/resolved)` | kb-review、skill-mine（只统计 open）、`proposals-resolve`（open→resolved 唯一写路径） |
+| `review_proposals` | `id, source_id, target_path, kind, diff_path, reason, created_at, status(open/resolved)` | kb-review、skill-mine（只统计 open）、`proposals-resolve`、`study-write/proposal-decision` 与 `content-review/close`（后两者保存处置依据） |
 | `ingest_progress` | `id, source_id, window_id, input_hash, started_at, finished_at, status, write_set_json, proposal_set_json, error, round`（start_window 盖当轮章并清旧 write/proposal），`UNIQUE(source_id,window_id)` | 断点续跑、lint 归属（lifetime）与**本轮记账**（round 相等 + finished）、`ingest-stats` 聚合 |
 | `window_reads` | `source_id, window_id, read_at, round`（show-window 落账盖当轮章），`UNIQUE(source_id,window_id)` | window-done fail-fast 本轮读窗校验、lint `window-unread-write`/`windows-unread`、`ingest-stats` 读窗审计 |
 
