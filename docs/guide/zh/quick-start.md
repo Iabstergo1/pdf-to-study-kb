@@ -4,7 +4,7 @@ Study KB 把资料转成可交叉阅读的概念知识库。所有文件留在�
 
 ## 准备环境
 
-需要 Node.js 22.19 或更高版本、Python 3.12。已有 study-kb Conda 环境时直接复用，不要重复安装。
+需要 Node.js 22.19 或更高版本、Python 3.12。已有 study-kb Conda 环境时直接复用，无需重建；代码更新后仍须在该环境运行 `python -m pip install -r requirements.txt` 补齐最新依赖（包括 fsrs）。
 
 ```powershell
 conda create -n study-kb python=3.12

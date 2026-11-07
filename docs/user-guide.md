@@ -36,7 +36,7 @@
 | 必需 | 说明 | 证据 |
 |------|------|------|
 | Python 3.12+ | 跑确定性 CLI | `requirements.txt`、README §安装 |
-| PyMuPDF + PyYAML（+ pytest） | **基础/开发依赖**：Markdown 与 PDF fast path 抽取、测试 | `requirements.txt` |
+| PyMuPDF + PyYAML + markdown-it-py + fsrs（+ pytest） | **基础/开发依赖**：Markdown 与 PDF fast path 抽取、测试 | `requirements.txt` |
 | MinerU | **生产格式依赖**：strict PDF 双审、扫描 PDF、DOCX、PPTX 必须安装（未装则 fail-closed） | `requirements.txt` 末尾 MinerU 段 / `scripts/install_mineru.py` |
 | Claude Code 或 Codex | 对话接口，**二选一即可**（确定性行为一致） | README §安装 |
 | **模型必须能识图（多模态）** | **硬要求**。难页证据是整页 PNG，`show-window` 只交给模型一个`assets=…png` 路径；纯文本模型打不开、不报错、静默改用拍平文本写作 | 本文 §2.1、`CLAUDE.md` §7 |
@@ -103,8 +103,8 @@ conda activate study-kb
 # ③ 装依赖
 python -m pip install -r requirements.txt
 
-# ④ 自检：核心依赖就位（应打印 PyMuPDF 与 PyYAML 版本）
-python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yaml.__version__)"
+# ④ 自检：导入核心依赖（通过后打印 PyMuPDF 与 PyYAML 版本）
+python -c "import fitz, yaml, markdown_it, fsrs; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yaml.__version__)"
 
 # ⑤ CJK 源/路径必设（每个新 PowerShell 会话都要设，或写进 $PROFILE）
 $env:PYTHONUTF8=1
@@ -334,8 +334,8 @@ Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 
 #### 5-A 用 Anki 复习（`export-anki`）
 
-本项目**只负责导出**：把全库 `[!question]` 自测题连折叠答案导成 Anki 可导入的 TSV。
-排程、判分、错题本、掌握度、手机同步全部交给 Anki——重造这些是净损失。
+`export-anki` 把全库 `[!question]` 自测题连折叠答案导成 Anki 可导入的 TSV。
+可在 Anki 中复习，也可在本地 Web 中通过现有 SQLite 与 FSRS 独立排程、评分；两端学习记录不自动同步，排程状态不写入知识正文。
 
 - **产物**：`wiki/anki-export.generated.tsv`（**每次发布自动重建**，无需手动跑）
 - **导入**：Anki → `文件` → `导入` → 选该文件。
@@ -502,7 +502,7 @@ python scripts/pipeline.py export-site --with-images   # 输出目录形态，�
 | `check-session` | query-session 目录契约检查；run_id 仅限单层目录名，saved 模式严格核对 canonical candidate 与 new-only 授权一一对应 | `--id <run_id>` | `--saved` |
 | `skill-mine` / `skill-gate` / `skill-stage` / `skill-adopt` | skill 自进化四步 | gate/stage/adopt 需 `--candidate` | `--base HEAD` |
 | `ingest-stats` | 只读"体检单"：窗口/返工、窗口账本估算 `pages_estimate`，以及按 vault `source_refs` 重建的精确交付清单 `page_inventory`（报告总页数只认后者；不含 token/费用） | `--source` | `--json` |
-| `review-coverage` | 只读统计历史 YAML 与 SQLite 登记的内容审查覆盖、发现及整源记录；缺少记录不能证明从未阅读。抽样与整源范围分别解释；当前版本与人工验收请查看网页“报告与待审”。未登记不算失败；指向不存在的页或不可恢复报告时非零退出 | — |
+| `review-coverage` | 只读统计历史 YAML 与 SQLite 登记的内容审查覆盖、发现及整源记录；缺少记录不能证明从未阅读。抽样与整源范围分别解释；当前版本与人工验收请查看网页“报告与待审”。未登记不算失败；指向不存在的页或不可恢复报告时非零退出 | — | — |
 | `sync-overview-sources` | 把 `overview.md` 里的来源台账索引块同步成"当前该有的样子"（**默认只打印计划，不改文件**；dry-run 会原样打印将被替换的那段，让你先看清会删什么）。当收尾 lint 报 `overview-source-unlinked` 时用它一键补齐；撤过库、改过书名也用它清掉过时条目。只动 `<!-- sources-index -->` 标记块，你自己写的正文不会被碰；万一那对标记被写坏了（少一个、多一对、次序颠倒），它会**直接罢工并请你手工处理**，不会去猜边界 | — | `--apply` |
 | `proposals-resolve` | **给已修复的错误销账**（不然 `skill-mine` 的 backlog 会越攒越脏）；**默认只列清单不改库**，看清楚了再加 `--apply` | `--id <行号>` 或 `--signature <类型>` | `--source`（配合 `--signature` 限定某源）`--all-matching`（批量落库必须加）`--apply` |
 | `reset-source` | **状态机"倒带键"**：某一步卡死重跑不了时，安全回退到更早的阶段。**默认只打印计划不改库**，确认后加 `--apply` | `--source --to {registered,profiled,converted,windowed,workorder_ready}` | `--apply` |
@@ -763,7 +763,7 @@ $env:PYTHONUTF8=1
 conda create -y -n study-kb python=3.12
 conda activate study-kb
 python -m pip install -r requirements.txt
-python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yaml.__version__)"
+python -c "import fitz, yaml, markdown_it, fsrs; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yaml.__version__)"
 python scripts/install_mineru.py            # 可选：PDF 严格验收 / 扫描件 / DOCX / PPTX
 
 # ── 2. 新建空库 + 填学习目标（已有 vault 则跳过） ──
@@ -843,6 +843,6 @@ python -m pytest tests -q --basetemp=$bt                                  # 全�
 | 网页学习命令 | 用途 | 输入 |
 |---|---|---|
 | `reader-info` | 只读原文对照、报告关联、内容审查历史及安全 Markdown 展示 | `--action`、`--payload` 或 `--stdin` |
-| `content-review --action begin/read/register/status/checks/close/accept` | 审查读取时记录版本，结构化登记报告与问题，复检旧问题并由用户确认整批验收；不改正文。 |
+| `content-review` | 审查读取时记录版本，结构化登记报告与问题；复检问题并由用户确认整批验收，不改正文 | `--action begin/read/register/status/checks/close/accept`、`--payload` 或 `--stdin` |
 | `study-read` | 读取个人计划、自测题、批注、历史及 JSON 备份 | `--action`、`--payload` 或 `--stdin` |
 | `study-write` | 保存复习评分/撤销、阅读进度、批注、计划设置及预览/应用备份导入 | `--action`、`--payload` 或 `--stdin` |

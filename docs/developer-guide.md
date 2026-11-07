@@ -60,6 +60,13 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 | `legacy_revision.py` | adopted legacy 页的请求校验、授权/pre/candidate/post sidecar、全 vault overlay lint、哈希链事件与可恢复切换；普通 lint/vault-lint 共用证据核验 | `LegacyRevisionError`、`run`、`evidence_findings`、`CONTRACT_VERSION` |
 | `source_reuse.py` | published origin vault 的只读状态/来源文件/概念与主题页核验、mapping v1/v2 解析与覆盖集相等性、concept 与 topic 两维的目标归因边界、不可变 origin/target evidence 与 live target drift 分层 | `ReuseError`、`build_plan`、`write_evidence`、`write_source_page` |
 | `evidence_fs.py` | 两条零 LLM 旁路共用的证据落盘底座：路径边界、canonical JSON、流式哈希、vault 锁前置检查（纯函数、无业务语义；`AdoptionError`/`ReuseError` 都继承它的基类但互不为别名） | `EvidenceBoundaryError`、`sha256_file`、`json_bytes`、`resolved_inside`、`assert_direct_contained`、`reject_lock` |
+| `reader_data.py` | 阅读原文证据、报告归属与审查历史 | `read、review_status` |
+| `user_study.py` | 复习排期、事件、批注和个人备份 | `read、write` |
+| `content_review.py` | 结构化审查登记、复检与人工整批验收 | `execute` |
+| `site_*.py` | HTML/JSON 渲染、导航、题库与原图导出 | `site_exporter.build_site_data` |
+| `resume_packet.py` | 恢复包与首次摘要初始化检查 | `build_resume_packet` |
+| `retraction.py` | 撤库证据与确定性删除计划 | `pipeline.py retract-source` |
+| `check_publishable.py` | Git 跟踪内容中的本机信息检查 | `scan` |
 | `locks.py` | 单 vault 写锁（scope 固定 `"vault"`） | `acquire/release/heartbeat/is_stale/break_stale` |
 | `source_profile.py` | L1 逐页 profile + `needs_vision` 判定（公式/图/表/扫描信号）+ 可摄取格式单一真值 | `profile_source`、`profile_page`、`needs_vision_reasons`、`vision_tier`、`is_scanned_source`、`render_pages_png`、`count_markdown_image_refs`、`mask_markdown_code_spans`、`INGESTABLE_FORMATS`、`PROFILER_VERSION="6"` |
 | `source_convert.py` | L1 dispatcher：选后端 → 调后端 → 落 artifact | `convert`、`select_backend`、`classify_source`、`converted_input_hash` |
@@ -181,7 +188,7 @@ content-routing.md` 定义的 5 分类：理论型/方法型/案例型/参考型
 
 ### 1.9 外部依赖
 
-- **必需**：`pymupdf>=1.23.0`（`import fitz`）、`pyyaml>=6.0`、`pytest>=7.0`（测试）。
+- **必需**：`pymupdf>=1.23.0`（`import fitz`）、`pyyaml>=6.0`、`markdown-it-py>=4.0`、`fsrs==6.3.2`、`pytest>=7.0`（测试）。
 - **可选**：`mineru[core]`（PDF 严格验收的 structural reviewer + 扫描/低文本 PDF、DOCX/PPTX 的 primary
   解析）。安装通过 `scripts/install_mineru.py`。仅用 MinerU 的 `pipeline` 后端（禁 vlm/hybrid）。
 - 标准库：`sqlite3`、`argparse`、`hashlib`、`json`、`subprocess`、`importlib.metadata`。
@@ -215,13 +222,17 @@ pdf-to-study-kb/
 ├── AGENTS.md                    # Codex 项目真值（与 CLAUDE.md 内容对等）
 ├── README.md                    # 用户向总文档（中文）
 ├── LICENSE
-├── requirements.txt             # 依赖：pymupdf + pyyaml + pytest（MinerU 注释为可选）
+├── requirements.txt             # 依赖：pymupdf + pyyaml + markdown-it-py + fsrs + pytest（MinerU 注释为可选）
 ├── pytest.ini                   # 测试 marker 注册（fast/cli/slow/skill/realbook）
 ├── .gitignore                   # 忽略 wiki/ pipeline-workspace/ books/* tmp/ 等运行时态
 ├── .gitattributes
 │
+├── web/                     # 本地 Fastify/React 应用、锁定依赖与隔离测试；spike/ 为验证原型
 ├── scripts/                     # ⭐ 全部业务逻辑（零 LLM）
 │   ├── pipeline.py              # 唯一 CLI 入口（60 子命令）
+│   ├── reader_data.py / user_study.py / content_review.py  # 阅读证据、个人学习与审查登记
+│   ├── site_*.py / graph_html.py             # 网页与离线阅读导出
+│   ├── resume_packet.py / retraction.py / check_publishable.py # 恢复包、撤库、发布检查
 │   ├── state_store.py           # 共用 SQLite（17 张业务表，流水线表含 sources/source_stage_runs/artifacts/
 │   │                            #   work_orders/source_locks/review_proposals/ingest_progress/
 │   │                            #   window_reads）
@@ -305,7 +316,7 @@ pdf-to-study-kb/
 
 | 操作 | 用户命令/动作 | 实现文件 | 函数/类/入口 | 输入 | 输出/产物 | 副作用 | 测试/证据 | 实现状态 |
 |---|---|---|---|---|---|---|---|---|
-| 克隆 + 装依赖 | `pip install -r requirements.txt` | `requirements.txt` | — | — | 安装 pymupdf/pyyaml/pytest | 装包 | `requirements.txt` 第 10-18 行 | 准确 |
+| 克隆 + 装依赖 | `pip install -r requirements.txt` | `requirements.txt` | — | — | 安装 requirements.txt 中的核心及测试依赖 | 装包 | `requirements.txt` | 准确 |
 | 自检依赖 | `python -c "import fitz, yaml; ..."` | — | `fitz.VersionBind` | — | 打印版本 | 无 | README §安装 | 准确 |
 | 装 MinerU（可选） | `python scripts/install_mineru.py [--dry-run]` | `install_mineru.py` | `main`、`select_wheel`、`detect_driver_cuda` | `nvidia-smi` | 装 `mineru[core]` + 匹配 CUDA torch | 装包/替换 torch | `tests/test_install_mineru.py` | 准确 |
 
@@ -872,7 +883,7 @@ stage/artifact SHA 并恢复 published。`next` 会把崩溃残留显示为 `res
 `workorder.yaml` 与 `parse_report.json` 落盘时记录产出它的代码版本（`git rev-parse HEAD`）；
 工作树不干净 → `<commit>-dirty`；不在 git 仓库内 → `unknown`，不 fail。
 既存 artifact 缺该字段 → 视为 `unknown`，**不迁移、不提升 `ARTIFACT_VERSION`**——
-`ARTIFACT_VERSION` 同时是 converted 阶段缓存键的组成部分，提升会让三本已摄取书缓存全部失效并触发重转。
+`ARTIFACT_VERSION` 同时是 converted 阶段缓存键的组成部分，提升会让既有已摄取书缓存全部失效并触发重转。
 
 ### 5.3 Vault 产物（`wiki/`，用户可见输出）
 
@@ -1165,8 +1176,7 @@ content-routing.md`）按 5 分类（理论/方法/案例/参考/观点）判断
 同源）与具名命题
 `**命题（名）**：…`（名字即锚点，v1 不编号，域内重名软警告不阻断），以及从 `windows.jsonl` 难页图
 ⋈ 窗口写集出的难页原图入口（page 级=写该页时所读窗口的难页原图，可能含同窗邻近上下文；source 级=无法证明具体页归属、整源显式标注）；四者与知识图谱同为 **publish-isolated**
-（失败只 warn、不阻断发布），lint 收尾自动重建。Anki 只导出、不调度：间隔重复/判分/错题本/掌握度全部交
-Anki，本项目不新开个人学习状态持久化层。
+（失败只 warn、不阻断发布），lint 收尾自动重建。`export-anki` 只导出 TSV，不在知识正文写排程状态。使用者可选 Anki，或在本地 Web 中通过既有 SQLite（`study-read/study-write` + FSRS）独立排程复习；两端记录不自动同步。
 
 **`export-site` 是手动分发动作，不是 vault 派生层**（P3 `site_exporter.py` 于 2026-08-14，
 P4 批次 A/B-1 拆为 `site_render.py` / `site_layout.py` / `site_data.py`，
@@ -1211,12 +1221,11 @@ B-2 增加 `site_media.py`）：把 published 正文渲染成
 
 ---
 
-*（本文档以源码为准描述当前实现；2026-07-10 对照 `main` 分支 `8cd4db0` 全量核对，§1-§8 每处结论均已
-逐条核实，不再有未核对的历史快照残留。）*
-
 | 网页学习命令 | 用途 | 输入 |
 |---|---|---|
 | `reader-info` | 只读原文对照、报告关联、内容审查历史及安全 Markdown 展示 | `--action`、`--payload` 或 `--stdin` |
-| `content-review --action begin/read/register/status/checks/close/accept` | 审查读取时记录版本，结构化登记报告与问题，复检旧问题并由用户确认整批验收；不改正文。 |
+| `content-review` | 审查读取时记录版本，结构化登记报告与问题；复检问题并由用户确认整批验收，不改正文 | `--action begin/read/register/status/checks/close/accept`、`--payload` 或 `--stdin` |
 | `study-read` | 读取个人计划、自测题、批注、历史及 JSON 备份 | `--action`、`--payload` 或 `--stdin` |
 | `study-write` | 保存复习评分/撤销、阅读进度、批注、计划设置及预览/应用备份导入 | `--action`、`--payload` 或 `--stdin` |
+
+*实现说明随源码更新；本轮核对范围为网页环境检查、学习与审查功能、依赖和文档索引。*

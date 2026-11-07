@@ -4,7 +4,7 @@ Study KB turns source material into a connected concept library. Files stay loca
 
 ## Prepare the environment
 
-Use Node.js 22.19 or newer and Python 3.12. Reuse an existing study-kb Conda environment; do not install it again.
+Use Node.js 22.19 or newer and Python 3.12. Reuse an existing study-kb Conda environment without recreating it. After updating the code, run `python -m pip install -r requirements.txt` in that environment to install current dependencies, including fsrs.
 
 ```powershell
 conda create -n study-kb python=3.12

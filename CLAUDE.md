@@ -112,7 +112,7 @@ and merged only by a human `skill-adopt`. Protocols: `docs/skill-runtime/{routin
   Markdown page unchanged from the workorder snapshot; the agent then reads the chapter map and creates
   its initial routing/digest. Lost digests after activity or page changes still fail closed.
 - **Interpreter = the project `study-kb` conda env** (`conda create -n study-kb python=3.12`, then
-  `requirements.txt`: PyMuPDF / PyYAML / pytest; optional MinerU per `requirements.txt` / `scripts/install_mineru.py`).
+  `requirements.txt`: PyMuPDF / PyYAML / markdown-it-py / fsrs / pytest; optional MinerU per `requirements.txt` / `scripts/install_mineru.py`).
 - **Generated state is not git:** `wiki/` and `pipeline-workspace/` are gitignored per-machine runtime state.
 
 ## 7. Capability boundaries

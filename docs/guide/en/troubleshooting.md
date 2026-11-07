@@ -4,7 +4,7 @@
 
 Reconnect using the launch URL printed in the terminal. Do not mix localhost and 127.0.0.1 credentials. Close an earlier service if port 8765 is occupied.
 
-If modules are missing, check that the selected Python belongs to study-kb. Paste the full executable path in settings and rerun Environment. An existing environment need not be reinstalled.
+If modules are missing, check that the selected Python belongs to study-kb. Paste the full executable path in settings and run `python -m pip install -r requirements.txt` in that environment, then rerun Environment. Missing fsrs affects learning summaries and review scheduling; the environment need not be recreated.
 
 ## Models and images
 

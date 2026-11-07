@@ -89,8 +89,8 @@ cd pdf-to-study-kb
 # ② 安装依赖（建议用虚拟环境 / Conda 环境，避免污染全局）
 python -m pip install -r requirements.txt
 
-# ③ 自检：核心依赖就位（应打印 PyMuPDF 与 PyYAML 版本）
-python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yaml.__version__)"
+# ③ 自检：导入核心依赖（通过后打印 PyMuPDF 与 PyYAML 版本）
+python -c "import fitz, yaml, markdown_it, fsrs; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yaml.__version__)"
 ```
 
 装好后，用 **Claude Code 或 Codex** 打开本项目根目录，即可进入下一节的对话流程。
@@ -99,7 +99,7 @@ python -c "import fitz, yaml; print('PyMuPDF', fitz.VersionBind, '| PyYAML', yam
 > **Claude Code 与 Codex 二选一即可**：两者各读自己的项目真值（[`CLAUDE.md`](CLAUDE.md) / [`AGENTS.md`](AGENTS.md)）与各自的 skill 树（[`.claude/skills/`](.claude/skills/) 与 [`.agents/skills/`](.agents/skills/)，两树**协议 / 语义对等**——仅各自的 project-truth 指针不同），且**调用同一套 CLI、操作同一个 `wiki/`**，因此确定性行为一致；调用界面、权限与写作质量因 agent 而异。你**无需两个都装**。
 
 > [!NOTE]
-> **基础/开发依赖**：**PyMuPDF + PyYAML + markdown-it-py**（+ pytest 供测试；见 [`requirements.txt`](requirements.txt)）——覆盖 Markdown 与 PDF fast path，`markdown-it-py` 供 `export-site` 渲染正文 Markdown。**生产格式依赖**：strict PDF 双审、扫描 PDF、DOCX、PPTX **必须装 MinerU**（见下方 TIP，未装则 fail-closed、不伪装成功）。
+> **基础/开发依赖**：**PyMuPDF + PyYAML + markdown-it-py + fsrs**（+ pytest 供测试；见 [`requirements.txt`](requirements.txt)）——覆盖 Markdown 与 PDF fast path，`markdown-it-py` 供 `export-site` 渲染正文 Markdown。**生产格式依赖**：strict PDF 双审、扫描 PDF、DOCX、PPTX **必须装 MinerU**（见下方 TIP，未装则 fail-closed、不伪装成功）。
 > `export-site` 的 KaTeX 已离线 vendor 到 [`scripts/vendor/katex/`](scripts/vendor/katex/)，**该目录进入 Git**（当前未被 ignore）——否则新 clone 无法离线构建单文件站点。
 > 默认 fast path 视觉保真走 route B：`source-convert` 用 PyMuPDF 抽文本，**难页（公式 / 矢量图 / 表 / 图表标题）高召回渲染整页 PNG**，由 ingest **读图**保真（公式写 KaTeX）。fast path 不依赖重型 OCR/ML。
 
@@ -259,9 +259,13 @@ pdf-to-study-kb/
 ├── CLAUDE.md                 # Claude Code 的项目真值（架构 / 约束 / 协作）
 ├── AGENTS.md                 # Codex 的项目真值（与 CLAUDE.md 对等）
 ├── README.md                 # 本文件
-├── requirements.txt          # 基础依赖 PyMuPDF + PyYAML + markdown-it-py + pytest（生产格式另需 MinerU，见末尾可选段）
+├── requirements.txt          # 基础依赖 PyMuPDF + PyYAML + markdown-it-py + fsrs + pytest（生产格式另需 MinerU，见末尾可选段）
+├── web/                     # 本地 Fastify/React 应用、锁定依赖与隔离测试；spike/ 为验证原型
 ├── scripts/
 │   ├── pipeline.py           # ⭐ 唯一 CLI 入口（60 子命令，全部业务逻辑在此）
+│   ├── reader_data.py / user_study.py / content_review.py  # 阅读证据、个人学习与审查登记
+│   ├── site_*.py / graph_html.py             # 网页与离线阅读导出
+│   ├── resume_packet.py / retraction.py / check_publishable.py # 恢复包、撤库、发布检查
 │   ├── state_store.py / locks.py                # 业务 SQLite 状态机 / 单-ingest 并发锁
 │   ├── vault_adoption.py / legacy_revision.py / source_reuse.py
 │   │                                           # 既有 vault 接管 / adopted 页受控修订 / 跨库来源复用
@@ -702,6 +706,6 @@ python -m pytest tests --collect-only -q --basetemp=$bt
 | 网页学习命令 | 用途 | 输入 |
 |---|---|---|
 | `reader-info` | 只读原文对照、报告关联、内容审查历史及安全 Markdown 展示 | `--action`、`--payload` 或 `--stdin` |
-| `content-review --action begin/read/register/status/checks/close/accept` | 审查读取时记录版本，结构化登记报告与问题，复检旧问题并由用户确认整批验收；不改正文。 |
+| `content-review` | 审查读取时记录版本，结构化登记报告与问题；复检问题并由用户确认整批验收，不改正文 | `--action begin/read/register/status/checks/close/accept`、`--payload` 或 `--stdin` |
 | `study-read` | 读取个人计划、自测题、批注、历史及 JSON 备份 | `--action`、`--payload` 或 `--stdin` |
 | `study-write` | 保存复习评分/撤销、阅读进度、批注、计划设置及预览/应用备份导入 | `--action`、`--payload` 或 `--stdin` |

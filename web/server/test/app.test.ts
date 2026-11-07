@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import vm from 'node:vm';
-import { afterEach, test, expect } from 'vitest';
+import { afterEach, test, expect, vi } from 'vitest';
 import { createApp } from '../src/app.ts';
 import { repo, redact, type AppConfig } from '../src/config.ts';
 import { buildArgs } from '../src/engine/commands.ts';
@@ -21,6 +21,23 @@ function config(): AppConfig {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'study-kb-web-test-'));
   return { repo, root, config: path.join(root, 'private'), python: process.env.STUDY_KB_PYTHON || 'python', port: 8765, token: 'test-token' };
 }
+
+test.each([false, true])('environment check detects a missing FSRS dependency: %s', async missing => {
+  const c = config();
+  if (missing) fs.writeFileSync(path.join(c.root, 'fsrs.py'), "raise ModuleNotFoundError(\"No module named 'fsrs'\")\n");
+  vi.stubEnv('PYTHONPATH', c.root);
+  try {
+    const { app } = await createApp(c); close.push(() => app.close());
+    const response = await app.inject({ url: '/api/doctor', headers: { host: '127.0.0.1:8765', 'x-console-token': c.token } });
+    expect(response.statusCode).toBe(200);
+    const python = response.json().find((check: any) => check.id === 'python');
+    expect(python.ok).toBe(!missing);
+    if (missing) {
+      expect(python.detail).toContain("No module named 'fsrs'");
+      expect(python.fix).toContain('pip install -r requirements.txt');
+    }
+  } finally { vi.unstubAllEnvs(); }
+});
 test('session redaction preserves provider replay signatures without exempting text or tool arguments', () => {
   const models = new Models(config());
   const signature = 'gAAAA_fixture_sk-0123456789abcdef==';

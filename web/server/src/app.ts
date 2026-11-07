@@ -171,7 +171,7 @@ export async function createApp(c: AppConfig) {
     };
     const [major, minor] = process.versions.node.split('.').map(Number);
     checks.push({ id: 'node', ok: major > 22 || major === 22 && minor >= 19, detail: process.version, fix: 'Node.js >= 22.19' });
-    await check('python', () => runProcess(c.python, ['-c', 'import sys,fitz,yaml,markdown_it; print(sys.executable); print(sys.version)'], { cwd: c.repo, timeout: 20000 }), 'conda create -n study-kb python=3.12\nconda run -n study-kb python -m pip install -r requirements.txt');
+    await check('python', () => runProcess(c.python, ['-c', 'import sys,fitz,yaml,markdown_it,fsrs; print(sys.executable); print(sys.version)'], { cwd: c.repo, timeout: 20000 }), 'conda create -n study-kb python=3.12\nconda run -n study-kb python -m pip install -r requirements.txt');
     await check('pipeline', () => pipeline(c, ['status', '--json']));
     await check('mineru', () => runProcess(c.python, ['-c', 'import mineru; print("MinerU installed")'], { cwd: c.repo, timeout: 20000 }), 'conda run -n study-kb python scripts/install_mineru.py');
     await check('gpu', () => runProcess('nvidia-smi', ['--query-gpu=name,memory.total', '--format=csv,noheader'], { cwd: c.repo, timeout: 10000 }));
