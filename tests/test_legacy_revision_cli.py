@@ -491,6 +491,9 @@ def test_expired_prepared_operation_can_abort_but_cannot_finalize(tmp_path, monk
     with pytest.raises(legacy_revision.LegacyRevisionError, match="expired"):
         legacy_revision.run(workspace=tmp_path, source=SOURCE, request_path=request,
                             apply=True, lock_ttl_seconds=1800)
+    preview = legacy_revision.run(workspace=tmp_path, source=SOURCE, request_path=request,
+                                  abort=True, lock_ttl_seconds=1800)
+    assert preview["dry_run"] and preview["phase"] == "prepared"
     aborted = legacy_revision.run(workspace=tmp_path, source=SOURCE, request_path=request,
                                   apply=True, abort=True, lock_ttl_seconds=1800)
     assert aborted["phase"] == "aborted"
@@ -517,6 +520,12 @@ def test_partial_commit_can_rollback_without_rechecking_expiry(tmp_path, monkeyp
     monkeypatch.setattr(
         legacy_revision, "_now", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc))
     monkeypatch.setattr(legacy_revision, "_fault_point", original)
+    before_preview = {str(p): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    preview = legacy_revision.run(
+        workspace=tmp_path, source=SOURCE, request_path=request,
+        recover="rollback", lock_ttl_seconds=1800)
+    assert preview["dry_run"] and preview["phase"] == "committing"
+    assert before_preview == {str(p): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
     rolled = legacy_revision.run(
         workspace=tmp_path, source=SOURCE, request_path=request, apply=True,
         recover="rollback", lock_ttl_seconds=1800)
@@ -839,6 +848,10 @@ def test_abort_keeps_live_and_completed_live_drift_is_warning_only(tmp_path):
     request = _request(tmp_path)
     live = page.read_bytes()
     assert _run(_revise_args(request, apply=True), tmp_path).returncode == 0
+    before_preview = {str(p.relative_to(tmp_path)): p.read_bytes() for p in tmp_path.rglob('*') if p.is_file()}
+    preview = _run(_revise_args(request, "--abort"), tmp_path)
+    assert preview.returncode == 0 and "requested=abort" in preview.stdout
+    assert {str(p.relative_to(tmp_path)): p.read_bytes() for p in tmp_path.rglob('*') if p.is_file()} == before_preview
     aborted = _run(_revise_args(request, "--abort", apply=True), tmp_path)
     assert aborted.returncode == 0 and "aborted" in aborted.stdout
     assert page.read_bytes() == live

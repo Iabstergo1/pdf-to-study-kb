@@ -108,7 +108,7 @@ def test_leftover_basetemp_props_are_excluded(extra_args, mechanism):
 #: 全部来自 `.codegraph/*` 与 `pipeline-workspace/reports/*`——即"审计员在跑测试的同时
 #: 写报告"。危险面（`wiki/`、`pipeline-workspace/state`、`staging`）仍在射程内。
 _VOLATILE_SEGMENTS = frozenset({
-    "tmp", ".pytest_cache", "__pycache__", ".git", ".codegraph", "reports",
+    "tmp", ".pytest_cache", "__pycache__", ".git", ".codegraph", "reports", "node_modules",
 })
 
 
@@ -122,9 +122,11 @@ def _fingerprint(root: Path):
     if not root.exists():
         return None
     out = {}
-    for f in sorted(root.rglob("*")):
-        if not f.is_file():
-            continue
+    files = []
+    for directory, dirs, names in root.walk():
+        dirs[:] = [name for name in dirs if name not in _VOLATILE_SEGMENTS]
+        files.extend(directory / name for name in names)
+    for f in sorted(files):
         rel = f.relative_to(root)
         if _VOLATILE_SEGMENTS & set(rel.parts):
             continue

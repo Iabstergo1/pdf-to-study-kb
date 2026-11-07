@@ -130,11 +130,20 @@ def test_source_coverage_reads_scope_field_not_mere_registration(tmp_path):
     p1 = _src_page(vault, "domains/d/concepts/一.md", ["book"])
     p2 = _src_page(vault, "domains/d/concepts/二.md", ["book"])
     entries = {
-        p1: [{"date": "2026-08-12", "outcome": "no-findings", "scope": "whole-source"}],
-        p2: [{"date": "2026-08-12", "outcome": "no-findings", "scope": "per-page"}],
+        p1: [{"date": "2026-08-12", "source_id": "book", "outcome": "no-findings", "scope": "whole-source"}],
+        p2: [{"date": "2026-08-12", "source_id": "book", "outcome": "no-findings", "scope": "per-page"}],
     }
     row = pipeline._review_source_coverage(vault, [p1, p2], entries)[0]
     assert row["owned"] == 2 and row["whole"] == 1 and row["sampled"] == 1
+
+
+def test_source_coverage_does_not_transfer_old_review_through_shared_pages(tmp_path):
+    import pipeline
+    vault = tmp_path / "wiki"
+    shared = _src_page(vault, "domains/d/concepts/共享.md", ["old", "new"])
+    entries = {shared: [{"source_id": "old", "scope": "whole-source"}]}
+    by = {r["source"]: r for r in pipeline._review_source_coverage(vault, [shared], entries)}
+    assert by["old"]["whole"] == 1 and by["new"]["whole"] == 0
 
 
 def test_source_coverage_excludes_overview(tmp_path):

@@ -52,6 +52,45 @@ CREATE TABLE IF NOT EXISTS window_reads (
   source_id TEXT NOT NULL, window_id TEXT NOT NULL, read_at TEXT NOT NULL, round INTEGER,
   UNIQUE(source_id, window_id)
 );
+CREATE TABLE IF NOT EXISTS study_cards (
+  id TEXT PRIMARY KEY, revision TEXT NOT NULL, page TEXT NOT NULL,
+  data_json TEXT NOT NULL, schedule_json TEXT, version INTEGER NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS study_reviews (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE NOT NULL,
+  card_id TEXT NOT NULL, reviewed_at TEXT NOT NULL, rating INTEGER NOT NULL,
+  mode TEXT NOT NULL, scheduled INTEGER NOT NULL, revision TEXT NOT NULL,
+  previous_json TEXT, after_json TEXT NOT NULL, undone INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS study_notes (
+  id TEXT PRIMARY KEY, page TEXT NOT NULL, data_json TEXT NOT NULL,
+  version INTEGER NOT NULL, updated_at TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS study_state (
+  key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS content_review_runs (
+  id TEXT PRIMARY KEY, source_id TEXT NOT NULL, parent_id TEXT,
+  method TEXT NOT NULL, scope_json TEXT NOT NULL, source_total INTEGER NOT NULL,
+  created_at TEXT NOT NULL, completed_at TEXT, manifest_json TEXT, report_md TEXT
+);
+CREATE TABLE IF NOT EXISTS content_review_reads (
+  id TEXT PRIMARY KEY, run_id TEXT NOT NULL, path TEXT NOT NULL,
+  revision TEXT NOT NULL, read_at TEXT NOT NULL, content TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS content_review_findings (
+  run_id TEXT NOT NULL, finding_id TEXT NOT NULL, proposal_id INTEGER NOT NULL,
+  path TEXT NOT NULL, PRIMARY KEY(run_id, finding_id)
+);
+CREATE TABLE IF NOT EXISTS content_review_acceptances (
+  id TEXT PRIMARY KEY, run_id TEXT NOT NULL, token TEXT NOT NULL,
+  snapshot_json TEXT NOT NULL, accepted_at TEXT NOT NULL, note TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS proposal_decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, proposal_id INTEGER NOT NULL,
+  decision TEXT NOT NULL, reason TEXT NOT NULL, decided_at TEXT NOT NULL,
+  evidence_json TEXT NOT NULL
+);
 """
 
 # 旧库升级护栏：window_reads 是后加表，读/写它的 API 先确保表存在（幂等，不动既有表）。

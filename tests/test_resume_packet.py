@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -85,6 +86,7 @@ def _mk_env(tmp_path, *, stage="ingesting", digest="- done: 无\n- next: w0000",
 def _build(env, source_id="src1"):
     return resume_packet.build_resume_packet(
         db_path=env["db"], staging_dir=env["staging"], repo_root=env["repo"],
+        vault_dir=env["db"].parents[2] / "wiki",
         source_id=source_id)
 
 
@@ -139,6 +141,51 @@ def test_all_windows_finished_emits_phase_e_commands(tmp_path):
     assert "lint --source src1" in out
 
 
+def test_done_digest_resumes_finishing_only_after_all_windows(tmp_path):
+    env = _mk_env(tmp_path, resume_heading="## DONE", digest="全部窗口已完成，待综合整理")
+    for i in range(3):
+        state_store.start_window(env["db"], "src1", f"w{i:04d}", input_hash="h")
+        state_store.finish_window(env["db"], "src1", f"w{i:04d}", write_set_json='["concepts/existing.md"]', proposal_set_json='["Review-Queue/existing.md"]')
+    out = _build(env)
+    assert "phase=finish" in out and "## DONE" in out
+    assert "阶段 E" in out and "ingest-done --source src1" in out
+    assert "window-start --source" not in out
+    assert 'last_finished_window=w0002' in out
+    assert 'last_finished_writes=["concepts/existing.md"]' in out
+    assert 'last_finished_proposals=["Review-Queue/existing.md"]' in out
+
+
+def test_finish_inventory_separates_current_round_writes_from_source_pages(tmp_path):
+    env = _mk_env(tmp_path, resume_heading="## DONE", digest="所有窗口完成")
+    state_store.start_window(env["db"], "src1", "w0000", input_hash="h")
+    state_store.finish_window(env["db"], "src1", "w0000", write_set_json='["concepts/old.md"]')
+    state_store.record_work_order(env["db"], "src1", path=str(env["staging"] / "workorder.yaml"),
+                                  registry_hash="regh", write_scope_json=json.dumps(["domains/misc/**", "concepts/**"]))
+    for i in (1, 2):
+        state_store.start_window(env["db"], "src1", f"w{i:04d}", input_hash="h")
+        state_store.finish_window(env["db"], "src1", f"w{i:04d}", write_set_json=json.dumps([f"concepts/current{i}.md"]))
+    pages = {"concepts/unledgered.md": {"type": "concept", "status": "proposed", "source_refs": [{"source": "src1"}]},
+             "concepts/published.md": {"type": "concept", "status": "published", "source_refs": [{"source": "src1"}]},
+             "concepts/other.md": {"type": "concept", "status": "published", "source_refs": [{"source": "other"}]}}
+    for rel, meta in pages.items():
+        _load("mdpage").write_page(tmp_path / "wiki" / rel, meta, "Content.")
+    fields = dict(line.split("=", 1) for line in _build(env).splitlines() if "=" in line)
+    assert json.loads(fields["round_written_pages"]) == ["concepts/current1.md", "concepts/current2.md"]
+    assert json.loads(fields["source_pages"]) == ["concepts/published.md", "concepts/unledgered.md"]
+
+
+def test_next_window_info_does_not_require_an_updated_digest(tmp_path):
+    env = _mk_env(tmp_path)
+    state_store.start_window(env["db"], "src1", "w0000", input_hash="h")
+    state_store.finish_window(env["db"], "src1", "w0000", write_set_json="[]")
+    info = resume_packet.next_window_info(db_path=env["db"], staging_dir=env["staging"], source_id="src1")
+    assert info["finished"] == 1 and info["total"] == 3
+    assert info["next_window"]["window_id"] == "w0001"
+    assert info["next_window"]["hash"] == f"sha256:{_win_hash(env, 1)}"
+    assert "digest" not in info and len(json.dumps(info)) < 1000
+    assert "RESUME 未提及" in _err(env)  # Metadata never bypasses recovery validation.
+
+
 def test_window_progress_reads_ledger(tmp_path):
     env = _mk_env(tmp_path)
     state_store.start_window(env["db"], "src1", "w0000", input_hash="h")
@@ -162,6 +209,79 @@ def test_missing_digest_fail_closed(tmp_path):
     assert "digest" in _err(env)
 
 
+def _unstarted_env(tmp_path):
+    env = _mk_env(tmp_path, digest=None)
+    vault = tmp_path / "wiki"
+    vault.mkdir()
+    page = vault / "overview.md"
+    page.write_text("existing overview", encoding="utf-8")
+    wo_file = env["staging"] / "workorder.yaml"
+    wo = yaml.safe_load(wo_file.read_text(encoding="utf-8"))
+    wo.update(registry={"hash": ""}, write_scope=["overview.md", "concepts/**"],
+              concept_pages_snapshot=[], other_pages_snapshot=[{
+                  "path": "overview.md", "sha256": hashlib.sha256(page.read_bytes()).hexdigest()}])
+    wo_file.write_text(yaml.safe_dump(wo), encoding="utf-8")
+    state_store.record_work_order(env["db"], "src1", path=str(wo_file), registry_hash="",
+                                  write_scope_json=json.dumps(wo["write_scope"]))
+    (env["staging"] / "chapters.json").write_text("[]", encoding="utf-8")
+    return env
+
+
+def test_missing_digest_before_any_read_or_write_returns_initialization(tmp_path):
+    env = _unstarted_env(tmp_path)
+    out = _build(env)
+    assert "phase=initialize" in out
+    assert "next_window=w0000" in out
+    assert "chapters.json" in out and "content-routing.md" in out
+    assert "digest_status=not_created" in out
+    assert not (env["staging"] / "digest.md").exists()
+
+
+def test_initialization_relative_staging_uses_workspace_not_code_repo(tmp_path, monkeypatch):
+    import shutil
+    env = _unstarted_env(tmp_path)
+    shallow = tmp_path / "staging/src1"
+    shutil.copytree(env["staging"], shallow)
+    monkeypatch.chdir(tmp_path)
+    env["staging"] = Path("staging/src1")
+    assert "phase=initialize" in _build(env)
+    (tmp_path / "wiki/overview.md").write_text("changed", encoding="utf-8")
+    assert "digest" in _err(env)
+
+
+@pytest.mark.parametrize("activity", ["read", "running", "finished"])
+def test_missing_digest_after_window_activity_still_fails(tmp_path, activity):
+    env = _unstarted_env(tmp_path)
+    if activity == "read":
+        state_store.record_window_read(env["db"], "src1", "w0000")
+    else:
+        state_store.start_window(env["db"], "src1", "w0000", input_hash="h")
+        if activity == "finished":
+            state_store.finish_window(env["db"], "src1", "w0000", write_set_json="[]")
+    assert "digest" in _err(env)
+
+
+@pytest.mark.parametrize("change", ["edited", "added", "deleted"])
+def test_missing_digest_with_unaccounted_page_changes_still_fails(tmp_path, change):
+    env = _unstarted_env(tmp_path)
+    page = tmp_path / "wiki/overview.md"
+    if change == "edited":
+        page.write_text("changed", encoding="utf-8")
+    elif change == "deleted":
+        page.unlink()
+    else:
+        page = tmp_path / "wiki/concepts/new.md"
+        page.parent.mkdir()
+        page.write_text("unaccounted", encoding="utf-8")
+    assert "digest" in _err(env)
+
+
+def test_initialization_requires_chapter_map(tmp_path):
+    env = _unstarted_env(tmp_path)
+    (env["staging"] / "chapters.json").unlink()
+    assert "chapters.json" in _err(env)
+
+
 def test_digest_without_resume_block_fail_closed(tmp_path):
     env = _mk_env(tmp_path, resume_heading="## 备忘")
     assert "## RESUME" in _err(env)
@@ -170,7 +290,7 @@ def test_digest_without_resume_block_fail_closed(tmp_path):
 def test_digest_done_heading_fail_closed_with_phase_e_hint(tmp_path):
     env = _mk_env(tmp_path, resume_heading="## DONE")
     msg = _err(env)
-    assert "DONE" in msg and "ingest-done" in msg
+    assert "DONE" in msg and "未完窗口" in msg
 
 
 def test_resume_pointing_at_unknown_window_fail_closed(tmp_path):
@@ -182,8 +302,16 @@ def test_stale_resume_not_mentioning_next_fail_closed(tmp_path):
     # RESUME 只提已完成的 w0000（账本认为下一窗是 w0001）→ digest 过期，拒绝出包。
     env = _mk_env(tmp_path, digest="- next: w0000")
     state_store.start_window(env["db"], "src1", "w0000", input_hash="h")
-    state_store.finish_window(env["db"], "src1", "w0000", write_set_json="[]")
-    assert "w0001" in _err(env)
+    state_store.record_window_read(env["db"], "src1", "w0000")
+    state_store.finish_window(env["db"], "src1", "w0000", write_set_json='["concepts/choice.md"]')
+    before = (env["staging"] / "digest.md").read_bytes()
+    error = _err(env)
+    assert "w0001" in error and "不能只替换窗口编号" in error
+    evidence = json.loads(error.split("completed_windows=", 1)[1].split("\n", 1)[0])
+    assert evidence == [{"window_id": "w0000", "round": 1, "read_in_current_round": True,
+                         "input_hash": "h", "write_set_json": '["concepts/choice.md"]'}]
+    assert (env["staging"] / "digest.md").read_bytes() == before
+    assert "=== RESUME_PACKET" not in error
 
 
 def test_missing_workorder_yaml_fail_closed(tmp_path):

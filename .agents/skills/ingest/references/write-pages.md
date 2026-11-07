@@ -12,7 +12,7 @@ registry. If it aborts, regenerate the work order as prompted — **do not bypas
    本文件；packet 摘要同样不替代全文。
 2. 定位真值：`chapters.json`（全书地图）+ digest 顶部 `## RESUME`（下一窗）；不重跑预处理，不
    reopen；`ingest-start` 幂等恢复/重取锁。
-3. 概念只经 `resolve-concept`（命中即合并，落 home domain）；wikilink 一律库内全路径。
+3. 概念只经 `resolve-concept`；支撑概念按来源的应用语境归本域，跨域仅限工单明确授权；wikilink 一律库内全路径。
 4. 自测：题干在 callout 块内首行，答案只进嵌套折叠 `> > [!success]-`——同级 callout 头会被
    Obsidian 渲染成明文，答案泄漏。
 5. 源图只是阅读证据（D-1）：公式原生 KaTeX、表 Markdown/散文、图 mermaid/散文重建，发布正文
@@ -120,15 +120,19 @@ Sub-unit command detail:
   from the linearized text instead is the one failure no deterministic gate can catch (formula → native KaTeX `$$…$$` with the result stated, table → Markdown/prose, figure → mermaid/prose,
   per phase D; `source-image-embed` hard-blocks any `![[assets/…]]`). Read `staging/<src>/digest.md` first
   (skip on the first window). Use `--plain` only when debugging the raw slice.
-- U3: **first decide the concept's home domain — where the concept actually belongs, not the source book's
-  domain (D-3).** A book on any specialized subject that discusses 研究问题 / 文献综述 / 学术论文结构 /
-  A-F框架 (research methodology) resolves those into `research-method`, not the book's own subject domain;
-  statistics/econometrics → `statistics`,
-  optimization → `optimization`, etc. Then `python scripts/pipeline.py resolve-concept --mention "<mention>"
-  --domain <home-domain> [--alias "<english name>"] --ref-source <src> --ref-sections "<5.2>"`, and edit the page
+- U3: **choose the domain from this source's application context and the actual work order.**
+  Mathematical, statistical and optimization support concepts belong in the source domain when used
+  to explain this source's application (e.g. cosine similarity in an LLM retrieval source → `llm`).
+  Do not create an unapproved domain merely because the method also belongs to a wider discipline.
+  Explicitly authorized home-domain concepts still use that domain: research-method concepts such as
+  研究问题 / 文献综述 / 学术论文结构 / A-F框架 → `research-method` when listed in
+  workorder.yaml's `cross_domain_concept_scope`. Existing shared concepts may be reused; promotion to
+  shared still requires human review. Then `python scripts/pipeline.py resolve-concept --mention "<mention>"
+  --domain <chosen-domain> [--alias "<english name>"] --ref-source <src> --ref-sections "<5.2>"`, and edit the page
   it returns. The work order pre-authorizes cross-domain concept writes for the managed home domains (`research-method`
-  today) at `domains/<home>/concepts/**` only — if `check-write` DENYs an unlisted home domain, that domain must be
-  added to the audited allowlist first, don't force it elsewhere. High-value sub-concepts (纳什均衡 / 子博弈精炼纳什
+  today) at `domains/<home>/concepts/**` only. Inspect the returned allowed paths when a domain is denied;
+  correct an application-context routing mistake, but never rename a concept or change the work order
+  merely to bypass protection. High-value sub-concepts (纳什均衡 / 子博弈精炼纳什
   均衡 / 贝叶斯纳什均衡 / 完美贝叶斯均衡 / 逆向归纳) deserve **their own pages**, not just plaintext mentions.
   **命名与 alias 卫生（aliases 是 resolve-concept 的命中键，写错会长期劫持后来者）：** ①工具级/实例级
   概念**不得抢注通用名**——canonical_name 取它实际的名字（工具命令名/书内术语），通用学科名留给未来
@@ -143,10 +147,13 @@ Sub-unit command detail:
   it (Source-fidelity contract above). Never create a page just to satisfy `broken-link` — that turns a
   lint rule into a source-less page generator. Never account a page with a dangling link.
 - U6: `python scripts/pipeline.py window-done --source <src> --window <id> --writes '["<page>"]'` (on failure use `window-fail --error "<reason>"`). If the shell strips quotes from the JSON (Windows `conda run` gotcha), write the array to a UTF-8 file and pass `--writes-file <path.json>` instead.
-- U7: refresh the `## RESUME` block at the **top** of `digest.md` each window (the resume anchor; on
+- U7: after U6, use `python scripts/pipeline.py next --source <src> --json` for the next window ID/hash
+  (or null when all windows are finished). This compact metadata does not validate the digest; do not
+  read the whole windows.jsonl just to obtain the next ID/hash. Refresh the `## RESUME` block at the
+  **top** of `digest.md` each window (the resume anchor; on
   resume say "continue" or run `scripts/resume-ingest.ps1`, both relocate via the RESUME block + `pipeline.py
   next --source <src> --resume-packet` — a structured fail-closed resume packet for Claude and Codex alike,
-  no session hook; a stale RESUME that no longer names the true next window makes the packet **refuse to
+  a stale RESUME that no longer names the true next window makes the packet **refuse to
   emit**, so keeping this block fresh is load-bearing). The block runs from
   `## RESUME` to the next `## `, stays terse, and contains at least: **progress** (done windows + next
   window id and its `--hash`), **resume steps** (`ingest-start` is idempotent and reports resumed →
@@ -154,8 +161,21 @@ Sub-unit command detail:
   writing contracts; the seed scaffold in a fresh page shows the right shape but never overrides this file →
   per-window loop), and a one-line **writing discipline** reminder (concepts via resolve-concept, full-path
   wikilinks, 自测题干在块内首行/答案只进嵌套折叠 `> > [!success]-`, interpreter + `PYTHONUTF8=1`).
-  **Do not dump full window logs into RESUME.** When the whole source is done,
-  rename the heading to `## DONE` so resume is not misled.
+  **Do not dump full window logs into RESUME.** When every window is finished, rename the heading to
+  `## DONE`, recording any remaining phase E synthesis and phase F publication work. The resume packet
+  accepts DONE only with no unfinished windows and returns `phase=finish`; DONE alone is not publication.
+  In the web runtime, a fresh Pi session starts only after an actual U7 digest change, successful
+  `next --source <src> --resume-packet` validation and completion of the current tool batch.
+  A digest change just before U6 in the same batch also counts; an unchanged write or an old digest
+  mentioning the next ID does not. A blocked premature next-window call does not undo successful U7.
+  The new session rereads this file, chapters.json and the full digest; old images stay in the saved log,
+  not the new context. Reread any earlier evidence actually needed. After the last window, continue E
+  (including accounting its writes in an existing window) and F rather than restarting finished windows.
+  The finish packet includes the last window's existing writes/proposals: preserve these when adding
+  phase E paths, because `window-done` replaces that window's lists rather than appending.
+  `round_written_pages` lists all this round's accounted pages; `source_pages` lists pages attributed
+  to this source and does not prove accounting. Use both plus the read-only `files` tool to enumerate
+  concepts and verify actual paths before phase E navigation and topic coverage checks.
   - **Rolling digest discipline (prevents context bloat; unattended resume depends on it):** keep only the
     **last 8 windows** in per-window detail; fold older windows into **chapter-level summaries** (one line per
     chapter). After each window, compress the window sliding out of the last-8 range into the chapter
@@ -260,7 +280,7 @@ Sub-unit command detail:
 3. **No mandatory section titles (D-4).** Structure is purpose-driven. Instead the machine checks **per-type frontmatter completeness (`frontmatter-incomplete`)**: `source` needs `source_id/title/domain/format` (**not** `source_refs`); `topic`/`comparison`/`synthesis`/`overview` **must carry `source_refs`**; `concept` needs `canonical_id/canonical_name/domain`.
 4. **Published body embeds NO source image (`source-image-embed`, blocks the proposed batch too):** re-express formulas as native KaTeX (with the result), tables as Markdown/prose, figures as mermaid/prose — the source image is read-only evidence. A `concept`/`topic`/`comparison` that is too short blocks as `content-too-short`; a lesson too short blocks as `L6-empty-lesson`.
 5. **No body H1 that duplicates the filename (`title-duplicate-h1`):** Obsidian already shows the filename as the inline title — start the body with prose, not `# <same title>`.
-6. **Concept dedup:** only via resolve-concept, merge on hit, never hand-build a duplicate (duplicate `canonical_id` blocks). Concepts resolve to their **home domain** (methodology → `research-method`, not the source's domain); aliases live only in the concept's `aliases:` frontmatter (`aliases.md` is retired).
+6. **Concept dedup:** only via resolve-concept, merge on hit, never hand-build a duplicate (duplicate `canonical_id` blocks). Support concepts use the source's application domain; cross-domain home routing requires explicit workorder scope (e.g. methodology → `research-method`). Aliases live only in the concept's `aliases:` frontmatter (`aliases.md` is retired).
 7. **Ownership ≠ accounting (most-missed):** `source_refs` only decides **which source's lint owns a page**;
    it never substitutes for the write ledger. Every proposed `topic`/`comparison`/`synthesis`/`overview`
    page **must be in some window's `window-done --writes`** (kb-save pages ride the query-session

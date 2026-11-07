@@ -41,12 +41,22 @@ _KATEX_FONT_URL = re.compile(r"url\(fonts/([^)]+\.woff2)\)")
 
 
 class _HeadingText(HTMLParser):
+    _BREAKS = frozenset("address article aside blockquote br caption dd div dl dt figcaption figure footer h1 h2 h3 h4 h5 h6 header hr li main nav ol p pre section table tbody td th thead tr ul".split())
+
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
 
     def handle_data(self, data: str) -> None:
         self.parts.append(data)
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._BREAKS:
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag):
+        if tag in self._BREAKS:
+            self.parts.append(" ")
 
     def value(self) -> str:
         return "".join(self.parts).strip()
@@ -376,7 +386,7 @@ _APP_JS = r"""
   function esc(s){ var d=document.createElement("span"); d.textContent=s; return d.innerHTML; }
   function currentPath(){
     var h = decodeURIComponent(location.hash||"");
-    if(h.indexOf("#/")===0) return h.slice(2);
+    if(h.indexOf("#/")===0) return h.slice(2).split("?")[0];
     return "";
   }
   function defaultPath(){
@@ -819,6 +829,11 @@ _APP_JS = r"""
     if(el) document.title = el.getAttribute("data-title") + " · 学习知识库";
     main.scrollTop = 0;
     window.scrollTo(0, saved && saved.path===path ? saved.scrollY : 0);
+    var heading = new URLSearchParams((location.hash.split("?")[1]||"")).get("heading");
+    if(heading && el){
+      var target = Array.prototype.find.call(el.querySelectorAll("h1,h2,h3,h4,h5,h6"), function(node){ return node.id===heading || node.textContent===heading; });
+      if(target) target.scrollIntoView({block:"start"});
+    }
     closeDrawers();
   }
   function openDrawer(which){
@@ -1057,20 +1072,18 @@ def _render_page_nav(previous: dict | None, following: dict | None) -> str:
     return '<nav class="page-nav" aria-label="上一页和下一页">' + "".join(buttons) + "</nav>"
 
 
-def render_html(
+def build_content(
     pages: list[dict],
     *,
     vault: str | Path,
     with_images: bool,
-    katex_assets: dict,
     render_page_body,
     graph_payload: dict | None = None,
-    graph_view_html: str = "",
     quiz_items: list[dict] | None = None,
     proposition_items: list[dict] | None = None,
     source_media: dict[str, list[dict]] | None = None,
-) -> str:
-    """Build the complete single-file reading interface from rendered pages."""
+) -> tuple[list[str], dict, dict[str, str]]:
+    """Render pages once for both the offline shell and the web reader data."""
     vault_path = Path(vault)
     page_set = {page["rel"] for page in pages}
     ordered = site_data.ordered_paths(pages)
@@ -1081,11 +1094,13 @@ def render_html(
     proposition_items = proposition_items or []
     articles: list[str] = []
     payload_pages: list[dict] = []
+    rendered_pages: dict[str, str] = {}
 
     for index, rel in enumerate(ordered):
         page = path_to_page[rel]
         body_html = render_page_body(page["body"], page_set, vault_path, with_images)
         body_html, toc = prepare_body(body_html, f"p{index}")
+        rendered_pages[rel] = body_html
         previous, following = site_data.adjacent_paths(page["rel"], ordered)
         previous_entry = (
             {"path": previous, "title": path_to_page[previous]["title"]}
@@ -1159,6 +1174,28 @@ def render_html(
         "quiz": quiz_items,
         "propositions": proposition_items,
     }
+    return articles, payload, rendered_pages
+
+
+def render_html(
+    pages: list[dict],
+    *,
+    vault: str | Path,
+    with_images: bool,
+    katex_assets: dict,
+    render_page_body,
+    graph_payload: dict | None = None,
+    graph_view_html: str = "",
+    quiz_items: list[dict] | None = None,
+    proposition_items: list[dict] | None = None,
+    source_media: dict[str, list[dict]] | None = None,
+) -> str:
+    """Build the complete single-file reading interface from rendered pages."""
+    articles, payload, _rendered = build_content(
+        pages, vault=vault, with_images=with_images, render_page_body=render_page_body,
+        graph_payload=graph_payload, quiz_items=quiz_items,
+        proposition_items=proposition_items, source_media=source_media,
+    )
     html = _HTML_TEMPLATE
     html = html.replace("__THEME_JS__", _THEME_JS)
     html = html.replace("__BASE_CSS__", _BASE_CSS)

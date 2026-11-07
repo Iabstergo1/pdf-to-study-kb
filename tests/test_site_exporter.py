@@ -1,5 +1,6 @@
 import importlib.util
 import html as html_mod
+import json
 import sys
 from pathlib import Path
 
@@ -18,6 +19,47 @@ site = _load("site_exporter")
 site_render = _load("site_render")
 mdpage = _load("mdpage")
 wiki_gate = _load("wiki_gate")
+
+
+def test_search_text_separates_blocks_but_keeps_inline_words(tmp_path):
+    vault = tmp_path / "wiki"
+    _page(vault, "a.md", {"type": "concept", "status": "published"},
+          "<p>first</p><p>sec<em>ond</em><br>third</p><ul><li>fourth</li><li>fifth</li></ul>")
+    page = site.build_site_data(vault)["pages"][0]
+    assert " ".join(page["search_text"].split()) == "first second third fourth fifth"
+
+
+def test_json_export_matches_every_offline_page(tmp_path):
+    vault = tmp_path / "wiki"
+    for rel, kind, body in [
+        ("overview.md", "overview", "入口 [[domains/d/concepts/甲|甲]]"),
+        ("domains/d/concepts/甲.md", "concept", "## 机制\n\n别名检索 $a<b & c>d$。\n\n"
+         "> [!question] 为什么？\n> > [!success]- 答案\n> > 因此成立。"),
+        ("topics/关系.md", "topic", "**命题（单调性）**：递增。[[domains/d/concepts/甲|甲]]"),
+    ]:
+        _page(vault, rel, {"type": kind, "status": "published", "domain": "d",
+                          "title": Path(rel).stem, "aliases": ["别名"], "source_refs": ["book"]}, body)
+    _page(vault, "draft.md", {"type": "concept", "status": "proposed"}, "未发布")
+    offline = site.build_site(vault, katex_assets=_fake_katex())
+    result = site.write_site_data(vault, out=tmp_path / "json")
+    manifest = json.loads(result.path.read_text(encoding="utf-8"))
+    records = [json.loads((result.path.parent / p["file"]).read_text(encoding="utf-8"))
+               for p in manifest["pages"]]
+    assert {p["path"] for p in records} == {p["rel"] for p in site._vault_pages(vault)}
+    for page in records:
+        article = offline.split(f'<article class="page" data-path="{page["path"]}"', 1)[1].split("</article>", 1)[0]
+        assert f'<div class="page-body">{page["html"]}</div>' in article
+        assert page["aliases"] == ["别名"]
+    concept = next(p for p in records if p["type"] == "concept")
+    assert "$a&lt;b &amp; c&gt;d$" in concept["html"]
+    assert "别名检索" in concept["search_text"]
+    assert len(concept["backlinks"]) == 2
+    assert concept["toc"]
+    before = {p.relative_to(result.path.parent): p.read_bytes()
+              for p in result.path.parent.rglob("*") if p.is_file()}
+    site.write_site_data(vault, out=result.path.parent)
+    assert before == {p.relative_to(result.path.parent): p.read_bytes()
+                      for p in result.path.parent.rglob("*") if p.is_file()}
 
 
 def _page(vault, rel, meta, body):
@@ -46,6 +88,18 @@ def test_collect_pages_published_only_and_sorted(tmp_path):
     assert pages[0]["obsidian_uri"] == wiki_gate.obsidian_uri(vault, pages[0]["rel"])
     assert pages[1]["aliases"] == ["B别名"]
     assert pages[1]["source_refs"] == ["book-a"]
+
+
+def test_highlights_are_inline_markup_not_code_math_or_escaped_text(tmp_path):
+    body = r"==观察**空间**== `==code==` $a==b<c$ \==escaped==" + "\n\n```python\nx == y\n```\n\n==再次高亮=="
+    rendered = site_render.render_page_body(body, set(), tmp_path, False)
+    assert "<mark>观察<strong>空间</strong></mark>" in rendered
+    assert "<code>==code==</code>" in rendered
+    assert "$a==b&lt;c$" in rendered
+    assert "==escaped==" in rendered
+    assert "x == y" in rendered
+    assert rendered.count("<mark>") == 2
+    assert "<mark>再次高亮</mark>" in rendered
 
 
 def test_render_table_and_inline_math_preserved(tmp_path):

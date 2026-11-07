@@ -45,6 +45,8 @@ FILE_TIERS = {
     "test_ingest_fidelity_contract.py": ("skill",),
     "test_skill_standard.py": ("skill",),
     # ---- fast：纯函数 / 直接模块 ----
+    "test_user_study.py": ("fast",),
+    "test_reader_data.py": ("fast",),
     "test_arbitration.py": ("fast",),
     "test_chaptering.py": ("fast",),
     "test_check_publishable.py": ("fast",),

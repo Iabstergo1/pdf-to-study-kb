@@ -67,6 +67,34 @@ def _source_is_running_ingest(db, source_id: str) -> bool:
             and src["current_status"] == "running")
 
 
+def cmd_reader_info(args):
+    import json
+    import reader_data
+    value = json.load(sys.stdin) if args.stdin else json.loads(args.payload)
+    print(json.dumps(reader_data.read(_workspace_root(), args.action, value), ensure_ascii=False))
+
+
+def cmd_study_read(args):
+    import json
+    import user_study
+    value = json.load(sys.stdin) if args.stdin else json.loads(args.payload)
+    print(json.dumps(user_study.read(_workspace_root(), args.action, value), ensure_ascii=False))
+
+
+def cmd_study_write(args):
+    import json
+    import user_study
+    value = json.load(sys.stdin) if args.stdin else json.loads(args.payload)
+    print(json.dumps(user_study.write(_workspace_root(), args.action, value), ensure_ascii=False))
+
+
+def cmd_content_review(args):
+    import json
+    import content_review
+    value = json.load(sys.stdin) if args.stdin else json.loads(args.payload)
+    print(json.dumps(content_review.execute(_workspace_root(), args.action, value), ensure_ascii=False))
+
+
 def cmd_add_source(args):
     """注册一个来源到状态库（记 raw 路径为 artifact）。"""
     import state_store
@@ -78,6 +106,10 @@ def cmd_add_source(args):
     raw = Path(args.path)
     sha = hashlib.sha256(raw.read_bytes()).hexdigest() if raw.exists() else ""
     state_store.record_artifact(db, args.source, kind="raw_source", path=str(raw), sha256=sha)
+    if getattr(args, "purpose", None):
+        staging = _staging_dir(args.source)
+        staging.mkdir(parents=True, exist_ok=True)
+        (staging / "learning-goal.md").write_text(args.purpose.strip() + "\n", encoding="utf-8", newline="\n")
     print(f"[OK] registered source '{args.source}' (domain={args.domain}, fmt={args.fmt})")
 
 
@@ -86,6 +118,120 @@ def _raw_path(db, state_store, source_id: str) -> Path:
         if a["kind"] == "raw_source":
             return Path(a["path"])
     raise SystemExit(f"no raw_source artifact for {source_id}; run add-source first")
+
+
+def cmd_relocate_source(args):
+    """归档原文件，或按内容一致的新路径修正改名后的登记。"""
+    import hashlib
+    import os
+    import shutil
+    import locks
+    import state_store
+
+    db = _vault_state_db()
+    source = state_store.get_source(db, args.source)
+    if source is None or source["current_status"] == "running":
+        raise SystemExit("source must exist and not be running")
+    artifacts = [a for a in state_store.list_artifacts(db, args.source)
+                 if a["kind"] == "raw_source"]
+    if len(artifacts) != 1:
+        raise SystemExit("relocate requires exactly one raw_source artifact")
+    artifact = artifacts[0]
+    raw = Path(artifact["path"])
+    if not raw.is_absolute():
+        raw = _workspace_root() / raw
+    if args.path:
+        root = _workspace_root().resolve()
+        target = Path(args.path)
+        if not target.is_absolute():
+            target = root / target
+        if target.is_symlink() or not target.is_file():
+            raise SystemExit("new source path must be an existing regular file")
+        target = target.resolve()
+        books = (root / "books").resolve()
+        if not books.is_relative_to(root) or not target.is_relative_to(books):
+            raise SystemExit("new source path must be inside this workspace's books directory")
+        with target.open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != artifact["sha256"]:
+                raise SystemExit("new file differs from the registered source; path unchanged")
+        print(f"[plan] registered path: {raw} -> {target}; files unchanged")
+        if not args.apply:
+            return
+        holder = f"relocate:{args.source}"
+        if not locks.acquire(db, scope="vault", holder=holder, pid=os.getpid()):
+            raise SystemExit("vault is locked; path unchanged")
+        try:
+            with target.open("rb") as stream:
+                if hashlib.file_digest(stream, "sha256").hexdigest() != artifact["sha256"]:
+                    raise SystemExit("new file changed; path unchanged")
+            con = state_store.connect(db)
+            try:
+                changed = con.execute(
+                    "UPDATE artifacts SET path=? WHERE id=? AND path=? AND sha256=?",
+                    (str(target), artifact["id"], artifact["path"], artifact["sha256"]))
+                if changed.rowcount != 1:
+                    raise SystemExit("source registration changed; path unchanged")
+                con.commit()
+            finally:
+                con.close()
+            print(f"[OK] updated source path '{args.source}' -> {target}; files unchanged")
+        finally:
+            locks.release(db, scope="vault", holder=holder)
+        return
+    if raw.is_symlink() or not raw.is_file():
+        raise SystemExit(f"original must be an existing regular file: {raw}")
+    raw = raw.resolve()
+    root = _workspace_root().resolve()
+    books = (root / "books").resolve()
+    if not books.is_relative_to(root):
+        raise SystemExit("books directory escapes workspace")
+    if raw.is_relative_to(books):
+        print(f"[OK] already in books: {raw}")
+        return
+    target = (books / args.source / "input" / raw.name).resolve()
+    if not target.is_relative_to(books) or target.exists():
+        raise SystemExit(f"destination must be unused and inside books: {target}")
+
+    def digest(file):
+        with file.open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+
+    if digest(raw) != artifact["sha256"]:
+        raise SystemExit("original differs from the registered source; nothing moved")
+    print(f"[plan] {raw} -> {target}")
+    if not args.apply:
+        return
+    holder = f"relocate:{args.source}"
+    if not locks.acquire(db, scope="vault", holder=holder, pid=os.getpid()):
+        raise SystemExit("vault is locked; nothing moved")
+    created = committed = False
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with raw.open("rb") as src, target.open("xb") as dst:
+            created = True
+            shutil.copyfileobj(src, dst)
+        shutil.copystat(raw, target)
+        if digest(target) != artifact["sha256"] or digest(raw) != artifact["sha256"]:
+            raise SystemExit("source changed while copying; original retained")
+        con = state_store.connect(db)
+        try:
+            changed = con.execute(
+                "UPDATE artifacts SET path=? WHERE id=? AND path=? AND sha256=?",
+                (str(target), artifact["id"], artifact["path"], artifact["sha256"]))
+            if changed.rowcount != 1:
+                raise SystemExit("source registration changed; original retained")
+            con.commit()
+            committed = True
+        finally:
+            con.close()
+        raw.unlink()
+        print(f"[OK] relocated '{args.source}' -> {target}")
+    finally:
+        try:
+            if created and not committed:
+                target.unlink(missing_ok=True)
+        finally:
+            locks.release(db, scope="vault", holder=holder)
 
 
 def cmd_profile(args):
@@ -379,12 +525,24 @@ def cmd_arbitration_status(args):
     kinds = {}
     for v in by_page.values():
         kinds[v] = kinds.get(v, 0) + 1
+    nh_pages = sorted(int(p) for p, dec in by_page.items() if dec == arb.NEEDS_HUMAN)
+    if getattr(args, "json", False):
+        queue_path = staging / arb.QUEUE_FILE
+        packets = (_json.loads(queue_path.read_text(encoding="utf-8")).get("packets", [])
+                   if queue_path.exists() else [])
+        packet_by_page = {int(p["page"]): p for p in packets}
+        print(_json.dumps({"candidates": len(candidates), "decided": len(by_page),
+                     "pending": len(pending), "pending_pages": pending, "decisions": kinds,
+                     "needs_human": [{"page": p,
+                                      "reasons": packet_by_page.get(p, {}).get("disagreement_kinds", []),
+                                      "page_image": packet_by_page.get(p, {}).get("page_image")}
+                                     for p in nh_pages]}, ensure_ascii=False))
+        return
     print(f"[arbitration] candidates={len(candidates)} decided={len(by_page)} pending={len(pending)} "
           f"render={kinds.get('render', 0)} ignore={kinds.get('ignore', 0)} needs_human={kinds.get('needs_human', 0)}")
     if pending:
         print(f"  pending pages need agent arbitration: {pending}")
         print(f"  read packets → {staging / arb.QUEUE_FILE}; write decisions → {staging / arb.DECISIONS_FILE}")
-    nh_pages = sorted(int(p) for p, dec in by_page.items() if dec == arb.NEEDS_HUMAN)
     if nh_pages:
         print(f"  needs_human pages (resolve with: arbitration-resolve --page <n> "
               f"--decision render|ignore --reason ...): {nh_pages}")
@@ -1321,8 +1479,14 @@ def cmd_export_site(args):
     vault = _vault_dir()
     if not vault.exists():
         raise SystemExit("no wiki/ vault yet")
-    result = site_exporter.write_site(vault, workspace=_workspace_root(),
-                                      with_images=args.with_images)
+    if getattr(args, "format", "html") == "json":
+        result = site_exporter.write_site_data(vault, workspace=_workspace_root(),
+                                              out=args.out, with_images=args.with_images)
+    else:
+        if getattr(args, "out", None):
+            raise SystemExit("--out requires --format json")
+        result = site_exporter.write_site(vault, workspace=_workspace_root(),
+                                          with_images=args.with_images)
     size = result.path.stat().st_size
     if args.with_images:
         total = sum(p.stat().st_size for p in result.path.parent.rglob("*") if p.is_file())
@@ -1851,13 +2015,28 @@ def cmd_resolve_concept(args):
                       "sections": (args.ref_sections or "").split(",") if args.ref_sections else []}
     # resolve-concept 本身会立即改 frontmatter；命中既有页时必须在这次 mutation 之前完成
     # check-write + 快照，不能让调用方事后再补。
-    if args.ref_source and _source_is_running_ingest(db, args.ref_source):
-        hit = concept_store.resolve(args.mention, domain=args.domain, registry=registry)
-        if hit:
-            _prepare_write(db, args.ref_source, hit[1]["page_path"])
-    cid, path, action = concept_store.resolve_or_create_concept(
-        vault, mention=args.mention, domain=args.domain, registry=registry,
-        aliases=args.alias or [], source_ref=source_ref)
+    try:
+        hit = concept_store.resolve(args.mention, domain=args.domain, registry=registry,
+                                    aliases=args.alias or [])
+    except ValueError as e:
+        raise SystemExit(str(e))
+    if hit:
+        cid, entry = hit
+        if args.ref_source and _source_is_running_ingest(db, args.ref_source):
+            _prepare_write(db, args.ref_source, entry["page_path"])
+        concept_store.merge_concept(vault, entry["page_path"], source_ref=source_ref,
+                                    new_aliases=[args.mention, *(args.alias or [])])
+        path, action = vault / entry["page_path"], "merged"
+    else:
+        try:
+            if args.ref_source and _source_is_running_ingest(db, args.ref_source):
+                _prepare_write(db, args.ref_source, concept_store.concept_path(args.domain, args.mention).as_posix())
+            path = concept_store.create_concept(
+                vault, domain=args.domain, name=args.mention, aliases=args.alias or [],
+                source_ref=source_ref, registry=registry)
+        except (ValueError, FileExistsError) as e:
+            raise SystemExit(str(e))
+        cid, action = concept_store.canonical_id(args.domain, args.mention, args.alias or []), "created"
     if action == "merged" and cid in registry and \
             concept_store.is_alias_hit(args.mention, cid, registry[cid]):
         print(f"[hit-alias] mention '{args.mention}' 命中的是 "
@@ -1997,6 +2176,8 @@ def _prepare_write(db, source_id, rel_path, *, session_id=None):
     rel = rel_path.replace("\\", "/")
     if not ingest_guards.in_write_scope(rel, wo["write_scope"]):
         print(f"DENY {rel}: outside write_scope")
+        allowed = [scope for scope in wo["write_scope"] if scope == "concepts/**" or scope.endswith("/concepts/**")]
+        print("本工单允许的概念目录：" + ", ".join(allowed) + "；先核对概念语义与领域，不要改工单绕过限制。")
         raise SystemExit(1)
     baselines = _snapshot_baselines(wo)
     baseline = baselines.get(rel)
@@ -2515,19 +2696,31 @@ def cmd_fail(args):
 
 
 def cmd_status(args):
-    """列出每个 source 的阶段/状态 + vault 锁持有者（spec §3.3）。"""
+    """列出每个 source 的阶段/状态 + vault 锁持有者（spec §3.3）；--json 供 Web 操作台等程序消费。"""
+    import json
     import state_store
     import locks
 
+    as_json = getattr(args, "json", False)
     db = _vault_state_db()
     if not db.exists():
-        print("no state db yet (run a source through preprocess first)")
+        print(json.dumps({"sources": [], "lock": None}) if as_json
+              else "no state db yet (run a source through preprocess first)")
         return
-    for r in state_store.status_rows(db):
-        print(f"{r['source_id']:<28} {r['domain']:<14} {r['current_stage']:<16} {r['current_status']}")
+    rows = state_store.status_rows(db)
     row = locks.get(db, scope="vault")
+    stale = bool(row) and locks.is_stale(db, scope="vault", ttl_seconds=LOCK_TTL_SECONDS)
+    if as_json:
+        print(json.dumps({
+            "sources": [{k: r[k] for k in ("source_id", "domain", "current_stage", "current_status")}
+                        for r in rows],
+            "lock": ({"holder": row["holder"], "started_at": row["started_at"],
+                      "heartbeat_at": row["heartbeat_at"], "stale": stale} if row else None),
+        }))
+        return
+    for r in rows:
+        print(f"{r['source_id']:<28} {r['domain']:<14} {r['current_stage']:<16} {r['current_status']}")
     if row:
-        stale = locks.is_stale(db, scope="vault", ttl_seconds=LOCK_TTL_SECONDS)
         mark = "  [STALE → pipeline.py unlock]" if stale else ""
         print(f"[lock] vault held by {row['holder']} since {row['started_at']}"
               f" (heartbeat {row['heartbeat_at']}){mark}")
@@ -2541,6 +2734,8 @@ def cmd_next(args):
     import locks
 
     db = _vault_state_db()
+    if getattr(args, "json", False) and getattr(args, "resume_packet", False):
+        raise SystemExit("--json 不与 --resume-packet 连用")
     if getattr(args, "resume_packet", False):
         if not getattr(args, "source", None):
             raise SystemExit("--resume-packet 需要 --source <source_id>")
@@ -2550,17 +2745,40 @@ def cmd_next(args):
         try:
             print(resume_packet.build_resume_packet(
                 db_path=db, staging_dir=_staging_dir(args.source),
+                vault_dir=_workspace_root() / "wiki",
                 repo_root=Path(__file__).resolve().parents[1], source_id=args.source,
                 lock_ttl_seconds=LOCK_TTL_SECONDS))
         except resume_packet.ResumePacketError as e:
             raise SystemExit(str(e))
         return
     if getattr(args, "source", None):
-        raise SystemExit("--source 只与 --resume-packet 连用（普通 next 是全库视图）")
+        if not getattr(args, "json", False):
+            raise SystemExit("--source 需与 --resume-packet 或 --json 连用")
+        if not db.exists():
+            raise SystemExit("no state db yet")
+        import resume_packet
+        import json
+        try:
+            print(json.dumps(resume_packet.next_window_info(
+                db_path=db, staging_dir=_staging_dir(args.source), source_id=args.source), ensure_ascii=False))
+        except resume_packet.ResumePacketError as e:
+            raise SystemExit(str(e))
+        return
+    import json
+    as_json = getattr(args, "json", False)
     if not db.exists():
-        print("no state db yet")
+        print(json.dumps({"actions": [], "stale_lock": False}) if as_json else "no state db yet")
         return
     rows = state_store.next_actions(db)
+    if as_json:
+        lk = locks.get(db, scope="vault")
+        print(json.dumps({
+            "actions": [{"source_id": r["source_id"], "current_stage": r["current_stage"],
+                         "next_action": r["next_action"]} for r in rows],
+            "stale_lock": bool(lk) and locks.is_stale(db, scope="vault",
+                                                       ttl_seconds=LOCK_TTL_SECONDS),
+        }))
+        return
     for r in rows:
         print(f"{r['source_id']:<28} {r['current_stage']:<16} -> {r['next_action']}")
     # 写作契约提醒（软提示，不接状态机）：有进行中的 ingest 时打印契约文件 hash——
@@ -2758,44 +2976,35 @@ def _review_domain_counts(pages) -> dict:
 
 
 def _review_source_coverage(vault, pages, entries) -> list[dict]:
-    """按**来源**统计内容验收覆盖：这本书整本被逐页读过没有？（只读统计，不是门禁）
-
-    存在的理由：按页算的覆盖率看不出"哪本书整本没验过"。实测该缺口很大——按页统计会把
-    整源认证过的来源混在大量未认证来源里，而一个含多个来源的领域可能只有很少页面被逐页
-    点名过；这个事实在原先的输出里完全不可见。
-
-    判据用**台账条目自己的 `scope` 字段**，不猜：一页只要带过一条 `scope: whole-source` 的条目，
-    就算被整源认证覆盖过。`overview.md` 不计（它带全部来源的 source_refs，算进任何单一来源都失真，
-    与台账写入口径一致）。
-
-    刻意**不做成门禁**：整源认证是一次昂贵的人工复核，硬拦等于逼人立刻花这笔钱（核心约束⑦）。
-    这里只把"还有哪几本整本没人看过"摆出来，看不看、验不验由人决定。
-    """
+    """按实际记录的来源统计历史检查范围；共享页不反向扩大旧审查范围。"""
     import mdpage
+    import reader_data
     vault = Path(vault)
-    whole, sampled = set(), set()
-    for rel, evs in (entries or {}).items():
-        for ev in evs if isinstance(evs, list) else []:
-            if not isinstance(ev, dict):
-                continue
-            (whole if ev.get("scope") == "whole-source" else sampled).add(rel)
-    by_source: dict[str, dict] = {}
+    by_source = {}
     for rel in pages:
         if rel == "overview.md":
             continue
         meta, _body = mdpage.read_page(vault / rel)
         for ref in meta.get("source_refs") or []:
-            sid = ref if isinstance(ref, str) else (
-                ref.get("source") if isinstance(ref, dict) else None)
-            if not isinstance(sid, str) or not sid:
-                continue
-            row = by_source.setdefault(sid, {"source": sid, "owned": 0, "whole": 0,
-                                             "sampled": 0, "pages": set()})
-            row["owned"] += 1
-            row["pages"].add(rel)
-            if rel in whole:
+            sid = ref if isinstance(ref, str) else ref.get("source") if isinstance(ref, dict) else None
+            if isinstance(sid, str) and sid:
+                row = by_source.setdefault(sid, {"source": sid, "owned": 0, "whole": 0, "sampled": 0, "pages": set()})
+                row["owned"] += 1
+                row["pages"].add(rel)
+    reports = {r["path"]: r["sources"] for r in reader_data.reports(vault.parent)}
+    for sid, row in by_source.items():
+        for rel in row["pages"]:
+            scopes = []
+            for ev in entries.get(rel, []):
+                if not isinstance(ev, dict):
+                    continue
+                report = reader_data._report_path(ev.get("report"))
+                sources = reader_data._declared_sources(ev) or reports.get(report) or reader_data._legacy_report_sources(report, by_source)
+                if sid in sources:
+                    scopes.append(ev.get("scope"))
+            if "whole-source" in scopes:
                 row["whole"] += 1
-            elif rel in sampled:
+            elif scopes:
                 row["sampled"] += 1
     return sorted(by_source.values(), key=lambda r: (r["whole"] / r["owned"] if r["owned"] else 0,
                                                      -r["owned"], r["source"]))
@@ -2805,18 +3014,22 @@ def cmd_review_coverage(args):
     """内容审查台账覆盖率（只读）。未登记不判失败——作用是把"还剩多少"随时可查，
     不是当门禁逼人把台账填满。error 仅两类：台账指向不存在的页/报告。"""
     import yaml
+    import reader_data
+    import content_review
     workspace = _workspace_root()
     pages = review_content_pages(workspace)
     ledger_path = workspace / "wiki" / "Review-Queue" / "content-review-ledger.yaml"
-    if not ledger_path.is_file():
+    stored = content_review.rows(workspace, "content_review_runs", "WHERE completed_at IS NOT NULL")
+    stored_reports = {p for r in stored for p in content_review.report_paths(r["id"])}
+    if not ledger_path.is_file() and not stored:
         print(f"内容页 {len(pages)}   台账未建立   未登记 {len(pages)}   覆盖率 0.0%")
         print("未登记页（按域）:")
         for key, n in sorted(_review_domain_counts(pages).items()):
             print(f"  {key}   {n}")
         return 0
     try:
-        ledger = yaml.safe_load(ledger_path.read_text(encoding="utf-8")) or {}
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        ledger = {"pages": reader_data._ledger(workspace)}
+    except (OSError, UnicodeError, ValueError, yaml.YAMLError) as exc:
         print(f"[FAIL] 台账不可读: {exc}", file=sys.stderr)
         raise SystemExit(1)
     entries = ledger.get("pages") if isinstance(ledger, dict) else None
@@ -2845,7 +3058,8 @@ def cmd_review_coverage(args):
                 continue
             report = ev.get("report")
             if isinstance(report, str) and report:
-                if not (workspace / "pipeline-workspace" / "reports" / report).is_file():
+                normalized = reader_data._report_path(report)
+                if normalized not in stored_reports and not (workspace / normalized).is_file():
                     errors.append(f"台账 report 指向不存在的报告: {rel}: {report}")
             if ev.get("outcome") in {"no-findings", "findings-open", "findings-reworked"}:
                 dated.append((str(ev.get("date") or ""), idx, ev["outcome"]))
@@ -2864,7 +3078,7 @@ def cmd_review_coverage(args):
     gaps = [r for r in rows if r["whole"] < r["owned"]]
     if gaps:
         print(f"\n未整源认证的来源（{len(gaps)}/{len(rows)}；whole-source = 逐页整读认证，"
-              f"未登记不判失败）:")
+              f"历史范围不代表当前版本或人工验收；未登记不判失败）:")
         print(f"  {'source':<28}{'内容页':>7}{'整源认证':>9}{'抽样登记':>9}")
         for r in gaps:
             print(f"  {r['source']:<28}{r['owned']:>7}{r['whole']:>9}{r['sampled']:>9}")
@@ -2873,7 +3087,7 @@ def cmd_review_coverage(args):
             # 去重：跨源共享页（一页带多个 source_refs）不能按来源相加，否则数字虚高。
             uniq = set().union(*(r["pages"] for r in never))
             print(f"  —— 其中 {len(never)} 个来源**从未做过整源认证**"
-                  f"（去重后 {len(uniq)} 个内容页）：这些书没有人逐页读过。")
+                  f"（去重后 {len(uniq)} 个内容页）：尚无可归属到这些来源的整源检查记录。")
     for err in errors:
         print(f"[FAIL] {err}", file=sys.stderr)
     if errors:
@@ -2996,6 +3210,11 @@ def cmd_sync_overview_sources(args):
               "\n而是**内容页里的一块机器所有区**：边界由上面的 fail-closed 校验保证，"
               "\n块内是既有来源页链接的确定性全集，块外一字不动。")
         return 0
+    import locks
+    db = _vault_state_db()
+    lock = locks.get(db, scope="vault") if db.exists() else None
+    if lock and _source_is_running_ingest(db, lock["holder"]):
+        _prepare_write(db, lock["holder"], "overview.md")
     ov.write_text(new_text, encoding="utf-8", newline="\n")
     print(f"[OK] sync-overview-sources: 已{where} -> {ov}")
     return 0
@@ -3012,6 +3231,16 @@ def cmd_ingest_stats(args):
     stats = state_store.source_stats(db, args.source)
     if stats is None:
         raise SystemExit(f"unknown source: {args.source}")
+    stats["source"]["path"] = next((row["path"] for row in state_store.list_artifacts(db, args.source)
+                                    if row["kind"] == "raw_source"), None)
+    windows_file = _staging_dir(args.source) / "windows.jsonl"
+    stats["windows"]["planned"] = len(_read_jsonl(windows_file)) if windows_file.exists() else None
+    pages_file = _staging_dir(args.source) / "pages.jsonl"
+    pages = _read_jsonl(pages_file) if pages_file.exists() else None
+    stats["evidence"] = {"pages": len(pages) if pages is not None else None,
+                         "needs_vision": sum(bool(p.get("needs_vision")) for p in pages) if pages is not None else None}
+    goal_file = _staging_dir(args.source) / "learning-goal.md"
+    stats["learning_goal"] = goal_file.read_text(encoding="utf-8") if goal_file.exists() else ""
     # 装置使用统计（vault 只读扫描）：本源产出页的命题/推导折叠/自测题计数。
     # 单页归零合法；整本书全部归零 = 写作偏好未被执行的强信号（复盘用，不进门禁）。
     import page_rules
@@ -3112,6 +3341,7 @@ def _skill_gate_check(base):
     """gate 核心（skill-gate 与 skill-adopt 共用）：候选只许动 skill 两树(白名单) + 过 pytest。
     返回 (ok, reason)。"""
     import subprocess as _sp
+    import os
     tracked = _sp.run(["git", "diff", "--name-only", base], capture_output=True, text=True, encoding="utf-8")
     if tracked.returncode != 0:
         return False, f"git diff 失败（不在 git 仓？）: {tracked.stderr.strip()}"
@@ -3123,7 +3353,10 @@ def _skill_gate_check(base):
     if outside:
         return False, (f"gate-integrity: 候选越界改动 {outside}"
                        f"（只许动 .claude/skills 与 .agents/skills，防游戏自己的门）")
-    pt = _sp.run([sys.executable, "-m", "pytest", "tests", "-q"])
+    # pytest creates its own temporary workspace; never inherit a live vault from the web CLI.
+    test_env = dict(os.environ)
+    test_env.pop("STUDY_KB_ROOT", None)
+    pt = _sp.run([sys.executable, "-m", "pytest", "tests", "-q"], env=test_env)
     if pt.returncode != 0:
         return False, "pytest: 候选未过测试门（含双树对等）"
     return True, "gate-integrity + pytest 全绿"
@@ -3184,15 +3417,21 @@ def cmd_skill_adopt(args):
 
 def main():
     parser = argparse.ArgumentParser(description="PDF to Study KB 流水线 CLI")
+    parser.add_argument("--describe-commands", action="store_true",
+                        help="输出命令参数目录 JSON（只读，不执行任何命令）")
     subparsers = parser.add_subparsers(dest='command', help='可用命令')
 
     # status / next（vault 级单库状态视图，不接 --book）
-    subparsers.add_parser("status", help="列出每个 source 的阶段/状态（vault 级单库）")
+    stp = subparsers.add_parser("status", help="列出每个 source 的阶段/状态（vault 级单库）")
+    stp.add_argument("--json", action="store_true",
+                     help="输出 JSON（Web 操作台等程序消费；默认人类可读）")
     nxp = subparsers.add_parser("next", help="列出每个 source 的下一步人工动作")
     nxp.add_argument("--source", default=None,
-                     help="与 --resume-packet 连用：输出该 source 的结构化恢复包")
+                     help="与 --resume-packet 连用输出恢复包；与 --json 连用输出下一窗元数据")
     nxp.add_argument("--resume-packet", action="store_true", dest="resume_packet",
                      help="输出 RESUME_PACKET v1（中断 ingest 恢复用；fail-closed：状态矛盾拒绝出包）")
+    nxp.add_argument("--json", action="store_true",
+                     help="输出 JSON；可配 --source 获取精简下一窗，不与 --resume-packet 连用")
     ulp = subparsers.add_parser("unlock", help="回收 stale vault 锁（heartbeat 超时才允许；活锁拒绝）")
     ulp.add_argument("--ttl", type=int, default=LOCK_TTL_SECONDS, help="stale 判定秒数")
 
@@ -3202,6 +3441,11 @@ def main():
     asp.add_argument("--domain", required=True, help="所属领域")
     asp.add_argument("--path", required=True, help="原始文件路径")
     asp.add_argument("--fmt", required=True, choices=list(_ingestable_formats()), help="来源格式")
+    asp.add_argument("--purpose", help="仅适用于本来源的学习目标，不修改知识库全局偏好")
+    rsp = subparsers.add_parser("relocate-source", help="归档原文件或修正改名后的登记路径（默认预览）")
+    rsp.add_argument("--source", required=True, help="source_id")
+    rsp.add_argument("--path", help="改名或移动后的现有 books 文件；内容须一致，只更新登记，不移动文件")
+    rsp.add_argument("--apply", action="store_true", help="应用路径更新；未指定 --path 时还会移动文件")
     pfp = subparsers.add_parser("profile", help="逐页 profile + needs_vision 标记")
     pfp.add_argument("--source", required=True, help="source_id")
     winp = subparsers.add_parser("windows", help="生成确定性 processing windows")
@@ -3224,6 +3468,7 @@ def main():
     arst = subparsers.add_parser("arbitration-status",
                                  help="打印双审分歧仲裁队列状态（候选/已决策/pending；skill 据此自动仲裁）")
     arst.add_argument("--source", required=True, help="source_id")
+    arst.add_argument("--json", action="store_true", help="输出结构化仲裁状态")
     arap = subparsers.add_parser("arbitration-apply",
                                  help="物化 decisions.json（render 补图+标记 / ignore / needs_human）；须在 windows 前跑")
     arap.add_argument("--source", required=True, help="source_id")
@@ -3325,6 +3570,8 @@ def main():
                                 help="导出自包含离线静态站点 study-kb.html（零 LLM；手动分发动作，不接发布钩子）")
     esp.add_argument("--with-images", action="store_true",
                      help="显式打包正文引用的本地图片（默认不打包；会显著增大产物）")
+    esp.add_argument("--format", choices=["html", "json"], default="html", help="离线站点或网页阅读数据")
+    esp.add_argument("--out", help="JSON 数据输出目录（仅 --format json）")
     wop = subparsers.add_parser("workorder", help="生成 source 级 ingest work order")
     wop.add_argument("--source", required=True)
     rop = subparsers.add_parser("reopen", help="重开已收尾来源做增量补充（重建 workorder + 状态机回 workorder_ready）")
@@ -3429,17 +3676,52 @@ def main():
     sadp.add_argument("--candidate", required=True)
     sadp.add_argument("--base", default="HEAD", help="diff 基线 ref（默认 HEAD）")
 
+    for name, description, actions in (
+        ("content-review", "内容审查版本记录、结构化登记与人工整批验收（不改知识正文）", ["begin", "read", "register", "status", "checks", "close", "accept"]),
+        ("reader-info", "只读阅读证据、报告和历史审查状态", ["reports", "review", "evidence", "source-page", "source-image", "report", "proposals", "freshness", "preferences", "render"]),
+        ("study-read", "只读个人学习记录与复习队列", ["summary", "cards", "state", "annotations", "history", "export"]),
+        ("study-write", "保存个人学习记录（不改知识正文）", ["review", "undo", "preferences", "progress", "session", "annotation", "flag", "delete-annotation", "import", "proposal-decision"]),
+    ):
+        study = subparsers.add_parser(name, help=description)
+        study.add_argument("--action", required=True, choices=actions)
+        study.add_argument("--payload", default="{}", help="JSON 参数")
+        study.add_argument("--stdin", action="store_true", help="从标准输入读取 JSON 参数")
+
     args = parser.parse_args()
+
+    if args.describe_commands:
+        import json
+        descriptions = {item.dest: item.help for item in subparsers._choices_actions}
+        catalogue = []
+        for name, command_parser in subparsers.choices.items():
+            fields = []
+            for action in command_parser._actions:
+                if action.dest == "help":
+                    continue
+                fields.append({"name": action.dest, "flag": action.option_strings[0],
+                               "required": action.required, "help": action.help,
+                               "type": "boolean" if isinstance(action, argparse._StoreTrueAction)
+                               else "integer" if action.type is int else "string",
+                               "repeat": isinstance(action, argparse._AppendAction),
+                               "choices": list(action.choices) if action.choices is not None else None})
+            catalogue.append({"name": name, "description": descriptions[name], "fields": fields})
+        print(json.dumps(catalogue, ensure_ascii=False))
+        return
 
     if not args.command:
         parser.print_help()
         sys.exit(1)
 
     commands = {
+        'content-review': cmd_content_review,
+        'reader-info': cmd_reader_info,
+        'study-read': cmd_study_read,
+        'study-write': cmd_study_write,
         'status': cmd_status,
         'next': cmd_next,
         'unlock': cmd_unlock,
         'add-source': cmd_add_source,
+        'relocate-source': cmd_relocate_source,
         'profile': cmd_profile,
         'source-convert': cmd_source_convert,
         'source-audit': cmd_source_audit,

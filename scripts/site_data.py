@@ -18,6 +18,8 @@ views do not consume, while preserving node/edge/community identity and counts.
 from __future__ import annotations
 
 import sys
+import hashlib
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -203,14 +205,28 @@ def build_quiz_items(
     vault_path = Path(vault) if vault is not None else Path(".")
     items: list[dict] = []
     for page in pages:
-        for card in page_rules.extract_question_cards(page["body"]):
+        occurrences: dict[tuple[bool, str], int] = {}
+        for card in page_rules.extract_question_cards(page["body"], include_unanswered=True):
+            stem = " ".join(unicodedata.normalize("NFC", card["stem"]).split())
+            unanswered = not card["answer"]
+            key = str(page["rel"] if unanswered else page.get("canonical_id") or page["rel"]) + "\n" + stem
+            counter_key = (unanswered, key)
+            occurrences[counter_key] = occurrences.get(counter_key, 0) + 1
+            # Only identical stems on the same page need an occurrence suffix.
+            # Unrelated insertions and ordering changes keep all other IDs.
+            identity = key + (f"\n{occurrences[counter_key]}" if occurrences[counter_key] > 1 else "")
             items.append({
+                "id": ("unanswered:" if unanswered else "") + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32],
+                "revision": "" if unanswered else hashlib.sha256(card["answer"].encode("utf-8")).hexdigest(),
                 "rel": page["rel"],
                 "title": page["title"],
+                "domain": page.get("domain", ""),
+                "source_refs": page.get("source_refs", []),
                 "stem": card["stem"],
                 "answer_html": render_answer(
                     card["answer"], page_set, vault_path, with_images
-                ),
+                ) if not unanswered else "",
+                **({"unanswered": True} if unanswered else {}),
             })
     return items
 

@@ -1,5 +1,6 @@
 from pathlib import Path
 import importlib.util
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -177,6 +178,84 @@ def test_same_name_different_domain_stays_separate(tmp_path):
     cid, _, action = concept_store.resolve_or_create_concept(
         tmp_path, mention="Utility", domain="cs", registry=reg)
     assert action == "created" and cid == "concept.cs.utility"
+
+
+def test_new_translation_matches_supplied_alias_without_creating_duplicate(tmp_path):
+    old = concept_store.create_concept(tmp_path, domain="llm", name="Prompt工程",
+                                       aliases=["Prompt Engineering"])
+    _, old_body = mdpage.read_page(old)
+    cid, result, action = concept_store.resolve_or_create_concept(
+        tmp_path, mention="提示工程", domain="llm", registry=_registry_of(tmp_path),
+        aliases=["", "  prompt engineering  ", "Prompt Engineering"],
+        source_ref={"source": "agents", "sections": ["2.4"]})
+    assert action == "merged" and result == old
+    assert cid == "concept.llm.prompt-engineering"
+    meta, body = mdpage.read_page(old)
+    assert "提示工程" in meta["aliases"] and body == old_body
+    assert meta["source_refs"] == [{"source": "agents", "sections": ["2.4"]}]
+    assert len(concept_store.scan_concept_pages(tmp_path)) == 1
+
+
+@pytest.mark.parametrize("mention,aliases,other_domain", [
+    ("Alpha", ["Beta"], "d"),
+    ("新译名", ["Alpha", "Beta"], "d"),
+    ("共同别名", [], "d"),
+    ("Alpha", ["Beta"], "shared"),
+])
+def test_resolve_rejects_all_ambiguous_hits_without_writing(tmp_path, mention, aliases, other_domain):
+    _mk_concept(tmp_path, domain="d", name="Alpha", aliases=["共同别名"])
+    _mk_concept(tmp_path, domain=other_domain, name="Beta", aliases=["共同别名"])
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*.md")}
+    with pytest.raises(ValueError, match="ambiguous") as exc:
+        concept_store.resolve_or_create_concept(
+            tmp_path, mention=mention, domain="d", aliases=aliases, registry=_registry_of(tmp_path))
+    assert "concept.d.alpha" in str(exc.value)
+    assert f"concept.{other_domain}.beta" in str(exc.value)
+    for p in before:
+        assert p.relative_to(tmp_path).as_posix() in str(exc.value)
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*.md")} == before
+
+
+def test_resolve_prefers_domain_per_term_and_keeps_explicit_ids_scoped(tmp_path):
+    local, _ = _mk_concept(tmp_path, domain="d", name="Utility")
+    shared, _ = _mk_concept(tmp_path, domain="shared", name="Utility", aliases=["公共效用"])
+    other, _ = _mk_concept(tmp_path, domain="other", name="Utility")
+    reg = _registry_of(tmp_path)
+    assert concept_store.resolve("新译名", domain="d", registry=reg, aliases=["Utility"])[0] == local
+    assert concept_store.resolve(shared, domain="d", registry=reg)[0] == shared
+    assert concept_store.resolve(other, domain="d", registry=reg) is None
+    with pytest.raises(ValueError, match="ambiguous"):
+        concept_store.resolve("Utility", domain="d", registry=reg, aliases=["公共效用"])
+
+
+@pytest.mark.parametrize("name,aliases", [("C++", []), ("C#", []), ("C++", ["CPP"])])
+def test_slug_collision_is_rejected_without_merging_or_writing(tmp_path, name, aliases):
+    old = concept_store.create_concept(tmp_path, domain="d", name="C")
+    before = old.read_bytes()
+    with pytest.raises(FileExistsError, match="canonical_id collision") as exc:
+        concept_store.resolve_or_create_concept(
+            tmp_path, mention=name, domain="d", aliases=aliases, registry=_registry_of(tmp_path))
+    assert "concept.d.c" in str(exc.value) and "domains/d/concepts/c.md" in str(exc.value)
+    assert old.read_bytes() == before and len(concept_store.scan_concept_pages(tmp_path)) == 1
+    cid, _, action = concept_store.resolve_or_create_concept(
+        tmp_path, mention="CPP", domain="d", aliases=["C++"], registry=_registry_of(tmp_path))
+    assert action == "created" and cid == "concept.d.cpp"
+
+
+def test_direct_create_rejects_id_collision_even_when_path_differs(tmp_path):
+    old = concept_store.create_concept(tmp_path, domain="d", name="Prompt-Tuning")
+    before = old.read_bytes()
+    with pytest.raises(FileExistsError, match="canonical_id collision") as exc:
+        concept_store.create_concept(tmp_path, domain="d", name="提示微调", aliases=["Prompt Tuning"])
+    assert "Prompt-Tuning" in str(exc.value) and "aliases" in str(exc.value)
+    assert old.read_bytes() == before and len(concept_store.scan_concept_pages(tmp_path)) == 1
+
+
+def test_canonical_id_reference_is_not_saved_as_alias(tmp_path):
+    cid, rel = _mk_concept(tmp_path, domain="d", name="Alpha")
+    concept_store.resolve_or_create_concept(tmp_path, mention=cid, domain="d", registry=_registry_of(tmp_path))
+    meta, _ = mdpage.read_page(tmp_path / rel)
+    assert cid not in meta["aliases"]
 
 
 def test_create_existing_page_raises(tmp_path):

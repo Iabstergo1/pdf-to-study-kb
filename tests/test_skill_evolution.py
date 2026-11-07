@@ -81,6 +81,8 @@ def _init_repo(cwd):
         (cwd / tree / "SKILL.md").write_text("# foo\nv1\n", encoding="utf-8")
     (cwd / "tests").mkdir()
     (cwd / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    (cwd / "tests" / "test_env.py").write_text(
+        "import os\ndef test_isolated_environment():\n    assert 'STUDY_KB_ROOT' not in os.environ\n", encoding="utf-8")
     # 同真实仓：gitignore 运行时工作区 + __pycache__，stage/adopt 的 audit/proposal 与
     # gate 重跑 pytest 生成的缓存都不被 gate 当越界文件误杀。
     (cwd / ".gitignore").write_text("pipeline-workspace/\n__pycache__/\n", encoding="utf-8")

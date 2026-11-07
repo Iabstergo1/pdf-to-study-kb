@@ -20,6 +20,7 @@ the publish hook, and not in ``retract-source``'s derived rebuild tuple.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import shutil
 import sys
@@ -71,7 +72,8 @@ def _vault_pages(vault: Path) -> list[dict]:
         domain = str(meta.get("domain") or rel.split("/")[0])
         ptype = str(meta.get("type") or "")
         out.append({"rel": rel, "title": title, "domain": domain,
-                    "type": ptype, "body": body,
+                    "type": ptype, "body": body, "canonical_id": meta.get("canonical_id"),
+                    "revision": hashlib.sha256(f.read_bytes()).hexdigest(),
                     "obsidian_uri": wiki_gate.obsidian_uri(vault, rel),
                     "aliases": _string_list(meta.get("aliases")),
                     "source_refs": _source_refs(meta.get("source_refs"))})
@@ -199,3 +201,62 @@ def write_site(vault: str | Path, workspace: str | Path | None = None, *,
     )
     out.write_text(html, encoding="utf-8", newline="\n")
     return SiteResult(path=out, page_count=len(pages))
+
+
+def build_site_data(vault: str | Path, *, with_images: bool = False,
+                    source_media: dict | None = None) -> dict:
+    """Build web-reader data with exactly the offline site's rendered page bodies."""
+    vault = Path(vault)
+    pages = _vault_pages(vault)
+    graph = _graph_payload(vault)
+    _articles, payload, rendered = site_layout.build_content(
+        pages, vault=vault, with_images=with_images,
+        render_page_body=site_render.render_page_body, graph_payload=graph,
+        quiz_items=site_data.build_quiz_items(
+            pages, site_render.render_page_body, vault=vault, with_images=with_images),
+        proposition_items=site_data.build_proposition_items(pages), source_media=source_media,
+    )
+    for page in payload["pages"]:
+        page["revision"] = next(p["revision"] for p in pages if p["rel"] == page["path"])
+        page["html"] = rendered[page["path"]]
+        page["search_text"] = site_layout._heading_text(page["html"])
+        page["source_pages"] = (source_media or {}).get(page["path"], [])
+    payload["graph_view_html"] = _graph_view_html(vault, graph)
+    return payload
+
+
+def write_site_data(vault: str | Path, workspace: str | Path | None = None, *,
+                    out: str | Path | None = None, with_images: bool = False) -> SiteResult:
+    """Write UTF-8 JSON; HTML already has target escaping from the shared renderer."""
+    vault = Path(vault)
+    workspace = Path(workspace) if workspace is not None else vault.parent
+    target = Path(out) if out is not None else workspace / "pipeline-workspace" / "exports" / "site-data"
+    (target / "pages").mkdir(parents=True, exist_ok=True)
+    media = None
+    if with_images:
+        media = site_media.stage_image_files(
+            vault, target, _page_asset_mapping(vault, workspace),
+            only_rels=_source_panel_rels(_vault_pages(vault)),
+        )
+    payload = build_site_data(vault, with_images=with_images, source_media=media)
+
+    def write_json(rel, value):
+        file = target / rel
+        temporary = file.with_suffix(file.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8", newline="\n",
+        )
+        temporary.replace(file)
+
+    manifest_pages = []
+    for page in payload["pages"]:
+        identity = hashlib.sha256(json.dumps(page, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:24]
+        file = f"pages/{identity}.json"
+        write_json(file, page)
+        manifest_pages.append({**{k: v for k, v in page.items() if k != "html"}, "file": file})
+    for name in ("graph", "quiz", "propositions"):
+        write_json(f"{name}.json", payload[name])
+    (target / "graph-view.html").write_text(payload["graph_view_html"], encoding="utf-8", newline="\n")
+    write_json("site.json", {"format": 2, "pages": manifest_pages, "tree": payload["tree"], "filters": payload["filters"]})
+    return SiteResult(path=target / "site.json", page_count=len(manifest_pages))

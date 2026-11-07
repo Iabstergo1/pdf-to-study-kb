@@ -22,8 +22,13 @@ proposals only; it does not edit content pages.
 
 ## 3. Outputs
 
+- Published-source reviews use `content-review` below: one immutable SQLite review batch,
+  reproducible Markdown + JSON under `pipeline-workspace/reports/kb-qa/<run_id>.*`, and
+  individual `review_proposals` rows committed with the results. These are model results,
+  not human acceptance. Legacy YAML history is read alongside them, never backfilled.
 - `pipeline-workspace/reports/kb-qa/<run_id>.md`: the QA report.
-- For actionable findings, write `wiki/Review-Queue/kb-qa-<YYYY-MM-DD>.md` proposals; no direct content-page edits.
+- Unregistered/pre-save scopes may still write `wiki/Review-Queue/kb-qa-<YYYY-MM-DD>.md`
+  proposals; label them as report-only, without claiming registered page coverage.
 - The report covers scope, the Q-chain, sampled items, findings, risk level, and the suggested follow-up skill (usually `kb-review`).
 - For an actionable finding on an `adopted/published` legacy page, distinguish the later
   `revise-adopted` **write authorization** from content attribution: record official evidence for the
@@ -54,6 +59,66 @@ If the finding targets an adopted legacy page, the handoff must say that `revise
 the later edit but cannot validate the evidence or change `source_refs`.
 
 ## 7. Workflow
+
+### Published-source registration
+
+Review one explicit source per batch. Whole-vault/domain requests can produce separate
+source batches; do not infer report ownership from today's shared-page `source_refs`.
+The Web provides a `review` tool with `{action, value}`; other agents use the same CLI:
+`python scripts/pipeline.py content-review --action <action> --payload '<JSON>'`
+(or `--stdin`). No direct SQLite writes or edits to `content-review-ledger.yaml`.
+
+1. `begin`: `{run_id: UUID, source, method: "full-page" | "sampled-claims", pages?: [vault-relative paths]}`.
+   Full-page defaults to every currently published content page of this source. For
+   sampling, explicitly select pages. The returned scope is frozen; its denominator
+   counts knowledge pages, not original PDF pages. The Web supplies source/run/method.
+2. `read`: `{run_id, path}` for **every** selected page at the time you review it. The
+   tool returns exact content and a stored `read_id`, revision and time. Read the original
+   text/images too. Ordinary file reads alone do not supply review receipts. A full-page
+   check examines every substantive assertion; sampling must name only the assertions
+   actually checked. Read receipts are evidence of tool delivery, not proof of comprehension.
+3. `register`: submit the following object after every scoped page has been checked.
+   In Web pass it as `value` to `review`. The CLI validates it, creates both report formats
+   from this structured result, and atomically registers results and findings. Do not
+   additionally create duplicate Markdown proposals for these findings.
+
+```json
+{
+  "format": 1,
+  "run_id": "<UUID from begin>",
+  "summary": "Scope, method, limits and overall observations",
+  "pages": [{
+    "path": "domains/example/concepts/example.md",
+    "read_id": "<receipt from read>",
+    "outcome": "no-findings",
+    "checks": [{
+      "claim": "Exact assertion checked, or the explicit full-page assertion inventory",
+      "evidence": [{"path": "pipeline-workspace/staging/<source>/source.md", "locator": "page/section/paragraph"}],
+      "judgment": "Evidence-based conclusion and limits"
+    }],
+    "findings": []
+  }]
+}
+```
+
+Use `outcome: "findings"` with `findings: [{id: "F1", reason: "specific issue and evidence"}]`;
+IDs must be unique within the batch. Use `inconclusive` when evidence cannot establish a
+conclusion. Evidence references can also name source images or official HTTPS citations.
+Missing evidence or incomplete work must not become `no-findings`. Retrying the identical
+registration is safe; changing a registered result is refused.
+
+4. After a confirmed repair, start a new batch with `parent_id` equal to the **original**
+   batch ID and `pages` listing affected pages; review their new contents with new receipts.
+   The Web recheck action supplies these fields. Old findings stay in history; neither
+   recheck nor lint closes them automatically. Their disposition is a separate human action.
+5. `status` shows batch results and changed versions. Never call `accept` or `close` on
+   behalf of the user. They inspect reports/dispositions and confirm the batch in Web.
+   Do not promise complete factual correctness. Reading all knowledge pages does not
+   prove every statement in the original source was captured.
+
+If the model exits without successful structured registration, the Web marks this source
+review incomplete. Continue the same job to finish it. Do not re-hash repaired pages at
+registration time: the receipt version is always the reviewed version.
 
 | Sub-unit | Input | Output | Acceptance | Persisted | Failure stop |
 |---|---|---|---|---|---|

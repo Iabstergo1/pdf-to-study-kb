@@ -88,6 +88,10 @@ window.__SITE_EMBED__ = __SITE_EMBED_FLAG__;
  var SVGNS="http://www.w3.org/2000/svg";
  var raw = JSON.parse(document.getElementById("graph-data").textContent);
  var VAULT = window.__VAULT_ROOT__ || "";
+ if(window.__SITE_EMBED__){
+   document.getElementById("detail").textContent="点击节点在阅读器查看；也可使用 Tab 和回车选择节点。";
+   document.getElementById("hint").textContent="拖动节点 · 滚轮缩放 · 拖空白处平移 · 点击节点阅读";
+ }
  var PALETTE=["#4e79a7","#59a14f","#e15759","#f28e2b","#b07aa1","#76b7b2","#edc948","#ff9da7","#9c755f","#7b6cf6","#2aa39a","#d4708a"];
  var commIdx={}; (raw.communities||[]).forEach(function(c,i){ commIdx[c.id]=i; });
  var commLabel={}; (raw.communities||[]).forEach(function(c){ commLabel[c.id]=c.label||c.id; });
@@ -133,6 +137,7 @@ window.__SITE_EMBED__ = __SITE_EMBED_FLAG__;
  var lineEls=links.map(function(l){ var ln=el("line",{}); ln.setAttribute("class","edge "+(l.e.relation||"related")); l.el=ln; gE.appendChild(ln); return ln; });
  var nodeEls=nodes.map(function(o){ var g=el("g",{}); g.setAttribute("class","node"); g.setAttribute("data-id",o.d.id);
    g.setAttribute("data-path",o.d.path||"");
+   g.setAttribute("tabindex","0"); g.setAttribute("role","link"); g.setAttribute("aria-label",o.d.label||o.d.id);
    var c=el("circle",{r:radius(o),fill:color(o.d)}); g.appendChild(c);
    var tx=el("text",{x:radius(o)+3,y:4}); tx.textContent=o.d.label||o.d.id; g.appendChild(tx);
    o.el=g; o.circle=c; gN.appendChild(g); return g; });
@@ -179,11 +184,14 @@ window.__SITE_EMBED__ = __SITE_EMBED_FLAG__;
    g.addEventListener("mouseenter",function(){ if(!selected)setLit(o.d.id); });
    g.addEventListener("mouseleave",function(){ if(!selected)clearLit(); });
    g.addEventListener("dblclick",function(ev){ ev.stopPropagation(); if(!window.__SITE_EMBED__){ window.location.href=obsURI(o.d); } });
-   g.addEventListener("mousedown",function(ev){ ev.stopPropagation(); drag={o:o}; o.fixed=true; reheat();
+   g.addEventListener("mousedown",function(ev){ ev.stopPropagation(); drag={o:o,x:ev.clientX,y:ev.clientY}; moved=false; o.fixed=true; reheat();
      ev.preventDefault(); });
+   g.addEventListener("keydown",function(ev){ if(ev.key==="Enter" || ev.key===" "){ ev.preventDefault(); moved=false; g.dispatchEvent(new MouseEvent("click",{bubbles:true})); } });
    g.addEventListener("click",function(ev){ ev.stopPropagation(); if(!moved){
      if(window.__SITE_EMBED__ && window.parent && window.parent.location){
-       window.parent.location.hash = "#/"+encodeURI(o.d.path||"");
+       if(new URLSearchParams(window.location.search).get("preview")==="1"){
+         window.parent.postMessage({type:"study-kb:preview",path:o.d.path||""},window.location.origin);
+       }else{ window.parent.location.hash = "#/"+encodeURI(o.d.path||""); }
      }
      select(o);
    } });
@@ -193,7 +201,8 @@ window.__SITE_EMBED__ = __SITE_EMBED_FLAG__;
  var drag=null, pan=null, moved=false;
  function toGraph(mx,my){ return {x:(mx-tf.x)/tf.k, y:(my-tf.y)/tf.k}; }
  svg.addEventListener("mousedown",function(ev){ pan={x:ev.clientX,y:ev.clientY,ox:tf.x,oy:tf.y}; moved=false; svg.classList.add("panning"); });
- window.addEventListener("mousemove",function(ev){ moved=true;
+ window.addEventListener("mousemove",function(ev){ var start=drag||pan;
+   if(start && Math.hypot(ev.clientX-start.x,ev.clientY-start.y)>3)moved=true;
    if(drag){ var rect=svg.getBoundingClientRect(); var p=toGraph(ev.clientX-rect.left,ev.clientY-rect.top); drag.o.x=p.x; drag.o.y=p.y; drag.o.fixed=true; reheat(); render(); return; }
    if(pan){ tf.x=pan.ox+(ev.clientX-pan.x); tf.y=pan.oy+(ev.clientY-pan.y); applyTf(); } });
  window.addEventListener("mouseup",function(){ drag=null; pan=null; svg.classList.remove("panning"); });

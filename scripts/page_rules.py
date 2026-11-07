@@ -261,13 +261,14 @@ def extract_question_stems(body: str) -> list[str]:
     return [s for n in _question_nodes(body) if (s := _node_stem(n))]
 
 
-def extract_question_cards(body: str) -> list[dict]:
+def extract_question_cards(body: str, *, include_unanswered: bool = False) -> list[dict]:
     """返回正文中每个已解答的 [!question] callout 卡片 [{"stem","answer"}]。
 
     题干口径复用 _node_stem（与 extract_question_stems 完全一致，不得另立口径）；
     「什么算已解答」复用 question_resolution（不再各判各的）：nested_success 取所有
     success 后代正文按文档序拼接，sibling_success 取紧随其后的同级 success 正文，
-    linked_resolution_candidate/none 无内联答案文本、跳过。纯函数、无 I/O。"""
+    linked_resolution_candidate/none 无内联答案文本、默认跳过；include_unanswered
+    为网页题库保留空答案条目，避免按题干集合误删同名未作答题。纯函数、无 I/O。"""
     nodes, _ = parse_callouts(body)
     cards: list[dict] = []
     for i, q in enumerate(nodes):
@@ -284,8 +285,8 @@ def extract_question_cards(body: str) -> list[dict]:
             answer = "\n".join(
                 text for depth, text in sibling["body"] if depth == sibling["depth"]).strip()
         else:
-            continue
-        if answer:
+            answer = ""
+        if answer or include_unanswered:
             cards.append({"stem": stem, "answer": answer})
     return cards
 

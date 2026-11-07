@@ -4,6 +4,7 @@ packet 组装/fail-closed 纯函数层在 test_resume_packet.py（本文件拆�
 这里只测 CLI wiring：happy path 输出结构 + 未 ingesting 的 fail-closed 退出码。
 """
 import os
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +31,16 @@ def test_cli_resume_packet_happy_path(tmp_path):
         r = _run(cmd, tmp_path)
         assert r.returncode == 0, r.stderr
     staging = tmp_path / "pipeline-workspace/staging/note"
+    meta = _run(["next", "--source", "note", "--json"], tmp_path)
+    assert meta.returncode == 0, meta.stdout + meta.stderr
+    info = json.loads(meta.stdout)
+    assert info["next_window"]["window_id"] == "w0000"
+    assert info["next_window"]["hash"].startswith("sha256:")
+    assert info["finished"] == 0
+    initial = _run(["next", "--source", "note", "--resume-packet"], tmp_path)
+    assert initial.returncode == 0, initial.stdout + initial.stderr
+    assert "phase=initialize" in initial.stdout
+    assert not (staging / "digest.md").exists()
     (staging / "digest.md").write_text("## RESUME\n- next: w0000\n", encoding="utf-8")
     r = _run(["next", "--source", "note", "--resume-packet"], tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr

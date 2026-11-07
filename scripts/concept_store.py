@@ -138,19 +138,30 @@ def _concept_body(name: str) -> str:
     return CONCEPT_BODY.format(name=name)
 
 
-def resolve(mention: str, *, domain: str, registry: dict):
-    """mention 命中 canonical（名/别名，先本域后 shared）→ (canonical_id, entry)；未命中 → None。"""
-    if mention in registry:  # 直接给 canonical_id
-        return mention, registry[mention]
-    n = _norm(mention)
-    for want in (domain, "shared"):
-        for cid in sorted(registry):
-            e = registry[cid]
-            if e["domain"] != want:
-                continue
-            if _norm(e["canonical_name"]) == n or any(_norm(a) == n for a in e["aliases"]):
-                return cid, e
-    return None
+def resolve(mention: str, *, domain: str, registry: dict, aliases=()):
+    """各候选词先本域后 shared；汇总所有精确命中，歧义时拒绝选择。"""
+    hits = {}
+    matched_terms = []
+    terms = dict.fromkeys(t.strip() for t in (mention, *aliases) if t.strip())
+    for term in terms:
+        if term in registry and registry[term]["domain"] in (domain, "shared"):
+            matches = [(term, registry[term])]
+        else:
+            matches = []
+            for want in dict.fromkeys((domain, "shared")):
+                matches = [(cid, e) for cid, e in sorted(registry.items())
+                           if e["domain"] == want and any(
+                               _norm(term) == _norm(name)
+                               for name in (e["canonical_name"], *e["aliases"]))]
+                if matches:
+                    break
+        for cid, entry in matches:
+            hits[cid] = entry
+            matched_terms.append(f"{term!r} -> {cid} ({entry['page_path']})")
+    if len(hits) > 1:
+        raise ValueError("ambiguous concept match: " + "; ".join(matched_terms)
+                         + "; supply names/aliases for one concept only")
+    return next(iter(hits.items()), None)
 
 
 def is_alias_hit(mention: str, cid: str, entry: dict) -> bool:
@@ -159,17 +170,34 @@ def is_alias_hit(mention: str, cid: str, entry: dict) -> bool:
     return mention != cid and _norm(mention) != _norm(entry["canonical_name"])
 
 
-def create_concept(vault, *, domain: str, name: str, aliases=(), source_ref=None) -> Path:
+def concept_path(domain: str, name: str) -> Path:
+    """写前检查与创建使用同一个确定性目标路径。"""
+    directory = Path("concepts") if domain == "shared" else Path("domains") / domain / "concepts"
+    return directory / f"{slugify(name)}.md"
+
+
+def create_concept(vault, *, domain: str, name: str, aliases=(), source_ref=None, registry=None) -> Path:
     """新建骨架概念页（status: proposed；§8 最小结构）。页已存在则拒绝——必须走 merge。"""
-    cid = canonical_id(domain, name, aliases)    # 稳定 ID（spec §6 不变：优先 ASCII 别名，去重键稳定）
-    slug = slugify(name)                          # 文件名用中文 canonical_name（侧栏/画布/标签可读），与 cid 解耦
-    if domain == "shared":
-        rel = Path("concepts") / f"{slug}.md"
-    else:
-        rel = Path("domains") / domain / "concepts" / f"{slug}.md"
+    cid = canonical_id(domain, name, aliases)
+    rel = concept_path(domain, name)
     path = Path(vault) / rel
+    if registry is None:
+        registry, errors, _ = build_registry(scan_concept_pages(vault))
+        if errors:
+            raise ValueError("corrupt concept pages: " + "; ".join(errors))
+    if cid in registry:
+        existing = registry[cid]
+        raise FileExistsError(
+            f"canonical_id collision: {cid}; existing page={existing['page_path']}, "
+            f"canonical_name={existing['canonical_name']!r}, aliases={existing['aliases']!r}; "
+            "same slug does not prove the same concept. For a synonym, use an existing name/alias; "
+            "for a distinct concept, use a distinct canonical name (ASCII names take precedence over aliases)")
     if path.exists():
-        raise FileExistsError(f"concept page already exists: {rel} (use merge, never duplicate)")
+        existing, _ = mdpage.read_page(path)
+        raise FileExistsError(
+            f"concept page already exists: {rel.as_posix()} (requested {cid}); "
+            f"canonical_name={existing.get('canonical_name')!r}, aliases={existing.get('aliases', [])!r}; "
+            "use merge for the same concept, never overwrite")
     meta = {"type": "concept", "canonical_id": cid, "canonical_name": name,
             "aliases": list(aliases),
             "scope": "shared" if domain == "shared" else "domain",
@@ -186,7 +214,7 @@ def merge_concept(vault, page_path: str, *, source_ref=None, new_aliases=()) -> 
     meta, body = mdpage.read_page(path)
     if new_aliases:
         cur = list(meta.get("aliases") or [])
-        known = {_norm(meta.get("canonical_name", ""))} | {_norm(x) for x in cur}
+        known = {"", _norm(meta.get("canonical_name", "")), _norm(meta.get("canonical_id", ""))} | {_norm(x) for x in cur}
         for a in new_aliases:
             if _norm(a) not in known:
                 cur.append(a)
@@ -208,13 +236,13 @@ def resolve_or_create_concept(vault, *, mention: str, domain: str, registry: dic
                               aliases=(), source_ref=None):
     """唯一入口（spec §6）：命中 → merge 既有页，返回 (cid, path, "merged")；
     未命中 → create 骨架页，返回 (cid, path, "created")。新建后调用方需重建 registry。"""
-    hit = resolve(mention, domain=domain, registry=registry)
+    hit = resolve(mention, domain=domain, registry=registry, aliases=aliases)
     if hit:
         cid, entry = hit
         merge_concept(vault, entry["page_path"], source_ref=source_ref,
                       new_aliases=[mention, *aliases])
         return cid, Path(vault) / entry["page_path"], "merged"
     path = create_concept(vault, domain=domain, name=mention,
-                          aliases=list(aliases), source_ref=source_ref)
+                          aliases=list(aliases), source_ref=source_ref, registry=registry)
     meta, _ = mdpage.read_page(path)
     return meta["canonical_id"], path, "created"

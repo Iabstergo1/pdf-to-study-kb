@@ -22,6 +22,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import locks
+import ingest_guards
 import source_artifacts as sa
 import state_store
 
@@ -42,12 +43,12 @@ class ResumePacketError(Exception):
             f"\n修复后重试：python scripts/pipeline.py next --source {source_id} --resume-packet")
 
 
-def _extract_resume_block(digest_text: str) -> str | None:
+def _extract_resume_block(digest_text: str, heading="RESUME") -> str | None:
     """digest 顶部 `## RESUME` 块：从该标题行到下一个 `## `（契约见 write-pages.md U7）。"""
     lines = digest_text.splitlines()
     start = None
     for i, ln in enumerate(lines):
-        if re.match(r"^## RESUME\b", ln):
+        if re.match(rf"^## {heading}\b", ln):
             start = i
             break
     if start is None:
@@ -60,7 +61,62 @@ def _extract_resume_block(digest_text: str) -> str | None:
     return "\n".join(lines[start:end]).rstrip()
 
 
-def build_resume_packet(*, db_path, staging_dir, repo_root, source_id,
+def _unchanged_pages(vault: Path, wo: dict) -> bool:
+    """缺摘要时，只有完整工单快照与当前可写页面逐一一致才允许首次初始化。"""
+    groups = [wo.get("concept_pages_snapshot"), wo.get("other_pages_snapshot")]
+    if not vault.is_dir() or any(not isinstance(group, list) for group in groups):
+        return False
+    expected = {}
+    for entry in [*groups[0], *groups[1]]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) or not entry.get("sha256"):
+            return False
+        if ingest_guards.in_write_scope(entry["path"], wo["write_scope"]):
+            expected[entry["path"]] = entry["sha256"]
+    actual = {p.relative_to(vault).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+              for p in vault.rglob("*.md")
+              if ingest_guards.in_write_scope(p.relative_to(vault).as_posix(), wo["write_scope"])}
+    return actual == expected and ingest_guards.registry_fresh(vault, wo["registry"]["hash"])
+
+
+def _window_position(db_path, staging, source_id):
+    wins = sa.read_jsonl(staging / "windows.jsonl")
+    win_ids = [w["window_id"] for w in wins]
+    states = {r["window_id"]: r["status"] for r in state_store.window_progress(db_path, source_id)}
+    problems = [f"账本窗口 {wid}（{st}）不在 windows.jsonl——状态矛盾，需人工核对"
+                for wid, st in states.items() if wid not in set(win_ids)]
+    finished = [w for w in win_ids if states.get(w) == "finished"]
+    running = [w for w in win_ids if states.get(w) == "running"]
+    failed = [w for w in win_ids if states.get(w) == "failed"]
+    if len(running) > 1:
+        problems.append(f"账本同时存在多个 running 窗口：{', '.join(running)}——恢复目标不唯一，需人工核对")
+    if problems:
+        raise ResumePacketError(problems, source_id)
+    next_win = next((w for w in wins if states.get(w["window_id"]) != "finished"), None)
+    return wins, states, finished, running, failed, next_win
+
+
+def next_window_info(*, db_path, staging_dir, source_id):
+    """紧凑的账本定位信息，供 U7 更新摘要；不验证摘要、不授权恢复。"""
+    src = state_store.get_source(db_path, source_id)
+    if src is None:
+        raise ResumePacketError([f"unknown source: {source_id}"], source_id)
+    staging = Path(staging_dir)
+    missing = [f"staging 缺 {name}" for name in ("windows.jsonl", "source.md") if not (staging / name).exists()]
+    if missing:
+        raise ResumePacketError(missing, source_id)
+    wins, _, finished, _, _, window = _window_position(db_path, staging, source_id)
+    next_window = None
+    if window is not None:
+        md = (staging / "source.md").read_text(encoding="utf-8")
+        digest = hashlib.sha256(md[window["char_start"]:window["char_end"]].encode("utf-8")).hexdigest()[:12]
+        next_window = {"window_id": window["window_id"], "hash": f"sha256:{digest}",
+                       "page_start": window.get("page_start"), "page_end": window.get("page_end"),
+                       "chapter_title": window.get("chapter_title", "")}
+    return {"source_id": source_id, "stage": src["current_stage"], "status": src["current_status"],
+            "total": len(wins), "finished": len(finished), "next_window": next_window}
+
+
+def build_resume_packet(*, db_path, staging_dir, repo_root, vault_dir, source_id,
                         lock_ttl_seconds: int = 1800) -> str:
     staging = Path(staging_dir)
     repo_root = Path(repo_root)
@@ -81,8 +137,7 @@ def build_resume_packet(*, db_path, staging_dir, repo_root, source_id,
     for p, label in ((windows_file, "windows.jsonl"), (source_md, "source.md")):
         if not p.exists():
             problems.append(f"staging 缺 {label}（{p}）")
-    if not digest_file.exists():
-        problems.append(f"ingesting 状态但找不到 digest（{digest_file}）——外部记忆缺失，需人工核对")
+    initializing = not digest_file.exists()
     wo_row = state_store.get_work_order(db_path, source_id)
     wo_file = Path(wo_row["path"]) if wo_row is not None else staging / "workorder.yaml"
     if wo_row is None:
@@ -138,37 +193,48 @@ def build_resume_packet(*, db_path, staging_dir, repo_root, source_id,
     if problems:
         raise ResumePacketError(problems, source_id)
 
-    wins = sa.read_jsonl(windows_file)
+    wins, status_by_id, finished, running, failed, next_win = _window_position(db_path, staging, source_id)
     win_ids = [w["window_id"] for w in wins]
-    status_by_id = {r["window_id"]: r["status"]
-                    for r in state_store.window_progress(db_path, source_id)}
-    for wid, st in status_by_id.items():
-        if wid not in set(win_ids):
-            problems.append(f"账本窗口 {wid}（{st}）不在 windows.jsonl——状态矛盾，需人工核对")
-    finished = [w for w in win_ids if status_by_id.get(w) == "finished"]
-    running = [w for w in win_ids if status_by_id.get(w) == "running"]
-    failed = [w for w in win_ids if status_by_id.get(w) == "failed"]
-    if len(running) > 1:
-        problems.append(f"账本同时存在多个 running 窗口：{', '.join(running)}——恢复目标不唯一，需人工核对")
-    next_win = next((w for w in wins if status_by_id.get(w["window_id"]) != "finished"), None)
 
-    resume_block = _extract_resume_block(digest_file.read_text(encoding="utf-8"))
-    if resume_block is None:
+    if initializing:
+        if (status_by_id or state_store.window_read_ids(db_path, source_id)
+                or not _unchanged_pages(Path(vault_dir), wo_data)):
+            problems.append(f"digest 缺失（{digest_file}），且不能确认尚未开始阅读或写作——需人工核对，不能重建历史摘要")
+        if not (staging / "chapters.json").exists():
+            problems.append("首次初始化缺 chapters.json，不能建立全书内容路由")
+        if next_win is None:
+            problems.append("首次初始化缺阅读窗口")
+        resume_block = "digest_status=not_created（无阅读/处理记录，可写页面与工单快照一致；需先初始化摘要）"
+    else:
+        digest_text = digest_file.read_text(encoding="utf-8")
+        resume_block = _extract_resume_block(digest_text)
+        if resume_block is None and next_win is None:
+            resume_block = _extract_resume_block(digest_text, "DONE")
+    if not initializing and resume_block is None:
         if re.search(r"(?m)^## DONE\b", digest_file.read_text(encoding="utf-8")):
-            problems.append("digest 顶部是 ## DONE（本源已宣告写完）——若账本仍有未完窗口先人工核对；"
-                            "若只剩收尾：阶段 E 综合层 → pipeline.py ingest-done → lint，无需 packet")
+            problems.append("digest 顶部是 ## DONE（本源已宣告写完），但账本仍有未完窗口，需人工核对")
         else:
             problems.append("digest 缺 ## RESUME 块（恢复锚点缺失，需人工补写后重试）")
-    else:
+    elif not initializing:
         mentioned = set(_WIN_TOKEN.findall(resume_block))
         unknown = sorted(mentioned - set(win_ids))
         if unknown:
             problems.append(f"RESUME 指向不存在的窗口：{', '.join(unknown)}")
         if next_win is not None and next_win["window_id"] not in mentioned:
+            current_round = state_store.round_anchor(db_path, source_id)
+            reads = state_store.window_reads_in_round(db_path, source_id, current_round)
+            completed = [dict(window_id=row["window_id"], round=row["round"],
+                              read_in_current_round=row["window_id"] in reads,
+                              input_hash=row["input_hash"], write_set_json=row["write_set_json"])
+                         for row in state_store.window_states(db_path, source_id)
+                         if row["status"] == "finished"]
             problems.append(
                 f"RESUME 未提及账本判定的下一窗 {next_win['window_id']}——digest 过期或状态矛盾"
                 f"（RESUME 提及：{', '.join(sorted(mentioned)) or '无'}）；"
-                "人工把 digest 顶部 RESUME 更新到真实下一窗后重试")
+                "执行入库的智能体须先核对已完成窗口并补齐 digest/RESUME 后重试；"
+                "不能只替换窗口编号，无法解释记录时交由人工核对\n"
+                f"核对依据（仍拒绝出包，不授权继续写作）：current_round={current_round}; "
+                f"completed_windows={json.dumps(completed, ensure_ascii=False)}")
     if problems:
         raise ResumePacketError(problems, source_id)
 
@@ -191,6 +257,7 @@ def build_resume_packet(*, db_path, staging_dir, repo_root, source_id,
     a(f"domain={src['domain']}")
     a(f"stage={src['current_stage']}")
     a(f"status={src['current_status']}")
+    a(f"phase={'initialize' if initializing else 'finish' if next_win is None else 'resume'}")
     a(lock_line)
     a("")
     a("[windows]")
@@ -201,6 +268,36 @@ def build_resume_packet(*, db_path, staging_dir, repo_root, source_id,
     nhash = None
     if next_win is None:
         a("next_window=none（全部窗口已完成）")
+        rows = state_store.window_states(db_path, source_id)
+        current_round = state_store.round_anchor(db_path, source_id)
+        written = set()
+        for row in rows:
+            if row["status"] == "finished" and row.get("round") == current_round:
+                try:
+                    paths = json.loads(row["write_set_json"] or "[]")
+                    if not isinstance(paths, list) or any(not isinstance(p, str) for p in paths):
+                        raise ValueError("write_set must be a list of paths")
+                    written.update(p.replace("\\", "/") for p in paths)
+                except (ValueError, TypeError) as error:
+                    raise ResumePacketError([f"窗口 {row['window_id']} 写集损坏：{error}"], source_id)
+        import mdpage
+        vault = staging.parents[2] / "wiki"
+        source_pages = []
+        for page in sorted(vault.rglob("*.md")):
+            meta, _ = mdpage.read_page(page)
+            if meta.get("status") in ("proposed", "published") and (
+                    meta.get("source_id") == source_id or meta.get("source") == source_id
+                    or any(ref.get("source") == source_id for ref in (meta.get("source_refs") or []) if isinstance(ref, dict))):
+                source_pages.append(page.relative_to(vault).as_posix())
+        a(f"round_written_pages={json.dumps(sorted(written), ensure_ascii=False)}")
+        a(f"source_pages={json.dumps(source_pages, ensure_ascii=False)}")
+        a("# round_written_pages 只认本轮已完成窗口的账；source_pages 是来源归属，不能代替记账。")
+        if finished:
+            last = next(row for row in rows
+                        if row["window_id"] == finished[-1])
+            a(f"last_finished_window={last['window_id']}")
+            a(f"last_finished_writes={last['write_set_json'] or '[]'}")
+            a(f"last_finished_proposals={last['proposal_set_json'] or '[]'}")
     else:
         nid = next_win["window_id"]
         nhash = hashlib.sha256(
@@ -233,9 +330,15 @@ def build_resume_packet(*, db_path, staging_dir, repo_root, source_id,
     a("[next-commands]")
     a("# 环境：study-kb 解释器 + PYTHONUTF8=1")
     a(f"python scripts/pipeline.py ingest-start --source {source_id}   # 幂等：恢复/重取锁")
+    if initializing:
+        a(f"# 先读取 {staging / 'chapters.json'}、workorder.yaml 与 ingest/references/content-routing.md。")
+        a(f"# 由模型按原文建立全书理解和逐章路由表，写入 {digest_file}；")
+        a(f"# 在 ## RESUME 如实记录尚无已完成窗口、下一窗 {next_win['window_id']}，然后才执行下面的读窗写作。")
+        a("# 这是首次初始化，不是丢失摘要的恢复；不要重新生成工单，也不要声称读过未读的窗口。")
     if next_win is None:
         a("# 所有窗口已完成：先做阶段 E 综合层（更新 overview + 按需 topic/comparison/synthesis，"
           "并进某窗 --writes），再收尾：")
+        a("# window-done 会替换写集；保留 last_finished_writes/proposals，追加本次新增路径再记账，不重启该窗。")
         a(f"python scripts/pipeline.py ingest-done --source {source_id}")
         a(f"python scripts/pipeline.py lint --source {source_id}")
     else:
@@ -246,6 +349,7 @@ def build_resume_packet(*, db_path, staging_dir, repo_root, source_id,
         a("# 读窗+写页（新页先 check-write；改既有页先 snapshot-page）→ page_rules 自检 → 记账：")
         a(f"python scripts/pipeline.py window-done --source {source_id} --window {nid}"
           " --writes '[\"<vault-rel-path>\", ...]'")
-        a("# 之后按 windows.jsonl 顺序逐窗推进；每窗后刷新 digest 顶部 ## RESUME")
+        a(f"# 每窗 U6 后用 next --source {source_id} --json 获取下一窗 ID/hash，完成 U7 digest 更新；")
+        a("# 仍有窗口时刷新 ## RESUME，全部完成改为 ## DONE，注明综合层/发布待办；再校验恢复包。")
     a("=== /RESUME_PACKET v1 ===")
     return "\n".join(out)

@@ -9,6 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 import importlib.util
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PIPELINE = ROOT / "scripts" / "pipeline.py"
@@ -107,6 +108,47 @@ def test_ingest_core_lifecycle_scenario(tmp_path):
     assert _run(["ingest-start", "--source", "note2"], tmp_path).returncode == 0
 
 
+def test_resolve_new_concept_checks_scope_before_creating_any_file(tmp_path):
+    _prep_source(tmp_path)
+    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    args = ["resolve-concept", "--mention", "余弦相似度", "--alias", "Cosine Similarity",
+            "--ref-source", "note", "--ref-sections", "A", "--domain"]
+    denied = _run([*args, "statistics"], tmp_path)
+    assert denied.returncode != 0, denied.stdout
+    assert "outside write_scope" in denied.stdout
+    assert "domains/misc/concepts/**" in denied.stdout
+    assert "domains/research-method/concepts/**" in denied.stdout
+    assert not (tmp_path / "wiki/domains/statistics").exists()
+    allowed = _run([*args, "misc"], tmp_path)
+    assert allowed.returncode == 0, allowed.stderr
+    assert (tmp_path / "wiki/domains/misc/concepts/余弦相似度.md").exists()
+
+
+def test_sync_overview_during_ingest_saves_baseline_before_first_edit(tmp_path):
+    _prep_source(tmp_path)
+    vault = tmp_path / "wiki"
+    vault.mkdir(exist_ok=True)
+    overview = vault / "overview.md"
+    original = b"---\ntype: overview\nmanaged_by: pipeline\nstatus: published\n---\nOriginal prose.\n"
+    overview.write_bytes(original)
+    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    (vault / "sources").mkdir(exist_ok=True)
+    (vault / "sources/note.md").write_text("---\ntype: source\nsource_id: note\ntitle: Note\nstatus: proposed\n---\nSource.\n", encoding="utf-8")
+    assert _run(["sync-overview-sources"], tmp_path).returncode == 0
+    assert overview.read_bytes() == original
+    assert not list((tmp_path / "pipeline-workspace/snapshots/note").rglob("manifest.json"))
+    applied = _run(["sync-overview-sources", "--apply"], tmp_path)
+    assert applied.returncode == 0, applied.stderr
+    manifests = list((tmp_path / "pipeline-workspace/snapshots/note").rglob("manifest.json"))
+    assert len(manifests) == 1
+    allowed = _run(["check-write", "--source", "note", "--path", "overview.md"], tmp_path)
+    assert allowed.returncode == 0, allowed.stdout + allowed.stderr
+    _load("snapshots").rollback(manifests[0])
+    assert overview.read_bytes() == original
+
+
 def test_window_done_rejects_existing_page_edited_before_check_write(tmp_path):
     """写后再补 check-write/snapshot 不得洗白；恢复基线后按正确顺序可通过。"""
     db = _prep_source(tmp_path)
@@ -138,23 +180,27 @@ def test_window_done_rejects_existing_page_edited_before_check_write(tmp_path):
     assert done.returncode == 0, done.stdout + done.stderr
 
 
-def test_resolve_concept_snapshots_before_merging_existing_page(tmp_path):
+@pytest.mark.parametrize("mention,aliases", [("既有概念", []), ("提示工程", ["--alias", "Prompt Engineering"]),
+                                           ("concept.misc.existing", [])])
+def test_resolve_concept_snapshots_before_merging_existing_page(tmp_path, mention, aliases):
     """resolve-concept 自己会改 frontmatter，不能把快照责任推给它之后的调用方。"""
     _prep_source(tmp_path)
     concept = tmp_path / "wiki" / "domains" / "misc" / "concepts" / "既有概念.md"
     concept.parent.mkdir(parents=True, exist_ok=True)
     original = (
         "---\ntype: concept\ncanonical_id: concept.misc.existing\ncanonical_name: 既有概念\n"
-        "aliases: []\nscope: domain\ndomain: misc\nsource_refs: []\n"
+        "aliases: [Prompt Engineering]\nscope: domain\ndomain: misc\nsource_refs: []\n"
         "page_path: domains/misc/concepts/既有概念.md\nmanaged_by: pipeline\nstatus: published\n---\n"
         "这是一张已经发布的既有概念页，正文在本轮 merge 之前必须保持可回滚。\n")
     concept.write_text(original, encoding="utf-8")
     assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
     assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
 
-    r = _run(["resolve-concept", "--mention", "既有概念", "--domain", "misc",
+    r = _run(["resolve-concept", "--mention", mention, "--domain", "misc", *aliases,
               "--ref-source", "note", "--ref-sections", "A"], tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
+    assert "[merged] concept.misc.existing" in r.stdout
+    assert not (concept.parent / "提示工程.md").exists()
     assert concept.read_text(encoding="utf-8") != original
     manifests = list((tmp_path / "pipeline-workspace/snapshots/note").rglob("manifest.json"))
     assert len(manifests) == 1
@@ -162,9 +208,46 @@ def test_resolve_concept_snapshots_before_merging_existing_page(tmp_path):
     assert [e["rel_path"] for e in data["entries"]] == [
         "domains/misc/concepts/既有概念.md"]
 
+    windows = tmp_path / "pipeline-workspace/staging/note/windows.jsonl"
+    wid = json.loads(windows.read_text(encoding="utf-8").splitlines()[0])["window_id"]
+    for args in (["show-window", "--source", "note", "--window", wid],
+                 ["window-start", "--source", "note", "--window", wid, "--hash", "fixture"],
+                 ["window-done", "--source", "note", "--window", wid,
+                  "--writes", '["domains/misc/concepts/既有概念.md"]']):
+        done = _run(args, tmp_path)
+        assert done.returncode == 0, done.stdout + done.stderr
+
     snapshots = _load("snapshots")
     snapshots.rollback(manifests[0])
     assert concept.read_text(encoding="utf-8") == original
+
+
+def test_resolve_ambiguity_stops_before_snapshot_or_page_mutation(tmp_path):
+    _prep_source(tmp_path)
+    store = _load("concept_store")
+    vault = tmp_path / "wiki"
+    a = store.create_concept(vault, domain="misc", name="Alpha")
+    b = store.create_concept(vault, domain="misc", name="Beta")
+    before = {p: p.read_bytes() for p in (a, b)}
+    assert _run(["workorder", "--source", "note"], tmp_path).returncode == 0
+    assert _run(["ingest-start", "--source", "note"], tmp_path).returncode == 0
+    r = _run(["resolve-concept", "--mention", "Alpha", "--alias", "Beta", "--domain", "misc",
+              "--ref-source", "note", "--ref-sections", "A"], tmp_path)
+    assert r.returncode != 0 and "ambiguous" in r.stderr
+    assert "Traceback" not in r.stderr
+    assert {p: p.read_bytes() for p in (a, b)} == before
+    assert not list((tmp_path / "pipeline-workspace/snapshots/note").rglob("manifest.json"))
+
+
+def test_resolve_cli_rejects_slug_collision_without_second_page(tmp_path):
+    store = _load("concept_store")
+    vault = tmp_path / "wiki"
+    old = store.create_concept(vault, domain="misc", name="Prompt-Tuning")
+    before = old.read_bytes()
+    r = _run(["resolve-concept", "--mention", "提示微调", "--alias", "Prompt Tuning", "--domain", "misc"], tmp_path)
+    assert r.returncode != 0 and "canonical_id collision" in r.stderr
+    assert "Traceback" not in r.stderr
+    assert old.read_bytes() == before and len(store.scan_concept_pages(vault)) == 1
 
 
 def test_stale_lock_resume_and_recovery_scenario(tmp_path):

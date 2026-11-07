@@ -44,6 +44,7 @@ the zero-LLM `reuse-source` branch in §6; target merge pages/source_refs must a
   dimension already carry this source_ref, while explicit zero-mapping targets must not.
   This branch verifies the merge; it never performs it. Existing v1 mappings and frozen v1 evidence
   need no migration: a v1 run is byte-identical to before.
+- If `pipeline-workspace/staging/<source>/learning-goal.md` exists, read it as this source's learning focus only; never append it to global purpose or invent unsupported content to satisfy it.
 - Read: `wiki/_meta/purpose.md` **first — it is the authority on writing style, structure, depth and
   terminology** (the user's learning goals / teaching preference). The deterministic layer only guards
   order/safety/provenance; **form is purpose-driven, not template-driven.** Then read
@@ -68,7 +69,7 @@ the zero-LLM `reuse-source` branch in §6; target merge pages/source_refs must a
 
 - CLI: `scripts/pipeline.py` (commands per phase).
 - Protocols: `docs/skill-runtime/schema.md` (page types / per-type frontmatter contract; **section titles are
-  no longer mandatory — structure is purpose-driven**), `concept-resolution.md` (resolution + home-domain routing).
+  no longer mandatory — structure is purpose-driven**), `concept-resolution.md` (resolution + application-context routing within workorder scope).
 - Phase references: `references/preflight.md`, `references/arbitrate.md`, `references/content-routing.md`, `references/write-pages.md`, `references/synthesis.md`, `references/finish-lint.md`.
 
 ## 5. Persisted artifacts
@@ -195,6 +196,10 @@ substitutes for the contract file; then resume from the next unfinished window (
 the machine anchor; `next --source <src> --resume-packet` hands you the structured RESUME_PACKET —
 ledger-decided next window + write boundary + digest RESUME + resume-critical excerpt — and fail-closes
 on a stale RESUME instead of emitting a half-true packet); otherwise auto-advance and report progress.
+If the packet says `phase=initialize`, the CLI has verified that no window was read/started and writable
+pages still match the workorder snapshot. Read `chapters.json` and `references/content-routing.md`,
+create the initial digest with the routing table and an honest `## RESUME`, then begin the first window.
+This does not authorize reconstructing a lost digest after reading or writing has begun.
 
 ## 9. Acceptance criteria
 

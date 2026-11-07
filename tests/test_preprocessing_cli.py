@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PIPELINE = ROOT / "scripts" / "pipeline.py"
@@ -27,6 +28,141 @@ def test_add_source_then_status(tmp_path):
     assert r1.returncode == 0, r1.stderr
     r2 = _run(["status"], tmp_path)
     assert "note" in r2.stdout and "registered" in r2.stdout
+
+
+def test_relocate_cleanup_failure_still_releases_lock(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
+    import pipeline
+    import shutil
+    from types import SimpleNamespace
+
+    root = tmp_path / "project"
+    root.mkdir()
+    original = tmp_path / "note.md"
+    original.write_text("registered", encoding="utf-8")
+    assert _run(["add-source", "--source", "note", "--domain", "misc", "--fmt", "md",
+                 "--path", str(original)], root).returncode == 0
+    db = root / "pipeline-workspace/state/study-kb.sqlite"
+    before = state_store.list_artifacts(db, "note")
+    target = root / "books/note/input/note.md"
+    unlink = Path.unlink
+
+    def denied(file, *args, **kwargs):
+        if file == target:
+            raise PermissionError("read-only cleanup")
+        return unlink(file, *args, **kwargs)
+
+    monkeypatch.setenv("STUDY_KB_ROOT", str(root))
+    monkeypatch.setattr(shutil, "copystat", lambda src, dst: Path(dst).write_bytes(b"bad copy"))
+    monkeypatch.setattr(Path, "unlink", denied)
+    with pytest.raises((SystemExit, PermissionError)):
+        pipeline.cmd_relocate_source(SimpleNamespace(source="note", path=None, apply=True))
+    with state_store.connect(db) as con:
+        assert con.execute("SELECT COUNT(*) FROM source_locks").fetchone()[0] == 0
+    assert original.read_text(encoding="utf-8") == "registered"
+    assert state_store.list_artifacts(db, "note") == before
+
+
+def test_relocate_source_preserves_published_state_and_content(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    original = tmp_path / "原始笔记.md"
+    original.write_text("# A\n\nunchanged evidence\n", encoding="utf-8")
+    content = original.read_bytes()
+    assert _run(["add-source", "--source", "note", "--domain", "misc", "--fmt", "md",
+                 "--path", str(original)], root).returncode == 0
+    db = root / "pipeline-workspace/state/study-kb.sqlite"
+    with state_store.connect(db) as con:
+        con.execute("UPDATE sources SET current_stage='lint',current_status='published'")
+    before = dict(state_store.get_source(db, "note"))
+    artifact = state_store.list_artifacts(db, "note")[0]
+    target = root / "books/note/input" / original.name
+    args = ["relocate-source", "--source", "note"]
+    preview = _run(args, root)
+    assert preview.returncode == 0, preview.stderr
+    assert original.read_bytes() == content and not target.parent.exists()
+    result = _run([*args, "--apply"], root)
+    assert result.returncode == 0, result.stderr
+    assert not original.exists() and target.read_bytes() == content
+    assert dict(state_store.get_source(db, "note")) == before
+    assert state_store.list_artifacts(db, "note") == [{**artifact, "path": str(target)}]
+    assert _run([*args, "--apply"], root).returncode == 0
+    assert state_store.list_artifacts(db, "note") == [{**artifact, "path": str(target)}]
+    with state_store.connect(db) as con:
+        assert con.execute("SELECT COUNT(*) FROM source_locks").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("obstacle", ["modified", "destination", "locked"])
+def test_relocate_source_refuses_without_losing_original(tmp_path, obstacle):
+    root = tmp_path / "project"
+    root.mkdir()
+    original = tmp_path / "note.md"
+    original.write_text("registered content", encoding="utf-8")
+    assert _run(["add-source", "--source", "note", "--domain", "misc", "--fmt", "md",
+                 "--path", str(original)], root).returncode == 0
+    db = root / "pipeline-workspace/state/study-kb.sqlite"
+    artifact = state_store.list_artifacts(db, "note")
+    target = root / "books/note/input/note.md"
+    if obstacle == "modified":
+        original.write_text("new unregistered content", encoding="utf-8")
+    elif obstacle == "destination":
+        target.parent.mkdir(parents=True)
+        target.write_text("do not overwrite", encoding="utf-8")
+    else:
+        with state_store.connect(db) as con:
+            con.execute("INSERT INTO source_locks VALUES ('vault','busy',1,'now','now')")
+    before = original.read_bytes()
+    result = _run(["relocate-source", "--source", "note", "--apply"], root)
+    assert result.returncode != 0
+    assert original.read_bytes() == before
+    assert state_store.list_artifacts(db, "note") == artifact
+    if obstacle == "destination":
+        assert target.read_text(encoding="utf-8") == "do not overwrite"
+    else:
+        assert not target.exists()
+
+
+@pytest.mark.parametrize("obstacle", [None, "modified", "locked", "outside"])
+def test_relocate_renamed_source_updates_only_registered_path(tmp_path, obstacle):
+    root = tmp_path / "project"
+    original = root / "books/demo/input/old.md"
+    original.parent.mkdir(parents=True)
+    original.write_text("unchanged source content", encoding="utf-8")
+    assert _run(["add-source", "--source", "note", "--domain", "demo", "--fmt", "md",
+                 "--path", str(original)], root).returncode == 0
+    db = root / "pipeline-workspace/state/study-kb.sqlite"
+    with state_store.connect(db) as con:
+        con.execute("UPDATE sources SET current_stage='lint',current_status='published'")
+    source = dict(state_store.get_source(db, "note"))
+    artifact = state_store.list_artifacts(db, "note")
+    page = root / "wiki/kept.md"
+    page.parent.mkdir(exist_ok=True)
+    page.write_text("knowledge stays unchanged", encoding="utf-8")
+    target = original.with_name("renamed.md") if obstacle != "outside" else tmp_path / "renamed.md"
+    original.rename(target)
+    if obstacle == "modified":
+        target.write_text("different book", encoding="utf-8")
+    if obstacle == "locked":
+        with state_store.connect(db) as con:
+            con.execute("INSERT INTO source_locks VALUES ('vault','busy',1,'now','now')")
+    before = target.read_bytes()
+    args = ["relocate-source", "--source", "note", "--path", str(target)]
+    preview = _run(args, root)
+    assert state_store.list_artifacts(db, "note") == artifact
+    result = _run([*args, "--apply"], root)
+    if obstacle:
+        assert result.returncode != 0
+        assert state_store.list_artifacts(db, "note") == artifact
+    else:
+        assert preview.returncode == 0, preview.stderr
+        assert result.returncode == 0, result.stderr
+        assert state_store.list_artifacts(db, "note") == [{**artifact[0], "path": str(target)}]
+        assert _run([*args, "--apply"], root).returncode == 0
+        with state_store.connect(db) as con:
+            assert con.execute("SELECT COUNT(*) FROM source_locks").fetchone()[0] == 0
+    assert not original.exists() and target.read_bytes() == before
+    assert dict(state_store.get_source(db, "note")) == source
+    assert page.read_text(encoding="utf-8") == "knowledge stays unchanged"
 
 
 def test_preprocess_chain_state_artifacts_and_l3_fields(tmp_path):

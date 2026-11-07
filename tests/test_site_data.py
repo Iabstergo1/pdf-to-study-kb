@@ -147,7 +147,7 @@ def test_quiz_and_proposition_payload_uses_page_rules_results():
     quiz = site_data.build_quiz_items(pages, render_answer)
     propositions = site_data.build_proposition_items(pages)
 
-    assert quiz == [{
+    assert [{key: card[key] for key in ("rel", "title", "stem", "answer_html")} for card in quiz] == [{
         "rel": "a.md",
         "title": "A",
         "stem": "为什么？",
@@ -159,6 +159,20 @@ def test_quiz_and_proposition_payload_uses_page_rules_results():
         "name": "甲",
         "statement": "结论甲。",
     }]
+
+
+def test_unanswered_duplicates_and_unicode_preserve_each_question():
+    import hashlib
+    import unicodedata
+    body = "> [!question] café?\n> > [!success]- Answer\n> > yes\n\n" + "> [!question] cafe\u0301?\n\n" * 2
+    def build(text):
+        return site_data.build_quiz_items([{"rel": "a.md", "title": "A", "body": text}], lambda *args: "yes")
+    cards = build(body)
+    assert len(cards) == 3
+    assert len({c["id"] for c in cards}) == 3
+    assert sum(c.get("unanswered", False) for c in cards) == 2
+    assert cards[0]["id"] == hashlib.sha256("a.md\ncafé?".encode()).hexdigest()[:32]
+    assert [c["id"] for c in cards] == [c["id"] for c in build(unicodedata.normalize("NFC", body))]
 
 
 def test_filter_options_use_navigation_domain_model():

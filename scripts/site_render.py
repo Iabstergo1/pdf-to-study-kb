@@ -19,6 +19,7 @@ import re
 import sys
 from html import escape as _html_escape
 from pathlib import Path
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -26,6 +27,7 @@ import page_rules
 
 try:
     from markdown_it import MarkdownIt
+    from markdown_it.rules_inline.state_inline import Delimiter
 except ImportError:  # pragma: no cover - exercised only when the dependency is missing
     MarkdownIt = None
 
@@ -37,10 +39,43 @@ _MATH_BLOCK = re.compile(r"\$\$(.+?)\$\$", re.DOTALL)
 _MATH_INLINE = re.compile(r"(?<!\$)\$(?!\s)(.+?)(?<!\$)\$(?!\d)", re.DOTALL)
 _HTML_ENTITY = re.compile(r"&(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);")
 
+def _mark_inline(state, silent):
+    if silent or state.src[state.pos:state.pos + 2] != "==":
+        return False
+    scanned = state.scanDelims(state.pos, True)
+    token = state.push("text", "", 0)
+    token.content = "=" * scanned.length
+    if scanned.length == 2:
+        state.delimiters.append(Delimiter(
+            marker=ord("="), length=0, token=len(state.tokens) - 1,
+            end=-1, open=scanned.can_open, close=scanned.can_close,
+        ))
+    state.pos += scanned.length
+    return True
+
+
+def _mark_pairs(state):
+    # Inline delimiters keep escapes, code spans and nested emphasis under the
+    # Markdown parser's control. Protected math never enters this rule.
+    groups = [state.delimiters] + [meta["delimiters"] for meta in state.tokens_meta
+                                   if meta and "delimiters" in meta]
+    for delimiters in groups:
+        for opening in delimiters:
+            if opening.marker != ord("=") or opening.end == -1:
+                continue
+            closing = delimiters[opening.end]
+            for delimiter, nesting in ((opening, 1), (closing, -1)):
+                token = state.tokens[delimiter.token]
+                token.type = "mark_open" if nesting == 1 else "mark_close"
+                token.tag, token.nesting, token.markup, token.content = "mark", nesting, "==", ""
+
+
 _MD = None
 if MarkdownIt is not None:
     _MD = MarkdownIt("commonmark")
     _MD.enable("table")
+    _MD.inline.ruler.before("emphasis", "mark", _mark_inline)
+    _MD.inline.ruler2.before("emphasis", "mark", _mark_pairs)
 
 
 def _resolve_target(target: str, page_set: set[str]) -> str | None:
@@ -85,7 +120,9 @@ def _replace_wikilinks(text: str, page_set: set[str]) -> str:
         else:
             if not alias:
                 alias = Path(resolved).stem
-            out.append(f"[{alias}](#/{resolved})")
+            anchor = target.split("#", 1)[1] if "#" in target else ""
+            suffix = "?heading=" + quote(anchor, safe="") if anchor else ""
+            out.append(f"[{alias}](#/{quote(resolved, safe='/')}{suffix})")
         cursor = match.end()
     out.append(text[cursor:])
     return "".join(out)

@@ -1700,6 +1700,11 @@ def _locked_run(*, workspace: Path, source: str, request: dict, request_sha: str
                     "dry_run": False, "warnings": []}
     if not apply:
         if phase == "prepared":
+            if abort:
+                return {"phase": "prepared", "operation_id": op.name,
+                        "pages": [p["path"] for p in authorization["pages"]],
+                        "message": "prepared operation can be aborted; live vault stays unchanged",
+                        "dry_run": True, "warnings": []}
             _assert_not_expired(authorization["valid_until"])
             try:
                 _validate_candidates(op, authorization)
@@ -1802,9 +1807,21 @@ def run(*, workspace: Path, source: str, request_path: Path, apply: bool = False
         raise LegacyRevisionError("--abort and --recover are mutually exclusive")
     if recover not in {None, "forward", "rollback"}:
         raise LegacyRevisionError("--recover must be forward or rollback")
-    if (abort or recover or expect_live_manifest) and not apply:
-        raise LegacyRevisionError("--abort/--recover/--expect-live-manifest require --apply")
     request, _request_raw, request_sha = _validate_request(Path(request_path), source)
+    if (abort or recover or expect_live_manifest) and not apply:
+        expected = _expected_live_manifest(expect_live_manifest)
+        result = _locked_run(
+            workspace=Path(workspace).resolve(), source=source, request=request,
+            request_sha=request_sha, request_path=Path(request_path), apply=False,
+            abort=abort, recover=None, expect_live_manifest=None,
+            lock_ttl_seconds=lock_ttl_seconds)
+        if abort and result["phase"] != "prepared":
+            raise LegacyRevisionError("--abort preview requires a prepared operation")
+        if recover and result["phase"] not in {"committing", "recovery_requested", "rollback_requested"}:
+            raise LegacyRevisionError("--recover preview requires an interrupted commit")
+        result["message"] += (f"; requested={'abort' if abort else recover or 'finalize'}"
+                              f"; expected_live={json.dumps(expected, ensure_ascii=False)}")
+        return result
     return _locked_run(
         workspace=Path(workspace).resolve(), source=source, request=request,
         request_sha=request_sha, request_path=Path(request_path), apply=apply,
