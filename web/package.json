@@ -1,0 +1,20 @@
+{
+  "name": "study-kb-web",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=22.19.0"},
+  "workspaces": ["server", "client"],
+  "overrides": {
+    "@earendil-works/chord": "1.0.3", "@earendil-works/pi-agent-core": "1.0.3",
+    "@earendil-works/pi-codemode": "1.0.3", "@earendil-works/pi-mcp": "1.0.3",
+    "@earendil-works/pi-telemetry": "1.0.3", "@earendil-works/pi-tui": "1.0.3"
+  },
+  "scripts": {
+    "build": "npm run build --workspace client",
+    "start": "node server/src/index.ts",
+    "dev": "npm run build && npm start",
+    "test": "vitest run",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {"typescript": "~5.9.3", "@types/node": "^22.18.0", "vitest": "^3.2.4"}
+}
