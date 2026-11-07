@@ -6,6 +6,10 @@
 
 ---
 
+网页日常使用见[中文指南](guide/zh/quick-start.md) / [English guide](guide/en/quick-start.md)。下文保留终端与对话式技能的进阶操作说明。
+
+网页数据由 `export-site --format json [--out DIR] [--with-images]` 导出，默认位于 `pipeline-workspace/exports/site-data/`。省略 `--format` 时仍生成原来的离线 HTML。`arbitration-status --json` 提供可供程序读取的待处理页和原图路径；`ingest-stats --json` 的 `source.path` 返回登记的原文件路径，供重启后继续预处理。
+
 ## 1. 项目是做什么的
 
 这是一个**对话式 agent 驱动的知识库编译器**。你把 **PDF / DOCX / PPTX / Markdown** 文档放进项目，
@@ -279,6 +283,10 @@ New-Item -ItemType Directory -Force -Path "books\game-theory\input" | Out-Null
 Copy-Item "C:\downloads\博弈论.pdf" "books\game-theory\input\博弈论.pdf"
 ```
 
+已有来源若仍登记在桌面或其他目录，可用 `python scripts/pipeline.py relocate-source --source <source_id>` 预览，再加 `--apply` 移到 `books/<source_id>/input/`。命令同步原文件登记路径，保留已发布状态和知识页，不需要重新入库；不覆盖同名目标文件。
+
+在 `books/` 内手动改名后，用 `python scripts/pipeline.py relocate-source --source <source_id> --path "新文件路径"` 预览，再加 `--apply` 更新登记。新文件内容必须与原登记一致；这时只修改路径记录，不移动文件或改写知识页。
+
 ### 第 3 步：一句话入库（ingest）
 
 - **目的**：跑完整端到端流程并发布。
@@ -429,7 +437,7 @@ python scripts/pipeline.py export-site --with-images   # 输出目录形态，�
 ### 5.3 底层 CLI 操作（高级排障 / 手动重跑）
 
 > 所有 skill 背后都是 `python scripts/pipeline.py <command>`。下面按生命周期分组，标注**必填/可选参数**。
-> 共 **55 个**子命令（完整实现映射见开发文档 §3；含 `adopt-vault` 既有库基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用、`reseal-source` v1→v2 证据重封、`vault-lint` 全库渲染安全健康门禁、`lint --source kb-save --session <run_id>` 会话发布路径、`rebuild-source-images` 难页原图索引、`export-anki` 自测题导出、`export-site` 静态站点导出与 `retract-source` 证据先行撤库）。
+> 共 **60 个**子命令（完整实现映射见开发文档 §3；含 `adopt-vault` 既有库基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用、`reseal-source` v1→v2 证据重封、`vault-lint` 全库渲染安全健康门禁、`lint --source kb-save --session <run_id>` 会话发布路径、`rebuild-source-images` 难页原图索引、`export-anki` 自测题导出、`export-site` 静态站点导出与 `retract-source` 证据先行撤库）。
 
 **状态与维护：**
 
@@ -459,6 +467,7 @@ python scripts/pipeline.py export-site --with-images   # 输出目录形态，�
 | 命令 | 作用 | 必填 | 可选 |
 |------|------|------|------|
 | `add-source` | 注册来源 | `--source --domain --path --fmt {pdf,md,docx,pptx}` | — |
+| `relocate-source` | 归档原文件或修正改名后的登记路径，默认预览 | `--source` | `--path`、`--apply` |
 | `profile` | 逐页 profile + needs_vision | `--source` | — |
 | `source-convert` | 转 Markdown + 块 + 难页图 + 章节 | `--source` | `--backend {auto,pymupdf,mineru}` `--mineru-policy {conservative,aggressive}` `--force` |
 | `source-audit` | PDF 双审 → reconciliation/evidence/queue | `--source` | `--strict` |
@@ -615,6 +624,24 @@ python scripts/pipeline.py export-site --with-images   # 输出目录形态，�
 写得不用心/用心程度不一样，而是**协议本身就要求"宁缺毋滥"**——大多数页什么装置都不用才是正常状态，只有
 内容确实需要时才会出现某种装置，全部由当次生成时的模型判断力决定。
 
+### 5.7 本地网页应用
+
+网页把模型配置、上传、预处理、AI 入库、检查报告和阅读连在一起。预处理和发布检查仍调用零 LLM 的 Python CLI；只有你启动看图测试、分歧仲裁或 AI 入库时才调用模型。
+
+```powershell
+cd web
+npm ci
+npm run dev
+```
+
+首次运行后可用 `npm start`；更新代码后先 `npm run build`，再重启服务。浏览器会打开带连接令牌的本机地址。详细步骤见[网页快速开始](guide/zh/quick-start.md)。
+
+- 模型须通过普通字体随机数字图的三轮实际读图测试，才可用于入库。ChatGPT 订阅、API 密钥、自定义接口分别配置。
+- 同时只跑一个任务。额度不足时保留进度并暂停；恢复后手动继续。服务重启同样通过 CLI 恢复包定位未完成窗口。
+- 删除来源、重置状态等操作仍需先预览，再输入目标名确认。不会自动安装 Python 依赖或 MinerU。
+- 任务记录在 `pipeline-workspace/web-jobs-node/`，模型会话在 `pipeline-workspace/web-sessions/`。凭据保存在本机用户配置目录，不进入知识库。
+- 阅读器支持搜索、筛选、图谱、自测、命题、原文页和 Obsidian 链接。发布不等于内容已通过独立验收。
+
 ---
 
 ## 6. 处理真实文档（Windows PowerShell + 含空格路径）
@@ -661,7 +688,7 @@ python scripts/pipeline.py source-convert --source micro-econ
 | `wiki/knowledge-graph.generated.html` | 力导向交互知识图谱（浏览器打开） | 否 | 点击节点跳 `obsidian://` 打开对应 Obsidian 笔记 |
 | `wiki/quiz-index.generated.md` | 全库自测题索引（按领域分组，只列题干+回链，不泄露答案） | **否**（收尾重建，手改会被覆盖） | 复习入口：抽几题自答 → 点回链到原页展开折叠答案核对 |
 | `wiki/propositions.generated.md` | 命题总表：全库承重结论清单（`**命题（名）**：…` 自动汇总，结论句+回链） | **否**（收尾重建，手改会被覆盖） | "这个库断言了哪些事"的资产清单；做研究时可检索引用 |
-| `wiki/anki-export.generated.tsv` | Anki 自测题导出（题干+success 后代答案+回链，`#html:true`，domain/source 进 tags；回链用 `obsidian://open?vault=<库名>&file=<库内相对路径>`） | **否**（收尾重建，手改会被覆盖） | 导入 Anki 后排程/判分/错题本交给 Anki，本项目不调度 |
+| `wiki/anki-export.generated.tsv` | Anki 自测题导出（题干+success 后代答案+回链，`#html:true`，domain/source 进 tags；回链用 `obsidian://open?vault=<库名>&file=<库内相对路径>`） | **否**（收尾重建，手改会被覆盖） | Anki 独立排程；网页也可用本机 FSRS 复习，两端记录不自动同步 |
 | `wiki/Review-Queue/*.md` | 未过门禁 / 待人工决策项 | 你处置（用 kb-review） | 修复后重跑 lint |
 | `wiki/_meta/purpose.md` | **你手写**的学习目标 | **是**（唯一你维护的输入文件） | ingest 读取 |
 | `wiki/log.md` | 操作日志（append-only） | 否 | 回溯 |
@@ -798,8 +825,24 @@ python -m pytest tests -q --basetemp=$bt                                  # 全�
 
 # ── 11. 在 Obsidian 阅读 ──
 #   Obsidian → Open folder as vault → 选项目里的 wiki/ 目录 → 从 overview.md 读起
+
+# ── 12. 本地网页（只绑 127.0.0.1；模型调用由你启动） ──
+#   cd web
+#   npm ci
+#   npm run dev
 ```
 
 ---
 
 > 更深的实现细节（模块职责、数据契约、命令实现映射、测试分层）见配套的[**开发实现说明**](developer-guide.md)。
+
+## 网页学习记录命令
+
+网页学习与复习的使用说明见 [阅读与 Obsidian](guide/zh/read-and-obsidian.md)。`reader-info` 只读查询原文、报告与审查记录；`study-read` 读取个人复习/批注及备份；`study-write` 保存评分、撤销、计划设置、阅读位置和个人批注。这些新增个人记录不改写知识正文。JSON 输入可用 `--stdin`，具体动作见对应 `--help`。
+
+| 网页学习命令 | 用途 | 输入 |
+|---|---|---|
+| `reader-info` | 只读原文对照、报告关联、内容审查历史及安全 Markdown 展示 | `--action`、`--payload` 或 `--stdin` |
+| `content-review --action begin/read/register/status/checks/close/accept` | 审查读取时记录版本，结构化登记报告与问题，复检旧问题并由用户确认整批验收；不改正文。 |
+| `study-read` | 读取个人计划、自测题、批注、历史及 JSON 备份 | `--action`、`--payload` 或 `--stdin` |
+| `study-write` | 保存复习评分/撤销、阅读进度、批注、计划设置及预览/应用备份导入 | `--action`、`--payload` 或 `--stdin` |

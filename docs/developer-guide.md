@@ -1,9 +1,13 @@
 # PDF to Study KB — 开发实现说明（Developer Implementation Guide）
 
+网页应用位于 `web/`：Fastify/Zod 服务调用 Python CLI，React/Vite/Tailwind 提供界面，pi 1.0.3 适配代码集中在服务端 `llm/`、`ingest/` 与 `skills/`。`npm ci` 使用锁定的 pi 子包版本；`npm test` 运行服务、Skill 工作流与隔离入库测试，`npm run check` 检查 TypeScript，`npm run build` 构建界面。Python 业务规则没有搬进 Node。维护表单来自 CLI 的只读 `--describe-commands`；新增命令须在服务端显式分类。
+
+`export-site --format json [--out DIR] [--with-images]` 调用 `site_exporter.write_site_data`，与 HTML 导出共用 `site_layout.build_content` 的正文和导航数据。JSON 默认目录为 `pipeline-workspace/exports/site-data/`，含 `site.json`、逐页 JSON、图谱、自测、命题和图谱 HTML。`arbitration-status --json` 返回候选数、决策数、待处理数/页码与 `needs_human` 图片信息。`ingest-stats --json` 的 `source.path` 是已有 raw_source artifact 的路径，用于恢复网页预处理表单；`windows.planned` 是已生成的窗口数（产物缺失时为 null），`windows.total` 保留原来的已启动窗口统计。
+
 > 本文面向开发者，描述本仓库的架构、模块职责、数据契约、命令层与测试。
 > 所有结论以**源码为准**。
 > 面向使用者的操作说明见 [用户使用说明](user-guide.md)。
-> 版本锚点：当前工作树（2026-08-02 增量核对）；**55 个 CLI 子命令**（含 `adopt-vault` 基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用、`reseal-source` 证据重封、`rebuild-source-images` 难页原图索引、`export-anki` 自测题导出与 `export-site` 静态站点导出）/ 11 个技能。测试数量以 `pytest --collect-only -q` 为准——本轮两次证明精确计数写进文档当场就腐烂，故不再保留任何快照。
+> 版本锚点：当前工作树（2026-08-02 增量核对）；**60 个 CLI 子命令**（含 `adopt-vault` 基线接管、`revise-adopted` legacy 页受控修订、`reuse-source` 跨 vault 来源复用、`reseal-source` 证据重封、`rebuild-source-images` 难页原图索引、`export-anki` 自测题导出与 `export-site` 静态站点导出）/ 11 个技能。测试数量以 `pytest --collect-only -q` 为准——本轮两次证明精确计数写进文档当场就腐烂，故不再保留任何快照。
 > 2026-07-11 六阶段重构后的新机制（§7 已更新，其余章节以源码为准）：统一 callout 解析器
 > `page_rules.parse_callouts`（唯一语法入口，错误不吞节点）、渲染安全唯一实现 + **vault preflight
 > 事务隔离**（published 旧伤阻断 promote 但不回滚当前批）、`vault-lint` 全库健康门禁、归属≠记账
@@ -30,7 +34,7 @@ Obsidian 学习知识库（llm-wiki 模式）。系统由**两层**构成：
 
 | 入口 | 文件 | 说明 |
 |------|------|------|
-| 唯一 CLI 入口 | `scripts/pipeline.py` → `main()` | argparse 分发 **55 个**子命令（见 §3；含 `adopt-vault` / `revise-adopted` / `reuse-source` / `reseal-source` 四条确定性旁路/维护路径）。 |
+| 唯一 CLI 入口 | `scripts/pipeline.py` → `main()` | argparse 分发 **60 个**子命令（见 §3；含 `adopt-vault` / `revise-adopted` / `reuse-source` / `reseal-source` 四条确定性旁路/维护路径）。 |
 | LLM 编排入口 | `.claude/skills/ingest/SKILL.md`（+ `references/*`） | 端到端入库 skill；常规 ingest 是唯一 LLM 写库步骤，legacy-vault 接管分支为零 LLM。 |
 | 无人值守续跑 | `scripts/resume-ingest.ps1` | OS 调度触发的有界续跑脚本（PowerShell）。 |
 | 可选后端安装 | `scripts/install_mineru.py` → `main()` | 按机型自动安装 MinerU + 匹配 CUDA torch。 |
@@ -131,7 +135,7 @@ kb-postmortem：先存旧 backlog 快照 → ingest-stats → skill-mine 重扫 
 
 ### 1.6 产物生成流程（LLM 写库）
 
-`ingest` skill 在同一会话内：读 `chapters.json` 建全书理解 → **按章判断内容路由**（`ingest/references/
+`ingest` skill 按摘要连续执行（网页每窗 U6 → U7 → 恢复校验后交接新 Pi 会话）：读 `chapters.json` 建全书理解 → **按章判断内容路由**（`ingest/references/
 content-routing.md` 定义的 5 分类：理论型/方法型/案例型/参考型/观点型；纯 LLM 判断、零 CLI 参与，写进
 `staging/<src>/digest.md` 的一张「路由表」；实际写法偏离路由标签时允许直接按内容写，但须在 digest 追加
 `[routing-deviation] chapter=<ch> 推荐=<原类型> 实际=<实际写法> 原因=<一句话>`，这些偏离标记是后续
@@ -207,7 +211,7 @@ pdf-to-study-kb/
 ├── .gitattributes
 │
 ├── scripts/                     # ⭐ 全部业务逻辑（零 LLM）
-│   ├── pipeline.py              # 唯一 CLI 入口（55 子命令）
+│   ├── pipeline.py              # 唯一 CLI 入口（60 子命令）
 │   ├── state_store.py           # 状态机 SQLite（8 张表：sources/source_stage_runs/artifacts/
 │   │                            #   work_orders/source_locks/review_proposals/ingest_progress/
 │   │                            #   window_reads）
@@ -322,6 +326,7 @@ pdf-to-study-kb/
 | 操作 | 命令 | 实现函数 | 输入 | 输出/产物 | 失败处理 | 测试 | 实现状态 |
 |---|---|---|---|---|---|---|---|
 | 注册来源 | `add-source --source --domain --path --fmt {pdf,md,docx,pptx}` | `cmd_add_source` → `state_store.register_source` + `record_artifact` | 原始文件 | `sources` 行 + `raw_source` artifact | — | `test_preprocessing_cli.py` | 准确 |
+| 原文件归档/路径修正 | `relocate-source --source [--path] [--apply]` | `cmd_relocate_source` | 已登记原文件；或 `books/` 内内容一致的新路径 | 更新原 raw_source 行的路径，内容与状态不变 | 默认预览，apply 持有 vault 锁；指定 `--path` 仅更新登记，旧路径可以缺失；省略时复制到 `books/<source_id>/input/`、验证更新后才删除旧文件，目标存在则拒绝 | `test_preprocessing_cli.py` | 准确 |
 | 逐页 profile | `profile --source` | `cmd_profile` → `source_profile.profile_source` | raw | `staging/<src>/pages.jsonl` | 整本扫描件打 WARN（不阻断 profile） | `test_preprocessing_cli.py` | 准确 |
 | 转 Markdown + 块 | `source-convert --source [--backend auto\|pymupdf\|mineru] [--mineru-policy conservative\|aggressive] [--force]` | `cmd_source_convert` → `source_convert.convert` | raw + pages.jsonl | `source.md`+`blocks.jsonl`+`chapters.json`+`parse_report.json`+`assets/` | 扫描件走 pymupdf 未 `--force` → fail-closed；MinerU 失败落最小 report 后抛 | `test_source_convert.py`、`test_conversion_backend_cli.py` | 已实现（含 `--force`） |
 | PDF 双审 | `source-audit --source [--strict]` | `cmd_source_audit` → `source_audit.audit` | source.md/blocks + raw | `reconciliation.json`+`evidence.json`+`arbitration/queue.json` | strict + MinerU 不可用 → `DualAuditUnavailable` 非零退出 | `test_source_audit.py` | 准确 |
@@ -381,7 +386,7 @@ pdf-to-study-kb/
 |---|---|---|---|
 | `ingest-stats --source [--json]` | `cmd_ingest_stats` → `state_store.source_stats` + vault 归属扫描 | 只读代理指标：`pages_estimate` 仍是窗口账本估算，**不得当成交付总页数**；`page_inventory` 才是精确交付清单，它合并当前账本、来源台账与 vault 中 `source_refs` 指向本源的 published/proposed 页，reopen 后不会漏掉本轮未改的旧页。另含窗口成败/阶段重跑/`lint_failures`/`proposals_by_kind`。窗口耗时是**最后一次尝试**；token/费用拿不到不伪造 | `test_ops_metrics_cli.py` |
 | `sync-overview-sources [--apply]` | `cmd_sync_overview_sources` → `wiki_gate.overview_unlinked_sources` + `_overview_sources_block` | `overview-source-unlinked` 门禁的**补救通道**（门禁必须配正当修复路径，否则犯核心约束⑦）。**默认 dry-run**；`--apply` 只重写 `<!-- sources-index -->` 标记块内部，块外正文一字不动，块缺失则追加到文末供人折进正文。幂等（内容不变 byte no-op）。之所以需要它：`overview.md` 的写入通道极窄——`revise-adopted` 的 `_safe_rel` 显式拒它、`kb-save` 是 new-page-only，**只有 ingest 的 `write_scope` 含它**，于是 ingest 之后没有维护手段 | `test_overview_nav.py` |
-| `review-coverage` | `cmd_review_coverage` → `pipeline.review_content_pages` + `wiki/Review-Queue/content-review-ledger.yaml` | **可选的运营辅助，不是流水线阶段**：只读统计内容页的人工审查覆盖率与最新一条 entry 仍为 `findings-open` 的页。未登记的页只按域列出、**不判失败**（它不是门禁）；仅台账条目指向不存在的页或报告时非零退出。内容页口径 = 排除顶层 `.obsidian/Review-Queue/_meta/assets/sources/concepts/graph` 与 `log.md`、文件名含 `generated` 的页 | `test_review_coverage.py` |
+| `review-coverage` | `cmd_review_coverage` → `pipeline.review_content_pages` + `reader_data._ledger`（历史 YAML 与 SQLite 审查批次） | **可选的运营辅助，不是流水线阶段**：只读统计内容页的历史审查登记覆盖率与最新一条 entry 仍为 `findings-open` 的页。未登记的页只按域列出、**不判失败**（它不是门禁）；仅台账条目指向不存在的页或报告时非零退出。内容页口径 = 排除顶层 `.obsidian/Review-Queue/_meta/assets/sources/concepts/graph` 与 `log.md`、文件名含 `generated` 的页 | `test_review_coverage.py` |
 | `proposals-resolve --id/--signature [--source] [--all-matching] [--apply]` | `cmd_proposals_resolve` → `state_store.resolve_review_proposals` | 失败信号退场：`--id`（可重复）精确选行，或 `--signature` 按 kind 批量（批量落库须显式 `--all-matching`，防误伤同类未修复的行）；只把 `status='open'` 的行改成 `'resolved'`；`--apply` 成功后自动重跑一次 `_refresh_skill_backlog` 让已修复簇立即退场 | `test_ops_metrics_cli.py` |
 | `reset-source --source --to {registered,profiled,converted,windowed,workorder_ready} [--apply]` | `cmd_reset_source` → `state_store.reset_source` | forward-only 状态机的确定性回退出口：只删 `source_stage_runs` 中回退目标之后阶段的行（这是 `should_run_stage` 的缓存来源，不删则同 `input_hash` 永远 `[skip]`）+ 插一条 `stage='reset'` 审计行；**不动** `ingest_progress`/`artifacts`/`work_orders`/`review_proposals`/staging 文件；拒绝 `running` 状态或持锁的 source；回退目标限定在预处理段（`RESETTABLE_TARGETS`），ingest 段请用既有的 `reopen` | `test_doctor_cli.py` |
 | `window-done ... --writes-file <path.json>` | `cmd_window_done`（新增分支） | 从 UTF-8 文件读 JSON 数组写入 `write_set_json`，绕开 Windows `conda run` 吞双引号导致 `--writes '[...]'` 变成非法 JSON 的老坑；与 `--writes` 显式互斥（同给报错，不静默优先） | `test_doctor_cli.py` |
@@ -1198,3 +1203,10 @@ B-2 增加 `site_media.py`）：把 published 正文渲染成
 
 *（本文档以源码为准描述当前实现；2026-07-10 对照 `main` 分支 `8cd4db0` 全量核对，§1-§8 每处结论均已
 逐条核实，不再有未核对的历史快照残留。）*
+
+| 网页学习命令 | 用途 | 输入 |
+|---|---|---|
+| `reader-info` | 只读原文对照、报告关联、内容审查历史及安全 Markdown 展示 | `--action`、`--payload` 或 `--stdin` |
+| `content-review --action begin/read/register/status/checks/close/accept` | 审查读取时记录版本，结构化登记报告与问题，复检旧问题并由用户确认整批验收；不改正文。 |
+| `study-read` | 读取个人计划、自测题、批注、历史及 JSON 备份 | `--action`、`--payload` 或 `--stdin` |
+| `study-write` | 保存复习评分/撤销、阅读进度、批注、计划设置及预览/应用备份导入 | `--action`、`--payload` 或 `--stdin` |

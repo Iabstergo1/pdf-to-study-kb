@@ -1,5 +1,15 @@
 # 📚 PDF → Study KB
 
+本机网页入口：配置模型、上传资料、查看入库进度，并直接阅读知识库。首次使用见[中文快速开始](docs/guide/zh/quick-start.md) / [English quick start](docs/guide/en/quick-start.md)。需要 Node.js ≥22.19 和已有的 `study-kb` Python 环境。
+
+```powershell
+cd web
+npm ci
+npm run dev
+```
+
+后续 `npm start` 启动；代码更新后先 `npm run build`，再重启服务。网页与 Claude Code / Codex 共用 `pipeline.py` 和 `wiki/`，不要同时启动两次入库。ChatGPT 订阅和 API 接入的实际验证记录见[模型与额度](docs/guide/zh/models-and-quota.md)。
+
 > 把 **PDF / DOCX / PPTX / Markdown** 多来源文档，用**对话**增量编译进一个**不断长大、跨领域、按概念导航的本地 Obsidian 学习知识库**。
 
 <p align="center">
@@ -251,7 +261,7 @@ pdf-to-study-kb/
 ├── README.md                 # 本文件
 ├── requirements.txt          # 基础依赖 PyMuPDF + PyYAML + markdown-it-py + pytest（生产格式另需 MinerU，见末尾可选段）
 ├── scripts/
-│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（55 子命令，全部业务逻辑在此）
+│   ├── pipeline.py           # ⭐ 唯一 CLI 入口（60 子命令，全部业务逻辑在此）
 │   ├── state_store.py / locks.py                # 业务 SQLite 状态机 / 单-ingest 并发锁
 │   ├── vault_adoption.py / legacy_revision.py / source_reuse.py
 │   │                                           # 既有 vault 接管 / adopted 页受控修订 / 跨库来源复用
@@ -300,7 +310,7 @@ pdf-to-study-kb/
 
 所有 skill 背后调用的都是 `python scripts/pipeline.py <command>`（零 LLM、可独立运行，**全部业务逻辑与安全守卫都在这里**）。日常对话无需手动输入；该接口面向**精细控制、问题排查、手动重跑某一阶段、无人值守脚本化**等高级场景。
 
-命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 55 个子命令（以 `python scripts/pipeline.py --help` 为准）：
+命令按生命周期分五组：**状态与维护**（看清进度、崩溃自救）、**预处理**（把"读取与切窗"做成确定性可重跑链）、**ingest 会话支撑**（保证写库可断点续跑、不越界、不覆盖人工页）、**收尾与查询**（两阶段发布的门禁与提升）、**skill 自进化**（把反复失败沉淀成有界改进）。共 60 个子命令（以 `python scripts/pipeline.py --help` 为准）：
 
 <details>
 <summary><b>展开：完整 CLI 命令参考</b></summary>
@@ -337,6 +347,7 @@ pdf-to-study-kb/
 | 命令 | 作用 | 输入 → 产出 | 关键参数 |
 |------|------|------|------|
 | `add-source` | 注册来源到状态库 | 原始文件 → `sources` 记录 | `--source --domain --path --fmt {pdf,md,docx,pptx}` |
+| `relocate-source` | 将原文件移入 books，或修正改名后的路径；默认预览 | 同步原文件路径，保留入库状态；指定 `--path` 时不移动文件 | `--source [--path] [--apply]` |
 | `profile` | 逐页 profile + `needs_vision` 判定 | raw → `staging/<src>/pages.jsonl` | `--source` |
 | `source-convert` | 转干净 Markdown + `blocks.jsonl`，难页渲 PNG，切章节图；后端按 L1 **来源类型路由** | raw → `staging/<src>/source.md` + `blocks.jsonl` + `assets/` + `chapters.json` + `parse_report.json` | `--source [--backend auto\|pymupdf\|mineru] [--mineru-policy conservative\|aggressive]` |
 | `source-audit` | **PDF 双审**：MinerU 复核 PyMuPDF → `reconciliation.json`，并产逐页风险 `evidence.json` + hard-risk 仲裁队列 | source.md/blocks → `reconciliation.json` + `evidence.json` + `arbitration/queue.json` | `--source [--strict]` |
@@ -687,3 +698,10 @@ python -m pytest tests --collect-only -q --basetemp=$bt
 | [`docs/developer-guide.md`](docs/developer-guide.md) | **开发实现说明**：面向开发者的架构 / 模块职责 / 命令实现映射 / 数据契约 / 测试分层 |
 | [`docs/skill-runtime/`](docs/skill-runtime/) | skills 的运行时协议（routing / schema / 概念归一 / save-back 准入），skill 按需加载 |
 | [`.claude/skills/`](.claude/skills/) · [`.agents/skills/`](.agents/skills/) | 11 个对话式 skill 的指令文件（Claude 读前者、Codex 读后者，两树协议/语义对等，仅 truth 指针不同） |
+
+| 网页学习命令 | 用途 | 输入 |
+|---|---|---|
+| `reader-info` | 只读原文对照、报告关联、内容审查历史及安全 Markdown 展示 | `--action`、`--payload` 或 `--stdin` |
+| `content-review --action begin/read/register/status/checks/close/accept` | 审查读取时记录版本，结构化登记报告与问题，复检旧问题并由用户确认整批验收；不改正文。 |
+| `study-read` | 读取个人计划、自测题、批注、历史及 JSON 备份 | `--action`、`--payload` 或 `--stdin` |
+| `study-write` | 保存复习评分/撤销、阅读进度、批注、计划设置及预览/应用备份导入 | `--action`、`--payload` 或 `--stdin` |
