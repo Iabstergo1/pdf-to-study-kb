@@ -1,0 +1,15 @@
+{
+  "name": "study-kb-c0-spike",
+  "private": true,
+  "type": "module",
+  "description": "C0 spike: can pi-coding-agent run the ingest skill under restricted tools? (go/no-go for the web app epic)",
+  "engines": { "node": ">=22.19.0" },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.ts\"",
+    "probe": "node scripts/probe-providers.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "1.0.3",
+    "@earendil-works/pi-coding-agent": "1.0.3"
+  }
+}

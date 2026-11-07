@@ -49,3 +49,7 @@ Thumbs.db
 
 # MinerU models moved off C: (2.4GB; re-download via modelscope if deleted)
 .mineru-models/
+
+# Node (web/)
+node_modules/
+web/**/dist/
